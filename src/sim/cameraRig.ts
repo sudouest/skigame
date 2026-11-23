@@ -1,5 +1,5 @@
 import { clamp, damp, lerp, lerpAngle } from '../core/math';
-import type { CameraPose, SkierPose, SurfaceSample } from './contracts';
+import { createSurfaceSample, type CameraPose, type SkierPose, type SurfaceSample } from './contracts';
 import type { TrailWindow } from './trailWindow';
 
 export interface MutableCameraPose {
@@ -41,6 +41,7 @@ export class CameraRig {
   private crestLiftM = 0;
   private crestLookDropM = 0;
   private initialized = false;
+  private readonly camSurfaceScratch: SurfaceSample = createSurfaceSample();
 
   reset(skier: SkierPose, surface: SurfaceSample): void {
     this.initialized = true;
@@ -51,9 +52,12 @@ export class CameraRig {
     const fwdX = -Math.sin(this.chaseHeadingRad);
     const fwdZ = -Math.cos(this.chaseHeadingRad);
 
-    const targetPosX = skier.posX - fwdX * 10.2;
-    const targetPosY = Math.max(skier.posY, surface.groundY) + 3.6;
-    const targetPosZ = skier.posZ - fwdZ * 10.2;
+    const trailDist = 10.2;
+    const slopeRise = computeUphillSlopeRise(surface, trailDist);
+
+    const targetPosX = skier.posX - fwdX * trailDist;
+    const targetPosY = Math.max(skier.posY, surface.groundY) + slopeRise + 3.6;
+    const targetPosZ = skier.posZ - fwdZ * trailDist;
 
     const lookAtX = skier.posX + fwdX * 18.0;
     const lookAtY = skier.posY + tangentYOrDefault(surface) * 18.0 + 0.6;
@@ -132,15 +136,42 @@ export class CameraRig {
     const speedRatio = clamp((skier.speed - 12) / 24, 0, 1);
     const trailDist = lerp(9.4, 11.4, speedRatio);
     const baseHeight = lerp(3.4, 4.0, speedRatio) + this.crestLiftM;
+    const slopeRise = computeUphillSlopeRise(surface, trailDist);
 
     const desiredPosX = skier.posX - fwdX * trailDist;
-    const desiredPosY = Math.max(skier.posY, surface.groundY) + baseHeight;
     const desiredPosZ = skier.posZ - fwdZ * trailDist;
+    const camHintS = Math.max(0, surface.s - trailDist);
+    trailWindow.sampleSurface(
+      desiredPosX,
+      desiredPosZ,
+      surface.segmentId,
+      camHintS,
+      this.camSurfaceScratch,
+    );
+    const slopeAnchorY = Math.max(skier.posY, surface.groundY) + slopeRise + baseHeight;
+    const terrainClearanceY = this.camSurfaceScratch.valid
+      ? this.camSurfaceScratch.groundY + Math.max(2.6, baseHeight * 0.72)
+      : -Infinity;
+    const desiredPosY = Math.max(slopeAnchorY, terrainClearanceY);
 
     const posLambda = 9.0;
     this.currCamera.posX = damp(this.currCamera.posX, desiredPosX, posLambda, dt);
     this.currCamera.posY = damp(this.currCamera.posY, desiredPosY, posLambda * 0.85, dt);
     this.currCamera.posZ = damp(this.currCamera.posZ, desiredPosZ, posLambda, dt);
+
+    trailWindow.sampleSurface(
+      this.currCamera.posX,
+      this.currCamera.posZ,
+      surface.segmentId,
+      camHintS,
+      this.camSurfaceScratch,
+    );
+    if (this.camSurfaceScratch.valid) {
+      const minCamY = this.camSurfaceScratch.groundY + 2.0;
+      if (this.currCamera.posY < minCamY) {
+        this.currCamera.posY = minCamY;
+      }
+    }
 
     // Look ~18m ahead of skier so skier torso never blocks obstacles directly in front
     const lookAheadM = 18.0;
@@ -183,4 +214,12 @@ export class CameraRig {
 
 function tangentYOrDefault(surface: SurfaceSample): number {
   return surface.valid ? surface.tangentY : -0.22;
+}
+
+function computeUphillSlopeRise(surface: SurfaceSample, trailDist: number): number {
+  const horizTangent = surface.valid
+    ? Math.max(0.45, Math.hypot(surface.tangentX, surface.tangentZ))
+    : 0.975;
+  const downhillY = Math.max(0, -tangentYOrDefault(surface));
+  return (downhillY / horizTangent) * trailDist;
 }

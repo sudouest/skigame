@@ -61,16 +61,16 @@ export class SkiTracks {
       indices[ptr++] = r1;
     }
 
-    this.posAttr = new THREE.Float32BufferAttribute(this.positions, 3);
+    this.posAttr = new THREE.BufferAttribute(this.positions, 3);
     this.posAttr.setUsage(THREE.DynamicDrawUsage);
-    this.colAttr = new THREE.Float32BufferAttribute(this.colors, 3);
+    this.colAttr = new THREE.BufferAttribute(this.colors, 3);
     this.colAttr.setUsage(THREE.DynamicDrawUsage);
 
     this.geometry = new THREE.BufferGeometry();
     this.geometry.name = 'SkiTracksGeo';
     this.geometry.setAttribute('position', this.posAttr);
     this.geometry.setAttribute('color', this.colAttr);
-    this.geometry.setIndex(new THREE.Uint16BufferAttribute(indices, 1));
+    this.geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     this.geometry.setDrawRange(0, 0);
 
     const material = new THREE.MeshBasicMaterial({

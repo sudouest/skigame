@@ -48,9 +48,9 @@ export class DebugOverlay3D {
 
     this.linePositions = new Float32Array(MAX_LINE_VERTICES * 3);
     this.lineColors = new Float32Array(MAX_LINE_VERTICES * 3);
-    this.linePosAttr = new THREE.Float32BufferAttribute(this.linePositions, 3);
+    this.linePosAttr = new THREE.BufferAttribute(this.linePositions, 3);
     this.linePosAttr.setUsage(THREE.DynamicDrawUsage);
-    this.lineColAttr = new THREE.Float32BufferAttribute(this.lineColors, 3);
+    this.lineColAttr = new THREE.BufferAttribute(this.lineColors, 3);
     this.lineColAttr.setUsage(THREE.DynamicDrawUsage);
 
     this.lineGeometry = new THREE.BufferGeometry();

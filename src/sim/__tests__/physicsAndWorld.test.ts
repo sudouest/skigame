@@ -487,4 +487,36 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     expect(st.activeWeather.fogDistanceM).toBeGreaterThanOrEqual(65);
     expect(st.activeWeather.blizzardDim).toBeGreaterThan(0.2);
   });
+
+  it('keeps chase camera above terrain with front-facing normals on both sunny-blue and icy-black slopes', () => {
+    const intent = createMutablePlayerIntent();
+    const camSurfOut = createSurfaceSample();
+
+    for (const stageId of ['sunny-blue', 'icy-black'] as const) {
+      const sim = new SkiSimulation({ seed: 1337, startStageId: stageId });
+      for (let tick = 0; tick < 600; tick++) {
+        sim.savePreviousPoses();
+        sim.step(FIXED_DT, intent);
+        const st = sim.getState();
+        const cam = st.currCamera;
+        const sk = st.currSkier;
+        const camSurf = sim.sampleSurface(
+          cam.posX,
+          cam.posZ,
+          st.surfaceSample.segmentId,
+          Math.max(0, st.surfaceSample.s - 10),
+          camSurfOut,
+        );
+        expect(cam.posY - camSurf.groundY).toBeGreaterThanOrEqual(1.9);
+
+        const toCamX = cam.posX - sk.posX;
+        const toCamY = cam.posY - sk.posY;
+        const toCamZ = cam.posZ - sk.posZ;
+        const len = Math.hypot(toCamX, toCamY, toCamZ);
+        expect(len).toBeGreaterThan(1e-3);
+        const dot = (sk.normalX * toCamX + sk.normalY * toCamY + sk.normalZ * toCamZ) / len;
+        expect(dot).toBeGreaterThan(0.1);
+      }
+    }
+  });
 });

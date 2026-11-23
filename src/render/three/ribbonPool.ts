@@ -74,7 +74,7 @@ export class RibbonPool {
   private readonly freeIndices: number[] = [];
   private readonly stageColorCache = new Map<string, ParsedStageColors>();
   private readonly defaultColors: ParsedStageColors;
-  private readonly sharedIndexAttr: THREE.Uint16BufferAttribute;
+  private readonly sharedIndexAttr: THREE.BufferAttribute;
 
   constructor(
     gfx: GraphicsUtils,
@@ -104,16 +104,19 @@ export class RibbonPool {
         indexArray[ptr++] = v10;
       }
     }
-    this.sharedIndexAttr = new THREE.Uint16BufferAttribute(indexArray, 1);
+    this.sharedIndexAttr = new THREE.BufferAttribute(indexArray, 1);
 
     for (let i = 0; i < capacity; i++) {
       const positions = new Float32Array(VERTS_PER_CHUNK * 3);
       const normals = new Float32Array(VERTS_PER_CHUNK * 3);
       const colors = new Float32Array(VERTS_PER_CHUNK * 3);
 
-      const posAttr = new THREE.Float32BufferAttribute(positions, 3);
-      const normAttr = new THREE.Float32BufferAttribute(normals, 3);
-      const colAttr = new THREE.Float32BufferAttribute(colors, 3);
+      const posAttr = new THREE.BufferAttribute(positions, 3);
+      posAttr.setUsage(THREE.DynamicDrawUsage);
+      const normAttr = new THREE.BufferAttribute(normals, 3);
+      normAttr.setUsage(THREE.DynamicDrawUsage);
+      const colAttr = new THREE.BufferAttribute(colors, 3);
+      colAttr.setUsage(THREE.DynamicDrawUsage);
 
       const geometry = new THREE.BufferGeometry();
       geometry.name = `RibbonChunkGeo_${i}`;

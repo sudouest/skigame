@@ -463,6 +463,14 @@ describe('ThreeRenderer, RibbonPool, ChunkStreamer & Floating Origin Rebase', ()
 
     const skiTracks = renderer.scene.getObjectByName('SkiTracksMesh') as THREE.Mesh;
     expect(skiTracks.geometry.drawRange.count).toBe(24); // (3 - 1) * 12 indices
+    const trackPosAttr = skiTracks.geometry.getAttribute('position') as THREE.BufferAttribute;
+    let trackNonZero = false;
+    for (let k = 0; k < simState.entities.skiTracks.count * 4 * 3; k++) {
+      const v = trackPosAttr.array[k]!;
+      expect(Number.isFinite(v)).toBe(true);
+      if (Math.abs(v) > 1e-4) trackNonZero = true;
+    }
+    expect(trackNonZero).toBe(true);
 
     const backpackStd = renderer.scene.getObjectByName('BackpackStackStd') as THREE.InstancedMesh;
     const backpackGold = renderer.scene.getObjectByName('BackpackStackGold') as THREE.InstancedMesh;
@@ -471,10 +479,57 @@ describe('ThreeRenderer, RibbonPool, ChunkStreamer & Floating Origin Rebase', ()
 
     const debugRoot = renderer.scene.getObjectByName('DebugOverlay3DRoot')!;
     expect(debugRoot.visible).toBe(true);
+    const debugLines = renderer.scene.getObjectByName('DebugLinesMesh') as THREE.Line;
+    const debugPosAttr = debugLines.geometry.getAttribute('position') as THREE.BufferAttribute;
+    let debugNonZero = false;
+    for (let k = 0; k < debugLines.geometry.drawRange.count * 3; k++) {
+      const v = debugPosAttr.array[k]!;
+      expect(Number.isFinite(v)).toBe(true);
+      if (Math.abs(v) > 1e-4) debugNonZero = true;
+    }
+    expect(debugNonZero).toBe(true);
 
     // Capture slot positions and upload counts BEFORE WORLD_REBASED
     const slot0 = renderer.chunkStreamer.ribbonPool.getSlot(0)!;
     expect(slot0.inUse).toBe(true);
+    expect(slot0.posAttr.array).toBe(slot0.positions);
+    expect(slot0.normAttr.array).toBe(slot0.normals);
+    expect(slot0.colAttr.array).toBe(slot0.colors);
+
+    const slotBs = slot0.geometry.boundingSphere;
+    expect(slotBs).not.toBeNull();
+    expect(Number.isFinite(slotBs!.radius)).toBe(true);
+    expect(slotBs!.radius).toBeGreaterThan(10);
+
+    const slotPosAttr = slot0.geometry.getAttribute('position') as THREE.BufferAttribute;
+    expect(slotPosAttr.array).toBe(slot0.positions);
+    let ribbonNonZero = false;
+    for (let k = 0; k < slotPosAttr.array.length; k++) {
+      const v = slotPosAttr.array[k]!;
+      expect(Number.isFinite(v)).toBe(true);
+      if (Math.abs(v) > 1e-4) ribbonNonZero = true;
+    }
+    expect(ribbonNonZero).toBe(true);
+
+    const idxArr = slot0.geometry.getIndex()!.array;
+    const vA = new THREE.Vector3();
+    const vB = new THREE.Vector3();
+    const vC = new THREE.Vector3();
+    const e1 = new THREE.Vector3();
+    const e2 = new THREE.Vector3();
+    const triN = new THREE.Vector3();
+    for (let k = 0; k < idxArr.length; k += 3) {
+      const ia = idxArr[k]! * 3;
+      const ib = idxArr[k + 1]! * 3;
+      const ic = idxArr[k + 2]! * 3;
+      vA.set(slotPosAttr.array[ia]!, slotPosAttr.array[ia + 1]!, slotPosAttr.array[ia + 2]!);
+      vB.set(slotPosAttr.array[ib]!, slotPosAttr.array[ib + 1]!, slotPosAttr.array[ib + 2]!);
+      vC.set(slotPosAttr.array[ic]!, slotPosAttr.array[ic + 1]!, slotPosAttr.array[ic + 2]!);
+      e1.subVectors(vB, vA);
+      e2.subVectors(vC, vA);
+      triN.crossVectors(e1, e2);
+      expect(triN.y).toBeGreaterThan(0);
+    }
     const prevPosX = slot0.container.position.x;
     const prevPosY = slot0.container.position.y;
     const prevPosZ = slot0.container.position.z;
