@@ -245,6 +245,7 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
 
     // Zero additional DOM elements created during updates or event bursts!
     expect(doc.createdCount).toBe(createdAtInit);
+    expect(mountEl.findByClass('sg-fork-banner')).toHaveLength(0);
     expect(mountEl.findByClass('sg-hint-pill')[0]!.classList.contains('sg-hidden')).toBe(false);
     expect(mountEl.findByClass('sg-telemetry')[0]!.classList.contains('sg-hidden')).toBe(false);
     expect(mountEl.findByClass('sg-overlay')[0]!.classList.contains('sg-hidden')).toBe(true);

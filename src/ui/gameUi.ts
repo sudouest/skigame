@@ -111,19 +111,7 @@ export class GameUI {
   private readonly debugBtn: HTMLButtonElement;
   private readonly statsBtn: HTMLButtonElement;
 
-  // Top Broadcast Rail (Fork + Single-Slot Ribbon)
-  private readonly forkBannerEl: HTMLDivElement;
-  private readonly forkDistEl: HTMLSpanElement;
-  private readonly forkFillEl: HTMLDivElement;
-  private readonly forkLeftEl: HTMLDivElement;
-  private readonly forkLeftBadgeEl: HTMLSpanElement;
-  private readonly forkLeftGlyphEl: HTMLSpanElement;
-  private readonly forkLeftNameEl: HTMLSpanElement;
-  private readonly forkRightEl: HTMLDivElement;
-  private readonly forkRightBadgeEl: HTMLSpanElement;
-  private readonly forkRightGlyphEl: HTMLSpanElement;
-  private readonly forkRightNameEl: HTMLSpanElement;
-
+  // Top Broadcast Rail (Single-Slot Ribbon)
   private readonly ribbonEl: HTMLDivElement;
   private readonly ribbonPrimaryEl: HTMLSpanElement;
   private readonly ribbonSepEl: HTMLSpanElement;
@@ -195,11 +183,6 @@ export class GameUI {
   private lastStatsActive = false;
   private lastOverlayMode: OverlayMode | '' = '';
   private lastSelectedSkierId = '';
-  private lastForkActive = false;
-  private lastForkDistText = '';
-  private lastForkWidth = '';
-  private lastForkLeftId = '';
-  private lastForkRightId = '';
   private lastWipeoutActive = false;
   private lastWipeoutWidth = '';
   private lastHintVisible = false;
@@ -395,52 +378,6 @@ export class GameUI {
     const topRail = doc.createElement('div');
     topRail.className = 'sg-top-rail';
 
-    this.forkBannerEl = doc.createElement('div');
-    this.forkBannerEl.className = 'sg-fork-banner sg-hidden';
-    const forkRow = doc.createElement('div');
-    forkRow.className = 'sg-fork-row';
-
-    this.forkLeftEl = doc.createElement('div');
-    this.forkLeftEl.className = 'sg-fork-side';
-    const leftArrow = doc.createElement('span');
-    leftArrow.className = 'sg-fork-chevron';
-    leftArrow.textContent = '◀';
-    this.forkLeftBadgeEl = doc.createElement('span');
-    this.forkLeftBadgeEl.className = 'sg-stage-badge';
-    this.forkLeftGlyphEl = doc.createElement('span');
-    this.forkLeftGlyphEl.className = 'sg-stage-glyph';
-    this.forkLeftBadgeEl.appendChild(this.forkLeftGlyphEl);
-    this.forkLeftNameEl = doc.createElement('span');
-    this.forkLeftNameEl.className = 'sg-fork-name';
-    this.forkLeftEl.append(leftArrow, this.forkLeftBadgeEl, this.forkLeftNameEl);
-
-    this.forkDistEl = doc.createElement('span');
-    this.forkDistEl.className = 'sg-fork-dist';
-    this.forkDistEl.textContent = '200m';
-
-    this.forkRightEl = doc.createElement('div');
-    this.forkRightEl.className = 'sg-fork-side sg-fork-side-right';
-    this.forkRightNameEl = doc.createElement('span');
-    this.forkRightNameEl.className = 'sg-fork-name';
-    this.forkRightBadgeEl = doc.createElement('span');
-    this.forkRightBadgeEl.className = 'sg-stage-badge';
-    this.forkRightGlyphEl = doc.createElement('span');
-    this.forkRightGlyphEl.className = 'sg-stage-glyph';
-    this.forkRightBadgeEl.appendChild(this.forkRightGlyphEl);
-    const rightArrow = doc.createElement('span');
-    rightArrow.className = 'sg-fork-chevron';
-    rightArrow.textContent = '▶';
-    this.forkRightEl.append(this.forkRightNameEl, this.forkRightBadgeEl, rightArrow);
-
-    forkRow.append(this.forkLeftEl, this.forkDistEl, this.forkRightEl);
-
-    const forkTrack = doc.createElement('div');
-    forkTrack.className = 'sg-fork-track';
-    this.forkFillEl = doc.createElement('div');
-    this.forkFillEl.className = 'sg-fork-fill';
-    forkTrack.appendChild(this.forkFillEl);
-    this.forkBannerEl.append(forkRow, forkTrack);
-
     this.ribbonEl = doc.createElement('div');
     this.ribbonEl.className = 'sg-broadcast-ribbon sg-hidden';
     this.ribbonEl.dataset.tone = 'delivery';
@@ -462,7 +399,7 @@ export class GameUI {
     ribbonContent.append(this.ribbonPrimaryEl, this.ribbonSepEl, this.ribbonDetailEl, this.ribbonComboEl);
     this.ribbonEl.append(ribbonSlant, ribbonSheen, ribbonContent);
 
-    topRail.append(this.forkBannerEl, this.ribbonEl);
+    topRail.appendChild(this.ribbonEl);
 
     // 3. Wipeout Recovery Banner (centered only during tumble)
     this.wipeoutBannerEl = doc.createElement('div');
@@ -819,51 +756,7 @@ export class GameUI {
       this.modalStatsBtn.dataset.active = val;
     }
 
-    // 5. Slim Upcoming Fork Split-Gate Bar
-    const forkActive = simState.upcomingFork.active;
-    if (forkActive !== this.lastForkActive) {
-      this.lastForkActive = forkActive;
-      this.forkBannerEl.classList.toggle('sg-hidden', !forkActive);
-    }
-    if (forkActive) {
-      const distText = `${Math.ceil(simState.upcomingFork.distanceM)}m`;
-      if (distText !== this.lastForkDistText) {
-        this.lastForkDistText = distText;
-        this.forkDistEl.textContent = distText;
-      }
-      const forkProgress = 1 - computeRatio01(simState.upcomingFork.distanceM, 200);
-      const forkWidth = `${Math.round(forkProgress * 1000) / 10}%`;
-      if (forkWidth !== this.lastForkWidth) {
-        this.lastForkWidth = forkWidth;
-        this.forkFillEl.style.width = forkWidth;
-      }
-      const leftId = simState.upcomingFork.leftStageId ?? 'sunny-blue';
-      if (leftId !== this.lastForkLeftId) {
-        this.lastForkLeftId = leftId;
-        const leftStage = formatStageDisplay(leftId);
-        this.forkLeftEl.dataset.stage = leftStage.id;
-        this.forkLeftBadgeEl.dataset.shape = leftStage.badgeShape;
-        this.forkLeftGlyphEl.style.backgroundColor = leftStage.badgeColor;
-        this.forkLeftNameEl.textContent =
-          leftStage.multiplier > 1
-            ? `${leftStage.name} ${leftStage.multiplierLabel.replace(/x$/i, '×')}`
-            : leftStage.name;
-      }
-      const rightId = simState.upcomingFork.rightStageId ?? 'icy-black';
-      if (rightId !== this.lastForkRightId) {
-        this.lastForkRightId = rightId;
-        const rightStage = formatStageDisplay(rightId);
-        this.forkRightEl.dataset.stage = rightStage.id;
-        this.forkRightBadgeEl.dataset.shape = rightStage.badgeShape;
-        this.forkRightGlyphEl.style.backgroundColor = rightStage.badgeColor;
-        this.forkRightNameEl.textContent =
-          rightStage.multiplier > 1
-            ? `${rightStage.name} ${rightStage.multiplierLabel.replace(/x$/i, '×')}`
-            : rightStage.name;
-      }
-    }
-
-    // 6. Wipeout Tumble Banner
+    // 5. Wipeout Tumble Banner
     const wipeoutActive = simState.skierState === 'wipeout';
     if (wipeoutActive !== this.lastWipeoutActive) {
       this.lastWipeoutActive = wipeoutActive;

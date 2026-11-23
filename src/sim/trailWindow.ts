@@ -448,7 +448,6 @@ export class TrailWindow implements TrailWindowView {
     let leftStageId: string | null = null;
     let rightStageId: string | null = null;
     let endHalfWidth = 0.5 * (params.stage.terrain.halfWidth[0] + params.stage.terrain.halfWidth[1]);
-    let archS = length;
 
     if (params.hasFork) {
       const swapSides = segRng.nextBool(0.5);
@@ -459,7 +458,6 @@ export class TrailWindow implements TrailWindowView {
       const wL = 0.5 * (leftStage.terrain.halfWidth[0] + leftStage.terrain.halfWidth[1]);
       const wR = 0.5 * (rightStage.terrain.halfWidth[0] + rightStage.terrain.halfWidth[1]);
       endHalfWidth = wL + wR;
-      archS = length - segRng.nextRange(155, 195);
     }
 
     const segConfig: TrailSegmentConfig = {
@@ -477,7 +475,6 @@ export class TrailWindow implements TrailWindowView {
       endHalfWidth,
       prevSegmentId: params.prevSegmentId,
       hasFork: params.hasFork,
-      archS,
       leftStageId,
       rightStageId,
       isForkChild: params.isForkChild,

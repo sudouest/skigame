@@ -38,7 +38,6 @@ function createMockSegment(
     nextRightId: null,
     fork: {
       hasFork: slot === 'curr',
-      archS: length - 70,
       obstacleFreeStartS: length - 50,
       leftStageId: 'sunny-blue',
       rightStageId: 'icy-black',
@@ -108,20 +107,38 @@ function createMockSegment(
 function createMockSimState(): ReadonlySimState {
   const currLandmarks: SegmentLandmarkRequirement[] = [
     {
-      id: 'fork_arch_1',
+      id: 'fork_arch_1_left',
       kind: 'forkArch',
       segmentId: 1,
-      chunkIndex: 1,
-      s: 55,
-      x: 0,
-      worldX: 0,
-      worldY: -13.75,
-      worldZ: -55,
+      chunkIndex: 3,
+      s: 140,
+      x: -13,
+      worldX: -13,
+      worldY: -35,
+      worldZ: -140,
       yawRad: 0,
-      clearanceRadius: 4,
+      clearanceRadius: 4.5,
       visual: { kind: 'procedural', preset: 'arch', palette: ['#78350f'], outline: false },
-      leftBadgeStageId: 'sunny-blue',
-      rightBadgeStageId: 'icy-black',
+      badgeStageId: 'sunny-blue',
+      forkSide: 'left',
+      gateHalfWidth: 13,
+    },
+    {
+      id: 'fork_arch_1_right',
+      kind: 'forkArch',
+      segmentId: 1,
+      chunkIndex: 3,
+      s: 140,
+      x: 13,
+      worldX: 13,
+      worldY: -35,
+      worldZ: -140,
+      yawRad: 0,
+      clearanceRadius: 4.5,
+      visual: { kind: 'procedural', preset: 'arch', palette: ['#78350f'], outline: false },
+      badgeStageId: 'icy-black',
+      forkSide: 'right',
+      gateHalfWidth: 13,
     },
     {
       id: 'cabin_1',
@@ -251,12 +268,6 @@ function createMockSimState(): ReadonlySimState {
       windLateral: 10,
       fogDistanceM: 40, // Intentionally < 65m to verify renderer clamps density safely >= 65m!
       blizzardDim: 0.35,
-    },
-    upcomingFork: {
-      active: true,
-      distanceM: 120,
-      leftStageId: 'sunny-blue',
-      rightStageId: 'icy-black',
     },
     trailWindow: { prev: null, curr, nextLeft, nextRight },
     rebase: {
@@ -456,6 +467,18 @@ describe('ThreeRenderer, RibbonPool, ChunkStreamer & Floating Origin Rebase', ()
     expect(dynBbPool.count).toBe(4); // 1 pine_tree + 2 sled_duo children + 1 bear_patrol
     expect(boulderSmallPool.frustumCulled).toBe(false);
     expect(dynBbPool.frustumCulled).toBe(false);
+
+    const forkArches: THREE.Object3D[] = [];
+    renderer.scene.traverse((obj) => {
+      if (obj.name === 'ForkArchLandmark') forkArches.push(obj);
+    });
+    expect(forkArches).toHaveLength(2);
+    expect(
+      forkArches.some((a) => a.getObjectByName('ForkBadgeSquare')?.visible === true),
+    ).toBe(true);
+    expect(
+      forkArches.some((a) => a.getObjectByName('ForkBadgeDiamond')?.visible === true),
+    ).toBe(true);
 
     const shadowsPool = renderer.scene.getObjectByName('ContactShadowsPool') as THREE.InstancedMesh;
     expect(shadowsPool.count).toBe(7); // skier + 3 hazards + 1 creature + 2 presents
@@ -681,12 +704,57 @@ describe('ThreeRenderer, RibbonPool, ChunkStreamer & Floating Origin Rebase', ()
     const { GraphicsUtils } = await import('../graphicsUtils');
 
     // 1. 4 overlapping 360m segments (11 chunks each = 44 chunks <= 48 RibbonPool capacity)
+    const makeForkLandmarks = (
+      segId: number,
+      startZ: number,
+      length: number,
+      chunkLength = 35,
+    ): SegmentLandmarkRequirement[] => {
+      const seamChunk = Math.ceil(length / chunkLength) - 1;
+      return [
+        {
+          id: `fork_arch_${segId}_left`,
+          kind: 'forkArch',
+          segmentId: segId,
+          chunkIndex: seamChunk,
+          s: length,
+          x: -13,
+          worldX: -13,
+          worldY: -length * 0.25,
+          worldZ: startZ - length,
+          yawRad: 0,
+          clearanceRadius: 4.5,
+          visual: { kind: 'procedural', preset: 'arch', palette: ['#78350f'], outline: false },
+          badgeStageId: 'sunny-blue',
+          forkSide: 'left',
+          gateHalfWidth: 13,
+        },
+        {
+          id: `fork_arch_${segId}_right`,
+          kind: 'forkArch',
+          segmentId: segId,
+          chunkIndex: seamChunk,
+          s: length,
+          x: 13,
+          worldX: 13,
+          worldY: -length * 0.25,
+          worldZ: startZ - length,
+          yawRad: 0,
+          clearanceRadius: 4.5,
+          visual: { kind: 'procedural', preset: 'arch', palette: ['#78350f'], outline: false },
+          badgeStageId: 'icy-black',
+          forkSide: 'right',
+          gateHalfWidth: 13,
+        },
+      ];
+    };
+
     const eventBus = new EventBus<SimEvents>();
     const renderer = new ThreeRenderer(null, eventBus, undefined, { headless: true });
-    const prev = createMockSegment(101, 'prev', 'sunny-blue', 360, 360, 35);
-    const curr = createMockSegment(102, 'curr', 'sunny-blue', 0, 360, 35);
-    const nextLeft = createMockSegment(103, 'nextLeft', 'sunny-blue', -360, 360, 35);
-    const nextRight = createMockSegment(104, 'nextRight', 'icy-black', -360, 360, 35);
+    const prev = createMockSegment(101, 'prev', 'sunny-blue', 360, 360, 35, makeForkLandmarks(101, 360, 360));
+    const curr = createMockSegment(102, 'curr', 'sunny-blue', 0, 360, 35, makeForkLandmarks(102, 0, 360));
+    const nextLeft = createMockSegment(103, 'nextLeft', 'sunny-blue', -360, 360, 35, makeForkLandmarks(103, -360, 360));
+    const nextRight = createMockSegment(104, 'nextRight', 'icy-black', -360, 360, 35, makeForkLandmarks(104, -360, 360));
 
     const baseState = createMockSimState();
     const bigForkState: ReadonlySimState = {
@@ -700,6 +768,12 @@ describe('ThreeRenderer, RibbonPool, ChunkStreamer & Floating Origin Rebase', ()
     expect(renderer.chunkStreamer.activeChunkCount).toBe(44);
     expect(renderer.chunkStreamer.queuedChunkCount).toBe(0);
     expect(renderer.chunkStreamer.ribbonPool.activeCount).toBe(44);
+    const attachedArches: THREE.Object3D[] = [];
+    renderer.scene.traverse((obj) => {
+      if (obj.name === 'ForkArchLandmark') attachedArches.push(obj);
+    });
+    expect(attachedArches).toHaveLength(8);
+    expect(renderer.runLeakCheck(0, true).totalLeaks).toBe(0);
     renderer.dispose();
 
     // 2. Non-busy-spin when RibbonPool has only 1 slot and 3 chunks are queued

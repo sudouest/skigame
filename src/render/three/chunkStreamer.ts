@@ -39,7 +39,7 @@ export interface ChunkSceneryItem {
 
 interface PooledForkArch {
   readonly group: THREE.Group;
-  readonly setBadges: (leftId?: string | null, rightId?: string | null) => void;
+  readonly setBadge: (stageId?: string | null, gateHalfWidth?: number) => void;
 }
 
 interface ChunkBuildRecord {
@@ -151,8 +151,13 @@ export class ChunkStreamer {
     }
 
     // Pre-pool landmark objects (marked as cache so they persist cleanly across chunk recycling)
-    for (let i = 0; i < 6; i++) {
-      const arch = createForkArchObject(gfx, meshAssets, materials.propToonMaterial);
+    for (let i = 0; i < 12; i++) {
+      const arch = createForkArchObject(
+        gfx,
+        meshAssets,
+        materials.propToonMaterial,
+        materials.beaconGlowMaterial,
+      );
       gfx.markAsCache(arch.group, `PooledForkArch_${i}`);
       this.forkArchPool.push(arch);
     }
@@ -541,7 +546,7 @@ export class ChunkStreamer {
     if (lm.kind === 'forkArch') {
       const arch = this.forkArchPool.pop();
       if (!arch) return;
-      arch.setBadges(lm.leftBadgeStageId, lm.rightBadgeStageId);
+      arch.setBadge(lm.badgeStageId, lm.gateHalfWidth);
       arch.group.position.set(localX, localY, localZ);
       arch.group.rotation.set(0, lm.yawRad, 0, 'YXZ');
       arch.group.scale.setScalar(1);

@@ -53,7 +53,6 @@ export interface TrailSegmentConfig {
   readonly endHalfWidth: number;
   readonly prevSegmentId: number | null;
   readonly hasFork: boolean;
-  readonly archS: number;
   readonly leftStageId: string | null;
   readonly rightStageId: string | null;
   readonly isForkChild: boolean;
@@ -100,7 +99,6 @@ export class TrailSegment implements TerrainSegmentView {
 
   private readonly _fork: {
     hasFork: boolean;
-    archS: number;
     obstacleFreeStartS: number;
     leftStageId: string | null;
     rightStageId: string | null;
@@ -233,7 +231,6 @@ export class TrailSegment implements TerrainSegmentView {
 
     this._fork = {
       hasFork: config.hasFork,
-      archS: config.archS,
       obstacleFreeStartS,
       leftStageId: config.leftStageId,
       rightStageId: config.rightStageId,
@@ -565,32 +562,43 @@ export class TrailSegment implements TerrainSegmentView {
       this.safeXs[i] = sx;
     }
 
-    // Emit 'forkArch' landmark 150-200m ahead of fork seam
+    // Emit two 'forkArch' entrance gates right at the fork seam (s = length), one per branch
     if (config.hasFork && config.leftStageId && config.rightStageId) {
-      this.sampleSpineFrame(config.archS, this.scratchFrameA);
-      this.landmarks.push({
-        id: `fork_arch_${this.id}`,
-        kind: 'forkArch',
-        segmentId: this.id,
-        chunkIndex: Math.floor(config.archS / this.chunkLength),
-        s: config.archS,
-        x: 0,
-        worldX: this.scratchFrameA.posX,
-        worldY: this.scratchFrameA.posY,
-        worldZ: this.scratchFrameA.posZ,
-        yawRad: this.scratchFrameA.yawRad,
-        clearanceRadius: 4.5,
-        visual: {
-          kind: 'procedural',
-          preset: 'arch',
-          palette: ['#78350f', '#fbbf24', '#fef3c7'],
-          scale: 1.0,
-          variant: 'fork_arch',
-          outline: true,
-        },
-        leftBadgeStageId: config.leftStageId,
-        rightBadgeStageId: config.rightStageId,
-      });
+      this.sampleSpineFrame(this.length, this.scratchFrameA);
+      const branchHalfWidth = 0.5 * this.endHalfWidthValue;
+      const seamChunkIndex = this.chunkCount - 1;
+      const branchDefs: ReadonlyArray<{ side: 'left' | 'right'; sign: -1 | 1; stageId: string }> = [
+        { side: 'left', sign: -1, stageId: config.leftStageId },
+        { side: 'right', sign: 1, stageId: config.rightStageId },
+      ];
+      for (let i = 0; i < branchDefs.length; i++) {
+        const branch = branchDefs[i]!;
+        const lateralX = branch.sign * branchHalfWidth;
+        this.landmarks.push({
+          id: `fork_arch_${this.id}_${branch.side}`,
+          kind: 'forkArch',
+          segmentId: this.id,
+          chunkIndex: seamChunkIndex,
+          s: this.length,
+          x: lateralX,
+          worldX: this.scratchFrameA.posX + lateralX * this.scratchFrameA.rightX,
+          worldY: this.scratchFrameA.posY + lateralX * this.scratchFrameA.rightY,
+          worldZ: this.scratchFrameA.posZ + lateralX * this.scratchFrameA.rightZ,
+          yawRad: this.scratchFrameA.yawRad,
+          clearanceRadius: 4.5,
+          visual: {
+            kind: 'procedural',
+            preset: 'arch',
+            palette: ['#78350f', '#fbbf24', '#fef3c7'],
+            scale: 1.0,
+            variant: 'fork_arch',
+            outline: true,
+          },
+          badgeStageId: branch.stageId,
+          forkSide: branch.side,
+          gateHalfWidth: branchHalfWidth,
+        });
+      }
     }
   }
 

@@ -25,7 +25,6 @@ import {
   type SkierPose,
   type SurfaceSample,
   type TrailWindowView,
-  type UpcomingForkState,
 } from './contracts';
 import { CreatureSystem } from './creatureSystem';
 import { DebugDrawBuffer } from './debugDrawBuffer';
@@ -97,12 +96,6 @@ interface MutableSimState {
     fogDistanceM: number;
     blizzardDim: number;
   };
-  readonly upcomingFork: {
-    active: boolean;
-    distanceM: number;
-    leftStageId: string | null;
-    rightStageId: string | null;
-  };
 
   readonly trailWindow: TrailWindowView;
   readonly rebase: {
@@ -145,7 +138,6 @@ export class SkiSimulation {
   private seed: number | string;
   private startStageId: string;
   private scatterRng: SeededRng;
-  private lastAnnouncedForkSegId = -1;
   private readonly recoverRibbonScratch: RibbonPointOut = createRibbonPointOut();
 
   // Pre-allocated synchronous EventBus payloads (zero hot-loop heap allocations)
@@ -190,12 +182,6 @@ export class SkiSimulation {
     worldY: 0,
     worldZ: 0,
     invulnerableSec: 0,
-  };
-  private readonly evForkApproaching = {
-    segmentId: 0,
-    distanceToSeamM: 0,
-    leftStageId: '',
-    rightStageId: '',
   };
   private readonly evForkEntered: {
     chosenSide: 'left' | 'right';
@@ -343,12 +329,6 @@ export class SkiSimulation {
         fogDistanceM: 145,
         blizzardDim: 0,
       },
-      upcomingFork: {
-        active: false,
-        distanceM: 0,
-        leftStageId: null,
-        rightStageId: null,
-      },
 
       trailWindow: this.trailWindow,
       rebase: {
@@ -428,7 +408,6 @@ export class SkiSimulation {
     if (skierId) {
       this.setSkier(skierId);
     }
-    this.lastAnnouncedForkSegId = -1;
 
     this.pools.clear();
     this.hazardGrid.clear();
@@ -495,7 +474,6 @@ export class SkiSimulation {
     this.state.activeStageId = this.trailWindow.curr.stageId;
     this.syncWeatherImmediate(this.trailWindow.curr.stage.weather);
     this.cameraRig.reset(curr, this.state.surfaceSample);
-    this.updateUpcomingForkState();
     this.debugDrawBuffer.update(this.trailWindow, this.pools, curr, this.state.surfaceSample);
   }
 
@@ -614,9 +592,8 @@ export class SkiSimulation {
       this.state.activeStageId = activeSeg.stageId;
     }
 
-    // 5. Weather transition & upcoming fork HUD state
+    // 5. Weather transition
     this.updateWeather(dt, activeSeg ?? this.trailWindow.curr);
-    this.updateUpcomingForkState();
 
     // 6. Chase camera with 25m crest elevation look-ahead
     this.cameraRig.update(dt, curr, this.state.surfaceSample, this.trailWindow);
@@ -1066,38 +1043,6 @@ export class SkiSimulation {
     w.windLateral = damp(w.windLateral, target.windLateral, 2.5, dt);
     w.fogDistanceM = Math.max(65, damp(w.fogDistanceM, Math.max(65, target.fogMinDist), 2.5, dt));
     w.blizzardDim = damp(w.blizzardDim, target.blizzardDim, 2.5, dt);
-  }
-
-  private updateUpcomingForkState(): void {
-    const currSeg = this.trailWindow.curr;
-    const sample = this.state.surfaceSample;
-    if (currSeg.fork.hasFork && sample.segmentId === currSeg.id) {
-      const dist = Math.max(0, currSeg.length - sample.s);
-      if (dist <= 200) {
-        this.state.upcomingFork.active = true;
-        this.state.upcomingFork.distanceM = dist;
-        this.state.upcomingFork.leftStageId = currSeg.fork.leftStageId;
-        this.state.upcomingFork.rightStageId = currSeg.fork.rightStageId;
-
-        if (
-          this.lastAnnouncedForkSegId !== currSeg.id &&
-          currSeg.fork.leftStageId &&
-          currSeg.fork.rightStageId
-        ) {
-          this.lastAnnouncedForkSegId = currSeg.id;
-          this.evForkApproaching.segmentId = currSeg.id;
-          this.evForkApproaching.distanceToSeamM = dist;
-          this.evForkApproaching.leftStageId = currSeg.fork.leftStageId;
-          this.evForkApproaching.rightStageId = currSeg.fork.rightStageId;
-          this.eventBus.emit('FORK_APPROACHING', this.evForkApproaching);
-        }
-        return;
-      }
-    }
-    this.state.upcomingFork.active = false;
-    this.state.upcomingFork.distanceM = 0;
-    this.state.upcomingFork.leftStageId = null;
-    this.state.upcomingFork.rightStageId = null;
   }
 
   private requireDefaultSkier(): SkierDef {

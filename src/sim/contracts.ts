@@ -208,8 +208,6 @@ export function createRibbonPointOut(): RibbonPointOut {
 export interface SegmentForkMeta {
   /** True when this segment splits at s = length into nextLeft & nextRight. */
   readonly hasFork: boolean;
-  /** Arc length along segment where the overhead iconographic fork arch spawns. */
-  readonly archS: number;
   /** Arc length after which static obstacles are forbidden ahead of the fork seam. */
   readonly obstacleFreeStartS: number;
   readonly leftStageId: string | null;
@@ -232,7 +230,7 @@ export interface SegmentForkMeta {
  * Static chunk-anchored landmark metadata consumed by ChunkStreamer & scenery exclusion SpatialGrid.
  * Ownership boundaries (prevents double-spawning):
  * - 'forkArch' & 'deliveryLandmark': static scenery landmarks placed by ChunkStreamer (cabins,
- *   lanterns, overhead fork arches). Waiting/cheering children remain in DeliveryZonePoolView.
+ *   lanterns, twin per-branch entrance gates at a trail split). Waiting/cheering children remain in DeliveryZonePoolView.
  * - Playable ski ramps belong exclusively to EntityPoolViews.ramps (not landmarks).
  */
 export interface SegmentLandmarkRequirement {
@@ -249,10 +247,12 @@ export interface SegmentLandmarkRequirement {
   readonly yawRad: number;
   readonly clearanceRadius: number;
   readonly visual: VisualSpec;
-  /** Left branch stage ID for 'forkArch' iconographic badges. */
-  readonly leftBadgeStageId?: string;
-  /** Right branch stage ID for 'forkArch' iconographic badges. */
-  readonly rightBadgeStageId?: string;
+  /** Stage ID for 'forkArch' iconographic branch gate badge. */
+  readonly badgeStageId?: string;
+  /** Which fork branch this gate frames ('left' or 'right'). */
+  readonly forkSide?: 'left' | 'right';
+  /** Half-width in meters of the branch opening framed by this gate. */
+  readonly gateHalfWidth?: number;
 }
 
 /**
@@ -514,13 +514,6 @@ export interface ActiveWeatherState {
   readonly blizzardDim: number;
 }
 
-export interface UpcomingForkState {
-  readonly active: boolean;
-  readonly distanceM: number;
-  readonly leftStageId: string | null;
-  readonly rightStageId: string | null;
-}
-
 export interface ReadonlySimState {
   readonly tickCount: number;
   readonly elapsedSec: number;
@@ -557,7 +550,6 @@ export interface ReadonlySimState {
 
   readonly activeStageId: string;
   readonly activeWeather: ActiveWeatherState;
-  readonly upcomingFork: UpcomingForkState;
 
   readonly trailWindow: TrailWindowView;
   readonly rebase: RebaseInfo;
@@ -599,12 +591,6 @@ export interface SimEventMap {
     readonly worldY: number;
     readonly worldZ: number;
     readonly invulnerableSec: number;
-  };
-  FORK_APPROACHING: {
-    readonly segmentId: number;
-    readonly distanceToSeamM: number;
-    readonly leftStageId: string;
-    readonly rightStageId: string;
   };
   FORK_ENTERED: {
     readonly chosenSide: 'left' | 'right';

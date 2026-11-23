@@ -63,7 +63,7 @@ describe('TrailSegment & TrailWindow invariants', () => {
     if (trailWin.nextRight) checkSegment(trailWin.nextRight);
   });
 
-  it('enforces Model A fork invariants (k=0, beta=0 at seam, 150-200m arch, 25m inner wall ramp, 1.5m nose)', () => {
+  it('enforces Model A fork invariants (k=0, beta=0 at seam, twin split-seam gates, 25m inner wall ramp, 1.5m nose)', () => {
     const trailWin = new TrailWindow(2025, 'sunny-blue');
     const curr = trailWin.curr;
     const left = trailWin.nextLeft!;
@@ -73,16 +73,7 @@ describe('TrailSegment & TrailWindow invariants', () => {
     expect(left).toBeDefined();
     expect(right).toBeDefined();
     expect(curr.fork.leftStageId).not.toBe(curr.fork.rightStageId);
-
-    const distArchToSeam = curr.length - curr.fork.archS;
-    expect(distArchToSeam).toBeGreaterThanOrEqual(150);
-    expect(distArchToSeam).toBeLessThanOrEqual(200);
     expect(curr.length - curr.fork.obstacleFreeStartS).toBe(FORK_RUNWAY_OBSTACLE_FREE_M);
-
-    const archLandmark = curr.landmarks.find((l) => l.kind === 'forkArch');
-    expect(archLandmark).toBeDefined();
-    expect(archLandmark!.leftBadgeStageId).toBe(curr.fork.leftStageId);
-    expect(archLandmark!.rightBadgeStageId).toBe(curr.fork.rightStageId);
 
     // k = 0, bank = 0 at seam end of parent and seam start of both children
     const endFrame = createSpineFrameOut();
@@ -91,6 +82,55 @@ describe('TrailSegment & TrailWindow invariants', () => {
     curr.sampleSpineFrame(curr.length, endFrame);
     left.sampleSpineFrame(0, leftStart);
     right.sampleSpineFrame(0, rightStart);
+
+    const archLandmarks = curr.landmarks.filter((l) => l.kind === 'forkArch');
+    expect(archLandmarks).toHaveLength(2);
+    const leftArch = archLandmarks.find((l) => l.forkSide === 'left');
+    const rightArch = archLandmarks.find((l) => l.forkSide === 'right');
+    expect(leftArch).toBeDefined();
+    expect(rightArch).toBeDefined();
+    expect(leftArch!.s).toBe(curr.length);
+    expect(rightArch!.s).toBe(curr.length);
+    expect(leftArch!.chunkIndex).toBe(curr.chunkCount - 1);
+    expect(rightArch!.chunkIndex).toBe(curr.chunkCount - 1);
+    expect(leftArch!.badgeStageId).toBe(curr.fork.leftStageId);
+    expect(rightArch!.badgeStageId).toBe(curr.fork.rightStageId);
+    expect(leftArch!.worldX).toBeCloseTo(leftStart.posX, 4);
+    expect(leftArch!.worldY).toBeCloseTo(leftStart.posY, 4);
+    expect(leftArch!.worldZ).toBeCloseTo(leftStart.posZ, 4);
+    expect(rightArch!.worldX).toBeCloseTo(rightStart.posX, 4);
+    expect(rightArch!.worldY).toBeCloseTo(rightStart.posY, 4);
+    expect(rightArch!.worldZ).toBeCloseTo(rightStart.posZ, 4);
+
+    // Verify seam chunkIndex stays in bounds when length is an exact multiple of 35m (280m)
+    const exactMultSeg = new TrailSegment({
+      id: 99,
+      slot: 'curr',
+      stage: getStageDef('sunny-blue')!,
+      seed: 123,
+      length: 280,
+      startPosX: 0,
+      startPosY: 0,
+      startPosZ: 0,
+      startYawRad: 0,
+      startPitchRad: -0.22,
+      startHalfWidth: 15,
+      endHalfWidth: 26,
+      prevSegmentId: null,
+      hasFork: true,
+      leftStageId: 'sunny-blue',
+      rightStageId: 'icy-black',
+      isForkChild: false,
+      forkSide: 'none',
+      seamWorldX: 0,
+      seamWorldY: 0,
+      seamWorldZ: 0,
+      seamYawRad: 0,
+    });
+    const exactArches = exactMultSeg.landmarks.filter((l) => l.kind === 'forkArch');
+    expect(exactArches).toHaveLength(2);
+    expect(exactArches[0]!.chunkIndex).toBeLessThan(exactMultSeg.chunkCount);
+    expect(exactArches[0]!.chunkIndex).toBe(exactMultSeg.chunkCount - 1);
 
     expect(Math.abs(endFrame.curvature)).toBeLessThan(1e-6);
     expect(Math.abs(endFrame.bankRad)).toBeLessThan(1e-6);
@@ -209,7 +249,6 @@ describe('TrailSegment & TrailWindow invariants', () => {
         endHalfWidth: 20,
         prevSegmentId: null,
         hasFork: false,
-        archS: 280,
         leftStageId: null,
         rightStageId: null,
         isForkChild: false,

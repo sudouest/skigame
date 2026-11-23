@@ -284,18 +284,17 @@ World topology is managed as a strictly bounded **4-slot sliding window**:
 Major trail forks occur every ~45–90 seconds, letting the player steer their own route between biomes and difficulty tiers:
 
 ```text
-   s = L - 200m           s = L - 80m            s = L (Fork Seam: κ=0, β=0)
-  ═══════════════╤═══════════════════════════════╤═══════════════════════════════
-                 │  Arch Signpost                │ ◄── nextLeft (Curves Left)
-                 │  (Blue / Black Diamond)       │   /   inner snowbank ramps 0→full over 25m
-   Approach      │  Trail widens smoothly        │  ●  Soft-bumper V-wedge nose (r=1.5m)
-   Segment       │  Final 50m: Obstacle-Free     │   \   inner snowbank ramps 0→full over 25m
-  ═══════════════╧═══════════════════════════════╧═══════════════════════════════
-                                                   ◄── nextRight (Curves Right, steeper)
+   s = L - 80m                          s = L (Fork Seam: κ=0, β=0)
+  ═════════════════════════════════════╤═══════════════════════════════
+    Approach Segment                   │ [Blue Gate]  ◄── nextLeft (Curves Left)
+    Trail widens smoothly              │  /   inner snowbank ramps 0→full over 25m
+    Final 50m: Obstacle-Free           │ ●  Soft-bumper V-wedge nose (r=1.5m)
+                                       │  \   inner snowbank ramps 0→full over 25m
+  ═════════════════════════════════════╧ [Black Gate] ◄── nextRight (Curves Right, steeper)
 ```
 
 **Mandatory Fork Seam Invariants:**
-1. **Telegraphing & Runway:** Overhead iconographic arches (Green Circle, Blue Square, Black Diamond—readable without tiny text) appear **150–200m ahead** of the split. The final **50m** before `s = L` are kept obstacle-free while `halfWidth` widens smoothly to `W_L + W_R`.
+1. **Split-Seam Gates & Runway:** Two individual iconographic path gates (Green Circle, Blue Square, Black Diamond—readable without tiny text) stand directly at the split seam `s = L`, one centered over each branch opening (`x = ±0.5 * W_end`). The final **50m** before `s = L` are kept obstacle-free (and off-trail trees are cleared near the seam) while `halfWidth` widens smoothly to `W_L + W_R`, giving a clean sightline directly to both gates with no separate HUD warning banner needed.
 2. **Flat Tangent & Zero Banking at Seam:** Entering `s = L`, curvature \(\kappa \to 0\) and banking \(\beta \to 0\) are strictly enforced so `nextLeft` and `nextRight` attach flush at identical world elevation and heading—zero vertical mesh tears.
 3. **Suppressed Inner Walls + Soft V-Wedge Bumper:** At `s = 0` of both child branches, the inner snowbank wall height starts at `0` and ramps up to full bank height over the first `25m` behind a **rounded soft-bumper V-wedge nose (`r = 1.5m`)**.
 4. **Zero-Handoff Seam Crossing (Airborne & Straddling Safe):** Because the skier moves in authoritative World Space `(X, Y, Z)`, crossing `s = L` (grounded, straddling `x ≈ 0`, or airborne) requires **zero position, velocity, or heading transformations**. The soft nose gently deflects a dead-center skier onto one side, and `sampleSurface` continuously tracks whichever branch is closer past the seam plane.
