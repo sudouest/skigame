@@ -254,4 +254,270 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
     expect(eventBus.listenerCount()).toBe(0);
     expect(mountEl.children.length).toBe(0);
   });
+
+  function createHarness() {
+    const doc = new MockDocument();
+    const mountEl = new MockElement('div', doc);
+    const eventBus = new EventBus<SimEventMap>();
+    const sim = new SkiSimulation({ seed: 99, eventBus });
+    const callbacks: GameUICallbacks = {
+      onStart: () => {},
+      onResume: () => {},
+      onRestart: () => {},
+      onSelectSkier: () => {},
+      onTogglePause: () => {},
+      onToggleBlizzard: () => {},
+      onToggleDebugDraw: () => {},
+      onToggleTelemetry: () => {},
+    };
+    const ui = new GameUI(mountEl as unknown as HTMLElement, eventBus, callbacks);
+    const createdAtInit = doc.createdCount;
+    const profiler: ProfilerSnapshot = {
+      frameMs: 4.0,
+      simMs: 1.0,
+      renderMs: 2.5,
+      streamMs: 0.5,
+      avgFrameMs: 16.6,
+      avgSimMs: 1.0,
+      avgRenderMs: 2.5,
+      maxFrameMs: 8.0,
+      maxSimMs: 2.0,
+      fps: 60,
+      simSteps: 1,
+    };
+    const renderStats = createRenderTelemetryStats();
+    const leakStatus = createLeakCheckStatus();
+    const stepUi = (dtSec: number): void => {
+      ui.update(
+        {
+          simState: sim.getState(),
+          profiler,
+          renderStats,
+          leakStatus,
+          hasSteered: true,
+          debugDrawEnabled: false,
+          telemetryVisible: false,
+          overlayMode: 'playing',
+        },
+        dtSec,
+      );
+    };
+    return { doc, mountEl, eventBus, ui, createdAtInit, stepUi };
+  }
+
+  it('coalesces rapid PRESENT_PICKED_UP events into a single pickup chip with zero DOM allocation', () => {
+    const { doc, mountEl, eventBus, ui, createdAtInit, stepUi } = createHarness();
+    const chip = mountEl.findByClass('sg-pickup-chip')[0]!;
+    const pointsEl = mountEl.findByClass('sg-pickup-points')[0]!;
+    const starEl = mountEl.findByClass('sg-pickup-star')[0]!;
+    const countEl = mountEl.findByClass('sg-pickup-count')[0]!;
+
+    eventBus.emit('PRESENT_PICKED_UP', {
+      presentDefId: 'gift_standard',
+      worldX: 0,
+      worldY: 0,
+      worldZ: -10,
+      pickupPoints: 25,
+      carriedCount: 1,
+      maxCapacity: 12,
+    });
+    expect(chip.classList.contains('sg-hidden')).toBe(false);
+    expect(chip.dataset.tone).toBe('gift');
+    expect(pointsEl.textContent).toBe('+25');
+    expect(starEl.classList.contains('sg-hidden')).toBe(true);
+    expect(countEl.classList.contains('sg-hidden')).toBe(true);
+
+    eventBus.emit('PRESENT_PICKED_UP', {
+      presentDefId: 'gift_golden',
+      worldX: 0,
+      worldY: 0,
+      worldZ: -20,
+      pickupPoints: 75,
+      carriedCount: 2,
+      maxCapacity: 12,
+    });
+    expect(chip.dataset.tone).toBe('gold');
+    expect(pointsEl.textContent).toBe('+100');
+    expect(starEl.classList.contains('sg-hidden')).toBe(false);
+    expect(countEl.classList.contains('sg-hidden')).toBe(false);
+    expect(countEl.textContent).toBe('×2');
+    expect(doc.createdCount).toBe(createdAtInit);
+
+    stepUi(1.5);
+    expect(chip.classList.contains('sg-hidden')).toBe(true);
+    ui.dispose();
+  });
+
+  it('shows PRESENT_DELIVERED in the single-slot broadcast ribbon and replaces prior ribbon cleanly', () => {
+    const { mountEl, eventBus, ui, stepUi } = createHarness();
+    const ribbon = mountEl.findByClass('sg-broadcast-ribbon')[0]!;
+    const primary = mountEl.findByClass('sg-ribbon-primary')[0]!;
+    const detail = mountEl.findByClass('sg-ribbon-detail')[0]!;
+    const combo = mountEl.findByClass('sg-ribbon-combo')[0]!;
+
+    eventBus.emit('PRESENT_DELIVERED', {
+      deliveryZoneId: 'child_solo',
+      countDelivered: 2,
+      pointsAwarded: 400,
+      comboMultiplier: 1,
+      totalScore: 400,
+      worldX: 0,
+      worldY: 0,
+      worldZ: -50,
+    });
+    expect(ribbon.classList.contains('sg-hidden')).toBe(false);
+    expect(ribbon.dataset.tone).toBe('delivery');
+    expect(primary.textContent).toBe('+400');
+    expect(detail.textContent).toBe('2 DELIVERED');
+    expect(combo.classList.contains('sg-hidden')).toBe(true);
+
+    eventBus.emit('PRESENT_DELIVERED', {
+      deliveryZoneId: 'village_plaza',
+      countDelivered: 4,
+      pointsAwarded: 1400,
+      comboMultiplier: 3,
+      totalScore: 1800,
+      worldX: 0,
+      worldY: 0,
+      worldZ: -90,
+    });
+    expect(mountEl.findByClass('sg-broadcast-ribbon').length).toBe(1);
+    expect(primary.textContent).toBe('+1,400');
+    expect(detail.textContent).toBe('4 DELIVERED');
+    expect(combo.classList.contains('sg-hidden')).toBe(false);
+    expect(combo.textContent).toBe('×3');
+
+    stepUi(2.2);
+    expect(ribbon.classList.contains('sg-hidden')).toBe(true);
+    ui.dispose();
+  });
+
+  it('routes left/right creature telegraphs to edge beacons and center telegraphs to top ribbon', () => {
+    const { mountEl, eventBus, ui, stepUi } = createHarness();
+    const leftBeacon = mountEl.findByClass('sg-edge-left')[0]!;
+    const rightBeacon = mountEl.findByClass('sg-edge-right')[0]!;
+    const ribbon = mountEl.findByClass('sg-broadcast-ribbon')[0]!;
+
+    eventBus.emit('CREATURE_TELEGRAPH', {
+      creatureDefId: 'bear_patrol',
+      soundId: 'bear_roar',
+      worldX: -6,
+      worldY: 0,
+      worldZ: -30,
+      distanceToPlayerM: 34,
+      showEdgeIndicator: false,
+      edgeSide: 'left',
+    });
+    expect(leftBeacon.classList.contains('sg-hidden')).toBe(false);
+    expect(leftBeacon.classList.contains('sg-edge-active')).toBe(true);
+    expect(leftBeacon.findByClass('sg-edge-dist')[0]!.textContent).toBe('34m');
+    expect(rightBeacon.classList.contains('sg-hidden')).toBe(true);
+    expect(ribbon.classList.contains('sg-hidden')).toBe(true);
+
+    eventBus.emit('CREATURE_TELEGRAPH', {
+      creatureDefId: 'bear_patrol',
+      soundId: 'bear_roar',
+      worldX: 6,
+      worldY: 0,
+      worldZ: -25,
+      distanceToPlayerM: 21,
+      showEdgeIndicator: false,
+      edgeSide: 'right',
+    });
+    expect(rightBeacon.classList.contains('sg-hidden')).toBe(false);
+    expect(rightBeacon.findByClass('sg-edge-dist')[0]!.textContent).toBe('21m');
+    expect(ribbon.classList.contains('sg-hidden')).toBe(true);
+
+    eventBus.emit('CREATURE_TELEGRAPH', {
+      creatureDefId: 'bear_patrol',
+      soundId: 'bear_roar',
+      worldX: 0,
+      worldY: 0,
+      worldZ: -18,
+      distanceToPlayerM: 18,
+      showEdgeIndicator: false,
+      edgeSide: 'center',
+    });
+    expect(ribbon.classList.contains('sg-hidden')).toBe(false);
+    expect(ribbon.dataset.tone).toBe('warning');
+    expect(ribbon.findByClass('sg-ribbon-primary')[0]!.textContent).toContain('MOUNTAIN BEAR');
+    expect(ribbon.findByClass('sg-ribbon-detail')[0]!.textContent).toBe('18m');
+
+    stepUi(2.0);
+    expect(leftBeacon.classList.contains('sg-hidden')).toBe(true);
+    expect(rightBeacon.classList.contains('sg-hidden')).toBe(true);
+    expect(ribbon.classList.contains('sg-hidden')).toBe(true);
+    ui.dispose();
+  });
+
+  it('announces FORK_ENTERED inline on stage pill, handles stumble chip/flash, and resets cleanly', () => {
+    const { mountEl, eventBus, ui, stepUi } = createHarness();
+    const stagePill = mountEl.findByClass('sg-stage-pill')[0]!;
+    const chip = mountEl.findByClass('sg-pickup-chip')[0]!;
+    const flash = mountEl.findByClass('sg-stumble-flash')[0]!;
+    const ribbon = mountEl.findByClass('sg-broadcast-ribbon')[0]!;
+    const leftBeacon = mountEl.findByClass('sg-edge-left')[0]!;
+
+    eventBus.emit('FORK_ENTERED', {
+      chosenSide: 'right',
+      newSegmentId: 2,
+      newStageId: 'icy-black',
+      previousStageId: 'sunny-blue',
+    });
+    expect(stagePill.classList.contains('sg-stage-announce')).toBe(true);
+    stepUi(2.3);
+    expect(stagePill.classList.contains('sg-stage-announce')).toBe(false);
+
+    eventBus.emit('PLAYER_WIPEOUT', {
+      hazardId: 'boulder_small',
+      effect: 'stumble',
+      presentsDropped: 1,
+      worldX: 0,
+      worldY: 0,
+      worldZ: -40,
+      recoverySec: 0,
+    });
+    expect(chip.classList.contains('sg-hidden')).toBe(false);
+    expect(chip.dataset.tone).toBe('stumble');
+    expect(chip.findByClass('sg-pickup-points')[0]!.textContent).toBe('STUMBLE · -1');
+    expect(flash.classList.contains('sg-stumble-active')).toBe(true);
+
+    stepUi(0.35);
+    expect(flash.classList.contains('sg-stumble-active')).toBe(false);
+
+    eventBus.emit('FORK_ENTERED', {
+      chosenSide: 'left',
+      newSegmentId: 3,
+      newStageId: 'sunny-blue',
+      previousStageId: 'icy-black',
+    });
+    eventBus.emit('PRESENT_DELIVERED', {
+      deliveryZoneId: 'child_solo',
+      countDelivered: 1,
+      pointsAwarded: 100,
+      comboMultiplier: 1,
+      totalScore: 100,
+      worldX: 0,
+      worldY: 0,
+      worldZ: -60,
+    });
+    eventBus.emit('CREATURE_TELEGRAPH', {
+      creatureDefId: 'bear_patrol',
+      soundId: 'bear_roar',
+      worldX: -4,
+      worldY: 0,
+      worldZ: -70,
+      distanceToPlayerM: 25,
+      showEdgeIndicator: false,
+      edgeSide: 'left',
+    });
+
+    ui.resetRunState();
+    expect(stagePill.classList.contains('sg-stage-announce')).toBe(false);
+    expect(chip.classList.contains('sg-hidden')).toBe(true);
+    expect(ribbon.classList.contains('sg-hidden')).toBe(true);
+    expect(leftBeacon.classList.contains('sg-hidden')).toBe(true);
+    expect(flash.classList.contains('sg-stumble-active')).toBe(false);
+    ui.dispose();
+  });
 });

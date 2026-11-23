@@ -3,46 +3,75 @@ import type { EventBus, Unsubscribe } from '../core/eventBus';
 import type { SimEventMap } from '../sim/contracts';
 import {
   computeRatio01,
-  formatCreatureTelegraphPopup,
-  formatDeliveryPopup,
+  formatCreatureEdgeBeacon,
+  formatDeliveryRibbon,
   formatDistanceM,
-  formatForkEnteredPopup,
   formatLeakCheckSummary,
   formatMultiplier,
-  formatPickupPopup,
+  formatPickupBurstChip,
   formatScore,
   formatSkierCardInfo,
   formatStageDisplay,
+  formatStumbleChip,
   formatTrianglesCount,
-  formatWipeoutEventPopup,
-  type PopupDescriptor,
 } from './hudFormatting';
 import { HUD_STYLES } from './styles';
 import type { GameUICallbacks, GameUIUpdateData, OverlayMode } from './types';
 
-const POPUP_POOL_SIZE = 5;
 const LAZY_HINT_DELAY_SEC = 8.0;
+const PICKUP_CHIP_DURATION_SEC = 1.45;
+const STAGE_ANNOUNCE_DURATION_SEC = 2.2;
+const STUMBLE_FLASH_DURATION_SEC = 0.28;
 
-interface PopupSlot {
-  readonly root: HTMLDivElement;
-  readonly titleEl: HTMLDivElement;
-  readonly subEl: HTMLDivElement;
-  active: boolean;
-  remainingSec: number;
-  lastTone: string;
-}
+const GIFT_ICON_SVG =
+  '<svg class="sg-bag-icon" viewBox="0 0 24 24" aria-hidden="true">' +
+  '<rect x="3" y="9" width="18" height="12" rx="2.5" fill="#ff4d6d"/>' +
+  '<rect x="2" y="5.5" width="20" height="4.5" rx="1.8" fill="#fbbf24"/>' +
+  '<rect x="10.4" y="5.5" width="3.2" height="15.5" fill="#f8fafc"/>' +
+  '<path d="M12 5.5C9.5 5.5 7.5 3.8 8.4 2.3C9.3 0.9 11.4 2.4 12 5.5Z" fill="#fde68a"/>' +
+  '<path d="M12 5.5C14.5 5.5 16.5 3.8 15.6 2.3C14.7 0.9 12.6 2.4 12 5.5Z" fill="#fde68a"/>' +
+  '</svg>';
+
+const STAR_ICON_SVG =
+  '<svg viewBox="0 0 16 16" aria-hidden="true">' +
+  '<path fill="currentColor" d="M8 1.2L9.9 5.3L14.4 5.9L11.1 9L11.9 13.5L8 11.3L4.1 13.5L4.9 9L1.6 5.9L6.1 5.3Z"/>' +
+  '</svg>';
+
+const BEAR_ICON_SVG =
+  '<svg viewBox="0 0 28 18" aria-hidden="true">' +
+  '<path fill="currentColor" d="M5.2 6.8C5.2 5.5 6.3 4.5 7.7 4.4C9.5 4.2 11.2 4.9 13.5 4.9C15.9 4.9 18 4.2 20.1 4.6C21.6 4.9 22.8 5.9 23.6 7.1L25.4 7.7C26.1 7.9 26.5 8.6 26.3 9.3L26.1 10.1C25.9 10.7 25.3 11.1 24.6 11L22.5 10.8C22 11.6 21.6 12.6 21.6 13.8V16.2C21.6 16.8 21.1 17.2 20.5 17.2H18.9C18.3 17.2 17.9 16.8 17.9 16.2V13.4C16.1 13.7 13.4 13.7 11.7 13.3V16.2C11.7 16.8 11.2 17.2 10.6 17.2H9C8.4 17.2 8 16.8 8 16.2V12.8C6.6 12.1 5.4 10.7 5.2 9.1L4.4 9.5C3.8 9.8 3.2 9.3 3.4 8.6L4.2 6.5C4 6 4.2 5.3 4.7 5C5.2 4.7 5.8 5 6.1 5.5L5.2 6.8ZM22.1 3.7C22.6 3.7 23 4.1 23 4.6C23 5.1 22.6 5.5 22.1 5.5C21.6 5.5 21.2 5.1 21.2 4.6C21.2 4.1 21.6 3.7 22.1 3.7Z"/>' +
+  '</svg>';
+
+const CHEVRON_LEFT_SVG =
+  '<svg viewBox="0 0 10 12" aria-hidden="true">' +
+  '<path fill="currentColor" d="M7.8 1.4L2.4 6L7.8 10.6Z"/>' +
+  '</svg>';
+
+const CHEVRON_RIGHT_SVG =
+  '<svg viewBox="0 0 10 12" aria-hidden="true">' +
+  '<path fill="currentColor" d="M2.2 1.4L7.6 6L2.2 10.6Z"/>' +
+  '</svg>';
+
+const PAUSE_PLAY_ICON_SVG =
+  '<span class="sg-icon-pause"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="2.5" width="3.2" height="11" rx="1" fill="currentColor"/><rect x="9.3" y="2.5" width="3.2" height="11" rx="1" fill="currentColor"/></svg></span>' +
+  '<span class="sg-icon-play"><svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M4.2 2.6L13 8L4.2 13.4Z"/></svg></span>';
 
 /**
- * Responsive cartoon HTML/CSS overlay HUD, Start/Pause/Skier Select modal,
- * debug/mode toggle pills, pooled floating event popups, and Telemetry HUD.
+ * Responsive "Alpine Broadcast × Frosted Crystal" HTML/CSS overlay HUD,
+ * Start/Pause/Skier Select modal, perimeter notification channels, and Telemetry HUD.
  * Communicates strictly via `ReadonlySimState`, `EventBus<SimEventMap>`, `ProfilerSnapshot`,
- * and plain UI interfaces (zero `three` imports, zero private sim/render reach-ins).
+ * and plain UI interfaces (zero `three` imports, zero per-frame DOM node creation).
  */
 export class GameUI {
   private readonly mountEl: HTMLElement;
   private readonly callbacks: GameUICallbacks;
   private readonly rootEl: HTMLDivElement;
   private readonly unsubscribers: Unsubscribe[] = [];
+  private readonly skierClickHandlers: Array<{ btn: HTMLButtonElement; handler: () => void }> = [];
+
+  // Stumble peripheral flash
+  private readonly stumbleFlashEl: HTMLDivElement;
+  private stumbleFlashTimerSec = 0;
 
   // Score & Combo
   private readonly scoreValueEl: HTMLSpanElement;
@@ -52,37 +81,67 @@ export class GameUI {
   // Bag & Delivered
   private readonly bagCardEl: HTMLDivElement;
   private readonly bagCountEl: HTMLSpanElement;
+  private readonly bagFullTagEl: HTMLSpanElement;
   private readonly deliveredSubEl: HTMLSpanElement;
 
-  // Stage & Distance
+  // Coalesced Pickup / Stumble Micro-Chip (Top-Left)
+  private readonly pickupChipEl: HTMLDivElement;
+  private readonly pickupPointsEl: HTMLSpanElement;
+  private readonly pickupStarEl: HTMLSpanElement;
+  private readonly pickupCountEl: HTMLSpanElement;
+  private pickupAccumPoints = 0;
+  private pickupAccumCount = 0;
+  private pickupHasGolden = false;
+  private pickupTimerSec = 0;
+  private pickupTone: '' | 'gift' | 'gold' | 'stumble' = '';
+  private pickupBumpToggle = false;
+
+  // Stage & Distance & Pause
   private readonly stagePillEl: HTMLDivElement;
   private readonly stageBadgeEl: HTMLSpanElement;
+  private readonly stageGlyphEl: HTMLSpanElement;
   private readonly stageNameEl: HTMLSpanElement;
+  private readonly stageMultEl: HTMLSpanElement;
   private readonly distancePillEl: HTMLDivElement;
+  private readonly pauseBtn: HTMLButtonElement;
+  private stageAnnounceTimerSec = 0;
 
-  // Toggle Buttons
+  // Desktop Toggle Buttons
   private readonly snowBtn: HTMLButtonElement;
   private readonly debugBtn: HTMLButtonElement;
   private readonly statsBtn: HTMLButtonElement;
-  private readonly pauseBtn: HTMLButtonElement;
 
-  // Center Banners & Pooled Popups
+  // Top Broadcast Rail (Fork + Single-Slot Ribbon)
   private readonly forkBannerEl: HTMLDivElement;
-  private readonly forkHeaderEl: HTMLDivElement;
+  private readonly forkDistEl: HTMLSpanElement;
+  private readonly forkFillEl: HTMLDivElement;
   private readonly forkLeftEl: HTMLDivElement;
   private readonly forkLeftBadgeEl: HTMLSpanElement;
+  private readonly forkLeftGlyphEl: HTMLSpanElement;
   private readonly forkLeftNameEl: HTMLSpanElement;
   private readonly forkRightEl: HTMLDivElement;
   private readonly forkRightBadgeEl: HTMLSpanElement;
+  private readonly forkRightGlyphEl: HTMLSpanElement;
   private readonly forkRightNameEl: HTMLSpanElement;
 
+  private readonly ribbonEl: HTMLDivElement;
+  private readonly ribbonPrimaryEl: HTMLSpanElement;
+  private readonly ribbonSepEl: HTMLSpanElement;
+  private readonly ribbonDetailEl: HTMLSpanElement;
+  private readonly ribbonComboEl: HTMLSpanElement;
+  private ribbonTimerSec = 0;
+  private ribbonBumpToggle = false;
+
+  // Wipeout Banner (only visible during tumble)
   private readonly wipeoutBannerEl: HTMLDivElement;
   private readonly wipeoutSubEl: HTMLDivElement;
   private readonly wipeoutFillEl: HTMLDivElement;
 
-  private readonly popupSlots: PopupSlot[] = [];
+  // Peripheral Creature Edge Beacons
   private readonly edgeLeftEl: HTMLDivElement;
+  private readonly edgeLeftDistEl: HTMLSpanElement;
   private readonly edgeRightEl: HTMLDivElement;
+  private readonly edgeRightDistEl: HTMLSpanElement;
   private edgeLeftTimerSec = 0;
   private edgeRightTimerSec = 0;
 
@@ -114,6 +173,10 @@ export class GameUI {
   private readonly summaryDeliveredEl: HTMLDivElement;
   private readonly summaryComboEl: HTMLDivElement;
   private readonly skierButtons = new Map<string, HTMLButtonElement>();
+  private readonly modalTogglesEl: HTMLDivElement;
+  private readonly modalSnowBtn: HTMLButtonElement;
+  private readonly modalDebugBtn: HTMLButtonElement;
+  private readonly modalStatsBtn: HTMLButtonElement;
   private readonly primaryActionBtn: HTMLButtonElement;
   private readonly restartActionBtn: HTMLButtonElement;
 
@@ -133,7 +196,8 @@ export class GameUI {
   private lastOverlayMode: OverlayMode | '' = '';
   private lastSelectedSkierId = '';
   private lastForkActive = false;
-  private lastForkHeader = '';
+  private lastForkDistText = '';
+  private lastForkWidth = '';
   private lastForkLeftId = '';
   private lastForkRightId = '';
   private lastWipeoutActive = false;
@@ -147,14 +211,17 @@ export class GameUI {
   // Bound event listeners
   private readonly onSnowClick = (): void => {
     this.snowBtn.blur();
+    this.modalSnowBtn.blur();
     this.callbacks.onToggleBlizzard();
   };
   private readonly onDebugClick = (): void => {
     this.debugBtn.blur();
+    this.modalDebugBtn.blur();
     this.callbacks.onToggleDebugDraw();
   };
   private readonly onStatsClick = (): void => {
     this.statsBtn.blur();
+    this.modalStatsBtn.blur();
     this.callbacks.onToggleTelemetry();
   };
   private readonly onPauseClick = (): void => {
@@ -192,131 +259,219 @@ export class GameUI {
     styleEl.textContent = HUD_STYLES;
     this.rootEl.appendChild(styleEl);
 
+    // 0. Stumble Peripheral Vignette Flash
+    this.stumbleFlashEl = doc.createElement('div');
+    this.stumbleFlashEl.className = 'sg-stumble-flash';
+
     // 1. Top Bar
     const topBar = doc.createElement('div');
     topBar.className = 'sg-topbar';
 
     const topLeft = doc.createElement('div');
-    topLeft.className = 'sg-cluster';
+    topLeft.className = 'sg-cluster-left';
 
-    // Score & Combo Card
-    const scorePill = doc.createElement('div');
-    scorePill.className = 'sg-pill sg-score-card';
+    const scorePackCapsule = doc.createElement('div');
+    scorePackCapsule.className = 'sg-hud-capsule sg-score-pack-capsule';
 
-    const scoreRow = doc.createElement('div');
-    scoreRow.className = 'sg-score-row';
-    const scoreMeta = doc.createElement('div');
-    const scoreLabel = doc.createElement('div');
-    scoreLabel.className = 'sg-score-label';
-    scoreLabel.textContent = 'Score';
+    const scoreBlock = doc.createElement('div');
+    scoreBlock.className = 'sg-score-block';
+    const scoreMain = doc.createElement('div');
+    scoreMain.className = 'sg-score-main';
     this.scoreValueEl = doc.createElement('span');
     this.scoreValueEl.className = 'sg-score-value';
     this.scoreValueEl.textContent = '0';
-    scoreMeta.append(scoreLabel, this.scoreValueEl);
-
     this.comboBadgeEl = doc.createElement('span');
     this.comboBadgeEl.className = 'sg-combo-badge sg-combo-idle';
-    this.comboBadgeEl.textContent = 'x1';
-    scoreRow.append(scoreMeta, this.comboBadgeEl);
+    this.comboBadgeEl.textContent = '×1';
+    scoreMain.append(this.scoreValueEl, this.comboBadgeEl);
 
     const comboTrack = doc.createElement('div');
     comboTrack.className = 'sg-bar-track';
     this.comboFillEl = doc.createElement('div');
     this.comboFillEl.className = 'sg-bar-fill';
     comboTrack.appendChild(this.comboFillEl);
-    scorePill.append(scoreRow, comboTrack);
+    scoreBlock.append(scoreMain, comboTrack);
 
-    // Bag & Delivered Card
+    const leftDivider = doc.createElement('div');
+    leftDivider.className = 'sg-capsule-divider';
+
     this.bagCardEl = doc.createElement('div');
-    this.bagCardEl.className = 'sg-pill sg-bag-card';
-    this.bagCardEl.innerHTML =
-      '<svg class="sg-bag-icon" viewBox="0 0 24 24" aria-hidden="true">' +
-      '<rect x="3" y="8" width="18" height="13" rx="3" fill="#ef476f" stroke="#0f172a" stroke-width="2.2"/>' +
-      '<rect x="2" y="5" width="20" height="5" rx="2" fill="#ffd166" stroke="#0f172a" stroke-width="2.2"/>' +
-      '<rect x="10.5" y="5" width="3" height="16" fill="#fffdf7"/>' +
-      '</svg>';
+    this.bagCardEl.className = 'sg-bag-card';
+    const bagIconWrap = doc.createElement('span');
+    bagIconWrap.className = 'sg-bag-icon-wrap';
+    bagIconWrap.innerHTML = GIFT_ICON_SVG;
+
     const bagNumbers = doc.createElement('div');
     bagNumbers.className = 'sg-bag-numbers';
+    const bagCountRow = doc.createElement('div');
+    bagCountRow.className = 'sg-bag-count-row';
     this.bagCountEl = doc.createElement('span');
     this.bagCountEl.className = 'sg-bag-count';
-    this.bagCountEl.textContent = '0 / 12';
+    this.bagCountEl.textContent = '0/12';
+    this.bagFullTagEl = doc.createElement('span');
+    this.bagFullTagEl.className = 'sg-bag-full-tag sg-hidden';
+    this.bagFullTagEl.textContent = 'FULL';
+    bagCountRow.append(this.bagCountEl, this.bagFullTagEl);
+
     this.deliveredSubEl = doc.createElement('span');
     this.deliveredSubEl.className = 'sg-delivered-sub';
-    this.deliveredSubEl.textContent = 'Delivered: 0';
-    bagNumbers.append(this.bagCountEl, this.deliveredSubEl);
-    this.bagCardEl.appendChild(bagNumbers);
+    this.deliveredSubEl.textContent = '0 Delivered';
+    bagNumbers.append(bagCountRow, this.deliveredSubEl);
+    this.bagCardEl.append(bagIconWrap, bagNumbers);
 
-    topLeft.append(scorePill, this.bagCardEl);
+    scorePackCapsule.append(scoreBlock, leftDivider, this.bagCardEl);
 
-    // Top Right: Stage, Distance, Toggles
+    // Coalesced Pickup / Stumble Micro-Chip tucked beneath top-left capsule
+    this.pickupChipEl = doc.createElement('div');
+    this.pickupChipEl.className = 'sg-pickup-chip sg-hidden';
+    this.pickupChipEl.dataset.tone = 'gift';
+    const pickupSlant = doc.createElement('span');
+    pickupSlant.className = 'sg-slant-bar';
+    this.pickupPointsEl = doc.createElement('span');
+    this.pickupPointsEl.className = 'sg-pickup-points';
+    this.pickupStarEl = doc.createElement('span');
+    this.pickupStarEl.className = 'sg-pickup-star sg-hidden';
+    this.pickupStarEl.innerHTML = STAR_ICON_SVG;
+    this.pickupCountEl = doc.createElement('span');
+    this.pickupCountEl.className = 'sg-pickup-count sg-hidden';
+    this.pickupChipEl.append(pickupSlant, this.pickupPointsEl, this.pickupStarEl, this.pickupCountEl);
+
+    topLeft.append(scorePackCapsule, this.pickupChipEl);
+
+    // Top-Right: Trail Pill + Distance + Pause Capsule & Utility Row
     const topRight = doc.createElement('div');
     topRight.className = 'sg-cluster-right';
 
-    const stageRow = doc.createElement('div');
-    stageRow.className = 'sg-stage-row';
+    const trailCapsule = doc.createElement('div');
+    trailCapsule.className = 'sg-hud-capsule sg-trail-capsule';
 
     this.stagePillEl = doc.createElement('div');
-    this.stagePillEl.className = 'sg-pill sg-stage-pill';
+    this.stagePillEl.className = 'sg-stage-pill';
     this.stageBadgeEl = doc.createElement('span');
     this.stageBadgeEl.className = 'sg-stage-badge';
+    this.stageBadgeEl.dataset.shape = 'square';
+    this.stageGlyphEl = doc.createElement('span');
+    this.stageGlyphEl.className = 'sg-stage-glyph';
+    this.stageBadgeEl.appendChild(this.stageGlyphEl);
+
+    const stageMeta = doc.createElement('span');
+    stageMeta.className = 'sg-stage-meta';
     this.stageNameEl = doc.createElement('span');
     this.stageNameEl.className = 'sg-stage-name';
-    this.stagePillEl.append(this.stageBadgeEl, this.stageNameEl);
+    this.stageMultEl = doc.createElement('span');
+    this.stageMultEl.className = 'sg-stage-mult sg-hidden';
+    stageMeta.append(this.stageNameEl, this.stageMultEl);
+    this.stagePillEl.append(this.stageBadgeEl, stageMeta);
+
+    const rightDivider = doc.createElement('div');
+    rightDivider.className = 'sg-capsule-divider';
 
     this.distancePillEl = doc.createElement('div');
-    this.distancePillEl.className = 'sg-pill sg-dist-pill';
+    this.distancePillEl.className = 'sg-dist-pill';
     this.distancePillEl.textContent = '0 m';
 
-    stageRow.append(this.stagePillEl, this.distancePillEl);
+    this.pauseBtn = doc.createElement('button');
+    this.pauseBtn.type = 'button';
+    this.pauseBtn.className = 'sg-icon-btn sg-btn-pause';
+    this.pauseBtn.dataset.paused = 'false';
+    this.setAttr(this.pauseBtn, 'aria-label', 'Pause');
+    this.setAttr(this.pauseBtn, 'title', 'Pause [Esc]');
+    this.pauseBtn.innerHTML = PAUSE_PLAY_ICON_SVG;
+    this.pauseBtn.addEventListener('click', this.onPauseClick);
+
+    trailCapsule.append(this.stagePillEl, rightDivider, this.distancePillEl, this.pauseBtn);
 
     const togglesRow = doc.createElement('div');
     togglesRow.className = 'sg-toggles';
-    this.snowBtn = this.makeToggleButton(doc, 'Snow [B]', 'sg-btn-snow', this.onSnowClick);
-    this.debugBtn = this.makeToggleButton(doc, 'Debug [G]', 'sg-btn-debug', this.onDebugClick);
-    this.statsBtn = this.makeToggleButton(doc, 'Stats [P]', 'sg-btn-stats', this.onStatsClick);
-    this.pauseBtn = this.makeToggleButton(doc, 'Pause [Esc]', 'sg-btn-pause', this.onPauseClick);
-    togglesRow.append(this.snowBtn, this.debugBtn, this.statsBtn, this.pauseBtn);
+    this.snowBtn = this.makeToggleButton(doc, 'Snow [B]', 'sg-toggle-btn sg-btn-snow', this.onSnowClick);
+    this.debugBtn = this.makeToggleButton(doc, 'Debug [G]', 'sg-toggle-btn sg-btn-debug', this.onDebugClick);
+    this.statsBtn = this.makeToggleButton(doc, 'Stats [P]', 'sg-toggle-btn sg-btn-stats', this.onStatsClick);
+    togglesRow.append(this.snowBtn, this.debugBtn, this.statsBtn);
 
-    topRight.append(stageRow, togglesRow);
+    topRight.append(trailCapsule, togglesRow);
     topBar.append(topLeft, topRight);
 
-    // 2. Center Banners & Pooled Event Popups
-    const centerStack = doc.createElement('div');
-    centerStack.className = 'sg-center-stack';
+    // 2. Single-Slot Top Broadcast Rail (Strictly Above Horizon)
+    const topRail = doc.createElement('div');
+    topRail.className = 'sg-top-rail';
 
     this.forkBannerEl = doc.createElement('div');
     this.forkBannerEl.className = 'sg-fork-banner sg-hidden';
-    this.forkHeaderEl = doc.createElement('div');
-    this.forkHeaderEl.className = 'sg-fork-header';
-    const forkChoices = doc.createElement('div');
-    forkChoices.className = 'sg-fork-choices';
+    const forkRow = doc.createElement('div');
+    forkRow.className = 'sg-fork-row';
 
     this.forkLeftEl = doc.createElement('div');
     this.forkLeftEl.className = 'sg-fork-side';
+    const leftArrow = doc.createElement('span');
+    leftArrow.className = 'sg-fork-chevron';
+    leftArrow.textContent = '◀';
     this.forkLeftBadgeEl = doc.createElement('span');
     this.forkLeftBadgeEl.className = 'sg-stage-badge';
+    this.forkLeftGlyphEl = doc.createElement('span');
+    this.forkLeftGlyphEl.className = 'sg-stage-glyph';
+    this.forkLeftBadgeEl.appendChild(this.forkLeftGlyphEl);
     this.forkLeftNameEl = doc.createElement('span');
-    const leftArrow = doc.createElement('span');
-    leftArrow.textContent = '◀';
+    this.forkLeftNameEl.className = 'sg-fork-name';
     this.forkLeftEl.append(leftArrow, this.forkLeftBadgeEl, this.forkLeftNameEl);
+
+    this.forkDistEl = doc.createElement('span');
+    this.forkDistEl.className = 'sg-fork-dist';
+    this.forkDistEl.textContent = '200m';
 
     this.forkRightEl = doc.createElement('div');
     this.forkRightEl.className = 'sg-fork-side sg-fork-side-right';
+    this.forkRightNameEl = doc.createElement('span');
+    this.forkRightNameEl.className = 'sg-fork-name';
     this.forkRightBadgeEl = doc.createElement('span');
     this.forkRightBadgeEl.className = 'sg-stage-badge';
-    this.forkRightNameEl = doc.createElement('span');
+    this.forkRightGlyphEl = doc.createElement('span');
+    this.forkRightGlyphEl.className = 'sg-stage-glyph';
+    this.forkRightBadgeEl.appendChild(this.forkRightGlyphEl);
     const rightArrow = doc.createElement('span');
+    rightArrow.className = 'sg-fork-chevron';
     rightArrow.textContent = '▶';
-    this.forkRightEl.append(rightArrow, this.forkRightBadgeEl, this.forkRightNameEl);
+    this.forkRightEl.append(this.forkRightNameEl, this.forkRightBadgeEl, rightArrow);
 
-    forkChoices.append(this.forkLeftEl, this.forkRightEl);
-    this.forkBannerEl.append(this.forkHeaderEl, forkChoices);
+    forkRow.append(this.forkLeftEl, this.forkDistEl, this.forkRightEl);
 
+    const forkTrack = doc.createElement('div');
+    forkTrack.className = 'sg-fork-track';
+    this.forkFillEl = doc.createElement('div');
+    this.forkFillEl.className = 'sg-fork-fill';
+    forkTrack.appendChild(this.forkFillEl);
+    this.forkBannerEl.append(forkRow, forkTrack);
+
+    this.ribbonEl = doc.createElement('div');
+    this.ribbonEl.className = 'sg-broadcast-ribbon sg-hidden';
+    this.ribbonEl.dataset.tone = 'delivery';
+    const ribbonSlant = doc.createElement('span');
+    ribbonSlant.className = 'sg-slant-bar';
+    const ribbonSheen = doc.createElement('span');
+    ribbonSheen.className = 'sg-ribbon-sheen';
+    const ribbonContent = doc.createElement('div');
+    ribbonContent.className = 'sg-ribbon-content';
+    this.ribbonPrimaryEl = doc.createElement('span');
+    this.ribbonPrimaryEl.className = 'sg-ribbon-primary';
+    this.ribbonSepEl = doc.createElement('span');
+    this.ribbonSepEl.className = 'sg-ribbon-sep';
+    this.ribbonSepEl.textContent = '·';
+    this.ribbonDetailEl = doc.createElement('span');
+    this.ribbonDetailEl.className = 'sg-ribbon-detail';
+    this.ribbonComboEl = doc.createElement('span');
+    this.ribbonComboEl.className = 'sg-ribbon-combo sg-hidden';
+    ribbonContent.append(this.ribbonPrimaryEl, this.ribbonSepEl, this.ribbonDetailEl, this.ribbonComboEl);
+    this.ribbonEl.append(ribbonSlant, ribbonSheen, ribbonContent);
+
+    topRail.append(this.forkBannerEl, this.ribbonEl);
+
+    // 3. Wipeout Recovery Banner (centered only during tumble)
     this.wipeoutBannerEl = doc.createElement('div');
     this.wipeoutBannerEl.className = 'sg-wipeout-banner sg-hidden';
+    const wipeoutSlant = doc.createElement('span');
+    wipeoutSlant.className = 'sg-slant-bar';
     const wipeoutTitle = doc.createElement('div');
     wipeoutTitle.className = 'sg-wipeout-title';
-    wipeoutTitle.textContent = 'WIPEOUT!';
+    wipeoutTitle.textContent = 'Wipeout!';
     this.wipeoutSubEl = doc.createElement('div');
     this.wipeoutSubEl.className = 'sg-wipeout-sub';
     this.wipeoutSubEl.textContent = 'Tumbling... Back on skis soon!';
@@ -325,43 +480,46 @@ export class GameUI {
     this.wipeoutFillEl = doc.createElement('div');
     this.wipeoutFillEl.className = 'sg-wipeout-fill';
     wipeoutBar.appendChild(this.wipeoutFillEl);
-    this.wipeoutBannerEl.append(wipeoutTitle, this.wipeoutSubEl, wipeoutBar);
+    this.wipeoutBannerEl.append(wipeoutSlant, wipeoutTitle, this.wipeoutSubEl, wipeoutBar);
 
-    const popupPoolEl = doc.createElement('div');
-    popupPoolEl.className = 'sg-popup-pool';
-    for (let i = 0; i < POPUP_POOL_SIZE; i++) {
-      const root = doc.createElement('div');
-      root.className = 'sg-popup sg-hidden';
-      const titleEl = doc.createElement('div');
-      titleEl.className = 'sg-popup-title';
-      const subEl = doc.createElement('div');
-      subEl.className = 'sg-popup-sub';
-      root.append(titleEl, subEl);
-      popupPoolEl.appendChild(root);
-      this.popupSlots.push({
-        root,
-        titleEl,
-        subEl,
-        active: false,
-        remainingSec: 0,
-        lastTone: '',
-      });
-    }
-
-    centerStack.append(this.forkBannerEl, this.wipeoutBannerEl, popupPoolEl);
-
-    // 3. Peripheral Creature Edge Alerts & Lazy Hint
+    // 4. Peripheral Directional Creature Edge Beacons
     this.edgeLeftEl = doc.createElement('div');
-    this.edgeLeftEl.className = 'sg-edge-pulse sg-edge-left';
-    this.edgeRightEl = doc.createElement('div');
-    this.edgeRightEl.className = 'sg-edge-pulse sg-edge-right';
+    this.edgeLeftEl.className = 'sg-edge-pulse sg-edge-left sg-hidden';
+    const edgeLeftSlant = doc.createElement('span');
+    edgeLeftSlant.className = 'sg-slant-bar sg-slant-alert';
+    const edgeLeftChevron = doc.createElement('span');
+    edgeLeftChevron.className = 'sg-edge-chevron';
+    edgeLeftChevron.innerHTML = CHEVRON_LEFT_SVG;
+    const edgeLeftBear = doc.createElement('span');
+    edgeLeftBear.className = 'sg-edge-creature';
+    edgeLeftBear.innerHTML = BEAR_ICON_SVG;
+    this.edgeLeftDistEl = doc.createElement('span');
+    this.edgeLeftDistEl.className = 'sg-edge-dist';
+    this.edgeLeftDistEl.textContent = '0m';
+    this.edgeLeftEl.append(edgeLeftSlant, edgeLeftChevron, edgeLeftBear, this.edgeLeftDistEl);
 
+    this.edgeRightEl = doc.createElement('div');
+    this.edgeRightEl.className = 'sg-edge-pulse sg-edge-right sg-hidden';
+    const edgeRightSlant = doc.createElement('span');
+    edgeRightSlant.className = 'sg-slant-bar sg-slant-alert sg-slant-right';
+    this.edgeRightDistEl = doc.createElement('span');
+    this.edgeRightDistEl.className = 'sg-edge-dist';
+    this.edgeRightDistEl.textContent = '0m';
+    const edgeRightBear = doc.createElement('span');
+    edgeRightBear.className = 'sg-edge-creature';
+    edgeRightBear.innerHTML = BEAR_ICON_SVG;
+    const edgeRightChevron = doc.createElement('span');
+    edgeRightChevron.className = 'sg-edge-chevron';
+    edgeRightChevron.innerHTML = CHEVRON_RIGHT_SVG;
+    this.edgeRightEl.append(this.edgeRightDistEl, edgeRightBear, edgeRightChevron, edgeRightSlant);
+
+    // 5. Lazy Onboarding Hint
     this.hintPillEl = doc.createElement('div');
     this.hintPillEl.className = 'sg-hint-pill sg-hidden';
     this.hintPillEl.textContent =
-      'Carve: A/D, Arrows, or Drag • Jump: Space or Tap • Brake: S or 2-Finger Hold';
+      'Carve: A/D, Arrows, or Drag · Jump: Space or Tap · Brake: S or 2-Finger Hold';
 
-    // 4. Telemetry HUD Panel
+    // 6. Telemetry Panel
     this.telemetryEl = doc.createElement('div');
     this.telemetryEl.className = 'sg-telemetry sg-hidden';
     const teleTitle = doc.createElement('div');
@@ -380,7 +538,7 @@ export class GameUI {
     this.teleGeoTexEl = this.addTelemetryRow(doc, this.telemetryEl, 'Geos / Textures');
     this.teleLeakEl = this.addTelemetryRow(doc, this.telemetryEl, 'Leak Check');
 
-    // 5. Start / Pause / Skier Select Overlay
+    // 7. Start / Pause / Skier Select Overlay
     this.overlayEl = doc.createElement('div');
     this.overlayEl.className = 'sg-overlay';
 
@@ -398,7 +556,7 @@ export class GameUI {
     this.overlaySubEl = doc.createElement('p');
     this.overlaySubEl.className = 'sg-modal-sub';
     this.overlaySubEl.textContent =
-      'Collect gifts, dodge pines & bears, and deliver to waiting children for combo chains!';
+      'Carve past boulders & bears, stack presents, and toss them to waiting children!';
 
     this.summaryStripEl = doc.createElement('div');
     this.summaryStripEl.className = 'sg-summary-strip sg-hidden';
@@ -439,20 +597,44 @@ export class GameUI {
       perk.textContent = info.perkLabel;
 
       btn.append(top, meta, perk);
-      btn.addEventListener('click', () => {
+      const handler = (): void => {
         btn.blur();
         this.callbacks.onSelectSkier(info.id);
-      });
+      };
+      btn.addEventListener('click', handler);
+      this.skierClickHandlers.push({ btn, handler });
       this.skierButtons.set(info.id, btn);
       skierGrid.appendChild(btn);
     }
 
+    this.modalTogglesEl = doc.createElement('div');
+    this.modalTogglesEl.className = 'sg-modal-toggles sg-hidden';
+    this.modalSnowBtn = this.makeToggleButton(
+      doc,
+      'Blizzard [B]',
+      'sg-modal-toggle-btn sg-modal-btn-snow',
+      this.onSnowClick,
+    );
+    this.modalDebugBtn = this.makeToggleButton(
+      doc,
+      '3D Debug [G]',
+      'sg-modal-toggle-btn sg-modal-btn-debug',
+      this.onDebugClick,
+    );
+    this.modalStatsBtn = this.makeToggleButton(
+      doc,
+      'Telemetry [P]',
+      'sg-modal-toggle-btn sg-modal-btn-stats',
+      this.onStatsClick,
+    );
+    this.modalTogglesEl.append(this.modalSnowBtn, this.modalDebugBtn, this.modalStatsBtn);
+
     const controlsBox = doc.createElement('div');
     controlsBox.className = 'sg-controls-box';
     controlsBox.innerHTML =
-      '<div class="sg-controls-line"><strong>Desktop:</strong> A/D or Arrows carve · Space/W/Up jump · S/Down brake</div>' +
+      '<div class="sg-controls-line"><strong>Desktop:</strong> <span class="sg-kbd">A</span>/<span class="sg-kbd">D</span> or Arrows carve · <span class="sg-kbd">Space</span>/<span class="sg-kbd">W</span> jump · <span class="sg-kbd">S</span> brake</div>' +
       '<div class="sg-controls-line"><strong>Touch:</strong> Drag horizontally to carve · Tap or swipe up jump · 2-finger brake</div>' +
-      '<div class="sg-controls-line"><strong>Toggles:</strong> [B] Blizzard · [G] 3D Debug · [P] Telemetry · [Esc] Pause</div>';
+      '<div class="sg-controls-line"><strong>Toggles:</strong> <span class="sg-kbd">B</span> Blizzard · <span class="sg-kbd">G</span> 3D Debug · <span class="sg-kbd">P</span> Stats · <span class="sg-kbd">Esc</span> Pause</div>';
 
     const actionsRow = doc.createElement('div');
     actionsRow.className = 'sg-modal-actions';
@@ -476,14 +658,17 @@ export class GameUI {
       this.summaryStripEl,
       skierLabel,
       skierGrid,
+      this.modalTogglesEl,
       controlsBox,
       actionsRow,
     );
     this.overlayEl.appendChild(modal);
 
     this.rootEl.append(
+      this.stumbleFlashEl,
       topBar,
-      centerStack,
+      topRail,
+      this.wipeoutBannerEl,
       this.edgeLeftEl,
       this.edgeRightEl,
       this.hintPillEl,
@@ -492,51 +677,53 @@ export class GameUI {
     );
     this.mountEl.appendChild(this.rootEl);
 
-    // Subscribe to simulation EventBus cues
+    // Subscribe to simulation EventBus cues (5 channels)
     this.unsubscribers.push(
       eventBus.on('PRESENT_PICKED_UP', (ev) => {
-        this.pushPopup(formatPickupPopup(ev));
+        this.pushPickupBurst(ev);
       }),
       eventBus.on('PRESENT_DELIVERED', (ev) => {
-        this.pushPopup(formatDeliveryPopup(ev));
+        this.showDeliveryRibbon(ev);
       }),
-      eventBus.on('FORK_ENTERED', (ev) => {
-        this.pushPopup(formatForkEnteredPopup(ev));
+      eventBus.on('FORK_ENTERED', () => {
+        this.stageAnnounceTimerSec = STAGE_ANNOUNCE_DURATION_SEC;
+        this.stagePillEl.classList.add('sg-stage-announce');
       }),
       eventBus.on('CREATURE_TELEGRAPH', (ev) => {
-        this.pushPopup(formatCreatureTelegraphPopup(ev));
-        if (ev.edgeSide === 'left') {
-          this.edgeLeftTimerSec = 1.4;
-        } else if (ev.edgeSide === 'right') {
-          this.edgeRightTimerSec = 1.4;
-        } else if (ev.showEdgeIndicator) {
-          this.edgeLeftTimerSec = 1.1;
-          this.edgeRightTimerSec = 1.1;
-        }
+        this.showCreatureAlert(ev);
       }),
       eventBus.on('PLAYER_WIPEOUT', (ev) => {
-        const desc = formatWipeoutEventPopup(ev);
-        if (desc) {
-          this.pushPopup(desc);
-        }
+        this.showStumbleChip(ev);
       }),
     );
   }
 
   resetRunState(): void {
     this.activePlaySec = 0;
+    this.stageAnnounceTimerSec = 0;
+    this.stagePillEl.classList.remove('sg-stage-announce');
+
+    this.pickupAccumPoints = 0;
+    this.pickupAccumCount = 0;
+    this.pickupHasGolden = false;
+    this.pickupTimerSec = 0;
+    this.pickupTone = '';
+    this.pickupChipEl.classList.remove('sg-chip-visible', 'sg-bump-a', 'sg-bump-b');
+    this.pickupChipEl.classList.add('sg-hidden');
+
+    this.ribbonTimerSec = 0;
+    this.ribbonEl.classList.remove('sg-ribbon-visible', 'sg-bump-a', 'sg-bump-b');
+    this.ribbonEl.classList.add('sg-hidden');
+
     this.edgeLeftTimerSec = 0;
     this.edgeRightTimerSec = 0;
     this.edgeLeftEl.classList.remove('sg-edge-active');
+    this.edgeLeftEl.classList.add('sg-hidden');
     this.edgeRightEl.classList.remove('sg-edge-active');
+    this.edgeRightEl.classList.add('sg-hidden');
 
-    for (let i = 0; i < this.popupSlots.length; i++) {
-      const slot = this.popupSlots[i]!;
-      slot.active = false;
-      slot.remainingSec = 0;
-      slot.root.classList.remove('sg-popup-visible');
-      slot.root.classList.add('sg-hidden');
-    }
+    this.stumbleFlashTimerSec = 0;
+    this.stumbleFlashEl.classList.remove('sg-stumble-active');
   }
 
   update(data: GameUIUpdateData, frameDtSec: number): void {
@@ -553,7 +740,7 @@ export class GameUI {
     }
 
     const comboActive = simState.comboTimerSec > 0 || simState.comboMultiplier > 1;
-    const comboText = formatMultiplier(simState.comboMultiplier);
+    const comboText = formatMultiplier(simState.comboMultiplier).replace(/^x/, '×');
     if (comboText !== this.lastComboText) {
       this.lastComboText = comboText;
       this.comboBadgeEl.textContent = comboText;
@@ -571,7 +758,7 @@ export class GameUI {
     }
 
     // 2. Carried Presents & Total Delivered
-    const bagText = `${simState.carriedCount} / ${simState.maxCarryCapacity}`;
+    const bagText = `${simState.carriedCount}/${simState.maxCarryCapacity}`;
     if (bagText !== this.lastBagText) {
       this.lastBagText = bagText;
       this.bagCountEl.textContent = bagText;
@@ -580,8 +767,9 @@ export class GameUI {
     if (bagFull !== this.lastBagFull) {
       this.lastBagFull = bagFull;
       this.bagCardEl.classList.toggle('sg-bag-full', bagFull);
+      this.bagFullTagEl.classList.toggle('sg-hidden', !bagFull);
     }
-    const deliveredText = `Delivered: ${simState.deliveredTotal}`;
+    const deliveredText = `${simState.deliveredTotal} Delivered`;
     if (deliveredText !== this.lastDeliveredText) {
       this.lastDeliveredText = deliveredText;
       this.deliveredSubEl.textContent = deliveredText;
@@ -592,9 +780,16 @@ export class GameUI {
       this.lastStageId = simState.activeStageId;
       const stage = formatStageDisplay(simState.activeStageId);
       this.stagePillEl.dataset.stage = stage.id;
-      this.stageBadgeEl.textContent = stage.badgeSymbol;
-      this.stageBadgeEl.style.backgroundColor = stage.badgeColor;
+      this.stageBadgeEl.dataset.shape = stage.badgeShape;
+      this.stageGlyphEl.style.backgroundColor = stage.badgeColor;
       this.stageNameEl.textContent = stage.name;
+      if (stage.multiplier > 1) {
+        this.stageMultEl.textContent = stage.multiplierLabel.replace(/x$/i, '×');
+        this.stageMultEl.classList.remove('sg-hidden');
+      } else {
+        this.stageMultEl.textContent = '';
+        this.stageMultEl.classList.add('sg-hidden');
+      }
     }
 
     const distanceText = formatDistanceM(simState.distanceM);
@@ -603,43 +798,55 @@ export class GameUI {
       this.distancePillEl.textContent = distanceText;
     }
 
-    // 4. Toggle Pills
+    // 4. Toggle Pills (Desktop top-right + Pause Modal sync)
     const blizzardOn = simState.activeWeather.blizzardEnabled;
     if (blizzardOn !== this.lastSnowActive) {
       this.lastSnowActive = blizzardOn;
-      this.snowBtn.dataset.active = String(blizzardOn);
+      const val = String(blizzardOn);
+      this.snowBtn.dataset.active = val;
+      this.modalSnowBtn.dataset.active = val;
     }
     if (debugDrawEnabled !== this.lastDebugActive) {
       this.lastDebugActive = debugDrawEnabled;
-      this.debugBtn.dataset.active = String(debugDrawEnabled);
+      const val = String(debugDrawEnabled);
+      this.debugBtn.dataset.active = val;
+      this.modalDebugBtn.dataset.active = val;
     }
     if (telemetryVisible !== this.lastStatsActive) {
       this.lastStatsActive = telemetryVisible;
-      this.statsBtn.dataset.active = String(telemetryVisible);
+      const val = String(telemetryVisible);
+      this.statsBtn.dataset.active = val;
+      this.modalStatsBtn.dataset.active = val;
     }
 
-    // 5. Upcoming Fork Telegraph Banner
+    // 5. Slim Upcoming Fork Split-Gate Bar
     const forkActive = simState.upcomingFork.active;
     if (forkActive !== this.lastForkActive) {
       this.lastForkActive = forkActive;
       this.forkBannerEl.classList.toggle('sg-hidden', !forkActive);
     }
     if (forkActive) {
-      const forkHeader = `FORK IN ${Math.ceil(simState.upcomingFork.distanceM)} m`;
-      if (forkHeader !== this.lastForkHeader) {
-        this.lastForkHeader = forkHeader;
-        this.forkHeaderEl.textContent = forkHeader;
+      const distText = `${Math.ceil(simState.upcomingFork.distanceM)}m`;
+      if (distText !== this.lastForkDistText) {
+        this.lastForkDistText = distText;
+        this.forkDistEl.textContent = distText;
+      }
+      const forkProgress = 1 - computeRatio01(simState.upcomingFork.distanceM, 200);
+      const forkWidth = `${Math.round(forkProgress * 1000) / 10}%`;
+      if (forkWidth !== this.lastForkWidth) {
+        this.lastForkWidth = forkWidth;
+        this.forkFillEl.style.width = forkWidth;
       }
       const leftId = simState.upcomingFork.leftStageId ?? 'sunny-blue';
       if (leftId !== this.lastForkLeftId) {
         this.lastForkLeftId = leftId;
         const leftStage = formatStageDisplay(leftId);
         this.forkLeftEl.dataset.stage = leftStage.id;
-        this.forkLeftBadgeEl.textContent = leftStage.badgeSymbol;
-        this.forkLeftBadgeEl.style.backgroundColor = leftStage.badgeColor;
+        this.forkLeftBadgeEl.dataset.shape = leftStage.badgeShape;
+        this.forkLeftGlyphEl.style.backgroundColor = leftStage.badgeColor;
         this.forkLeftNameEl.textContent =
           leftStage.multiplier > 1
-            ? `${leftStage.name} (${leftStage.multiplierLabel})`
+            ? `${leftStage.name} ${leftStage.multiplierLabel.replace(/x$/i, '×')}`
             : leftStage.name;
       }
       const rightId = simState.upcomingFork.rightStageId ?? 'icy-black';
@@ -647,11 +854,11 @@ export class GameUI {
         this.lastForkRightId = rightId;
         const rightStage = formatStageDisplay(rightId);
         this.forkRightEl.dataset.stage = rightStage.id;
-        this.forkRightBadgeEl.textContent = rightStage.badgeSymbol;
-        this.forkRightBadgeEl.style.backgroundColor = rightStage.badgeColor;
+        this.forkRightBadgeEl.dataset.shape = rightStage.badgeShape;
+        this.forkRightGlyphEl.style.backgroundColor = rightStage.badgeColor;
         this.forkRightNameEl.textContent =
           rightStage.multiplier > 1
-            ? `${rightStage.name} (${rightStage.multiplierLabel})`
+            ? `${rightStage.name} ${rightStage.multiplierLabel.replace(/x$/i, '×')}`
             : rightStage.name;
       }
     }
@@ -671,10 +878,10 @@ export class GameUI {
       }
     }
 
-    // 7. Pooled Floating Popups & Edge Alerts + Lazy Onboarding Hint
+    // 7. Perimeter Notification Timers + Lazy Onboarding Hint
     if (overlayMode === 'playing' && !simState.paused) {
       this.activePlaySec += dt;
-      this.stepPopupsAndEdges(dt);
+      this.stepNotifications(dt);
     }
 
     const hintVisible =
@@ -709,9 +916,18 @@ export class GameUI {
     }
     this.unsubscribers.length = 0;
 
+    for (let i = 0; i < this.skierClickHandlers.length; i++) {
+      const entry = this.skierClickHandlers[i]!;
+      entry.btn.removeEventListener('click', entry.handler);
+    }
+    this.skierClickHandlers.length = 0;
+
     this.snowBtn.removeEventListener('click', this.onSnowClick);
     this.debugBtn.removeEventListener('click', this.onDebugClick);
     this.statsBtn.removeEventListener('click', this.onStatsClick);
+    this.modalSnowBtn.removeEventListener('click', this.onSnowClick);
+    this.modalDebugBtn.removeEventListener('click', this.onDebugClick);
+    this.modalStatsBtn.removeEventListener('click', this.onStatsClick);
     this.pauseBtn.removeEventListener('click', this.onPauseClick);
     this.primaryActionBtn.removeEventListener('click', this.onPrimaryActionClick);
     this.restartActionBtn.removeEventListener('click', this.onRestartActionClick);
@@ -721,55 +937,184 @@ export class GameUI {
     }
   }
 
-  private stepPopupsAndEdges(dt: number): void {
-    for (let i = 0; i < this.popupSlots.length; i++) {
-      const slot = this.popupSlots[i]!;
-      if (!slot.active) continue;
-      slot.remainingSec -= dt;
-      if (slot.remainingSec <= 0.18 && slot.root.classList.contains('sg-popup-visible')) {
-        slot.root.classList.remove('sg-popup-visible');
+  private pushPickupBurst(ev: SimEventMap['PRESENT_PICKED_UP']): void {
+    const isGold = ev.presentDefId === 'gift_golden';
+    if (this.pickupTimerSec > 0 && this.pickupTone !== 'stumble') {
+      this.pickupAccumPoints += ev.pickupPoints;
+      this.pickupAccumCount += 1;
+      this.pickupHasGolden = this.pickupHasGolden || isGold;
+    } else {
+      this.pickupAccumPoints = ev.pickupPoints;
+      this.pickupAccumCount = 1;
+      this.pickupHasGolden = isGold;
+    }
+
+    const chip = formatPickupBurstChip(
+      this.pickupAccumPoints,
+      this.pickupAccumCount,
+      this.pickupHasGolden,
+    );
+    this.pickupTimerSec = PICKUP_CHIP_DURATION_SEC;
+    if (this.pickupTone !== chip.tone) {
+      this.pickupTone = chip.tone;
+      this.pickupChipEl.dataset.tone = chip.tone;
+    }
+    this.pickupPointsEl.textContent = chip.pointsText;
+    this.pickupStarEl.classList.toggle('sg-hidden', !chip.hasGolden);
+    this.pickupCountEl.textContent = chip.countText;
+    this.pickupCountEl.classList.toggle('sg-hidden', chip.countText.length === 0);
+
+    this.pickupChipEl.classList.remove('sg-hidden');
+    this.pickupChipEl.classList.add('sg-chip-visible');
+    this.pickupBumpToggle = this.triggerBump(this.pickupChipEl, this.pickupBumpToggle);
+  }
+
+  private showDeliveryRibbon(ev: SimEventMap['PRESENT_DELIVERED']): void {
+    const ribbon = formatDeliveryRibbon(ev);
+    this.ribbonTimerSec = ribbon.durationSec;
+    this.ribbonEl.dataset.tone = 'delivery';
+    this.ribbonPrimaryEl.textContent = ribbon.pointsText;
+    this.ribbonDetailEl.textContent = ribbon.detailText;
+    this.ribbonComboEl.textContent = ribbon.comboText;
+    this.ribbonComboEl.classList.toggle('sg-hidden', ribbon.comboText.length === 0);
+
+    this.ribbonEl.classList.remove('sg-hidden');
+    this.ribbonEl.classList.add('sg-ribbon-visible');
+    this.ribbonBumpToggle = this.triggerBump(this.ribbonEl, this.ribbonBumpToggle);
+  }
+
+  private showCreatureAlert(ev: SimEventMap['CREATURE_TELEGRAPH']): void {
+    const beacon = formatCreatureEdgeBeacon(ev);
+    if (beacon.side === 'left') {
+      this.edgeLeftDistEl.textContent = beacon.distanceText;
+      this.edgeLeftTimerSec = beacon.durationSec;
+      this.edgeLeftEl.classList.remove('sg-hidden');
+      this.edgeLeftEl.classList.add('sg-edge-active');
+      return;
+    }
+
+    if (beacon.side === 'right') {
+      this.edgeRightDistEl.textContent = beacon.distanceText;
+      this.edgeRightTimerSec = beacon.durationSec;
+      this.edgeRightEl.classList.remove('sg-hidden');
+      this.edgeRightEl.classList.add('sg-edge-active');
+      return;
+    }
+
+    // Center ahead: use the single-slot top broadcast ribbon (never blocking center sightline)
+    this.ribbonTimerSec = beacon.durationSec;
+    this.ribbonEl.dataset.tone = 'warning';
+    this.ribbonPrimaryEl.textContent = `▲ ${beacon.creatureName}`;
+    this.ribbonDetailEl.textContent = beacon.distanceText;
+    this.ribbonComboEl.classList.add('sg-hidden');
+    this.ribbonEl.classList.remove('sg-hidden');
+    this.ribbonEl.classList.add('sg-ribbon-visible');
+    this.ribbonBumpToggle = this.triggerBump(this.ribbonEl, this.ribbonBumpToggle);
+
+    if (ev.showEdgeIndicator) {
+      this.edgeLeftDistEl.textContent = beacon.distanceText;
+      this.edgeRightDistEl.textContent = beacon.distanceText;
+      this.edgeLeftTimerSec = 1.1;
+      this.edgeRightTimerSec = 1.1;
+      this.edgeLeftEl.classList.remove('sg-hidden');
+      this.edgeRightEl.classList.remove('sg-hidden');
+      this.edgeLeftEl.classList.add('sg-edge-active');
+      this.edgeRightEl.classList.add('sg-edge-active');
+    }
+  }
+
+  private showStumbleChip(ev: SimEventMap['PLAYER_WIPEOUT']): void {
+    const stumble = formatStumbleChip(ev);
+    if (!stumble) return;
+
+    this.pickupAccumPoints = 0;
+    this.pickupAccumCount = 0;
+    this.pickupHasGolden = false;
+    this.pickupTimerSec = stumble.durationSec;
+    if (this.pickupTone !== 'stumble') {
+      this.pickupTone = 'stumble';
+      this.pickupChipEl.dataset.tone = 'stumble';
+    }
+    this.pickupPointsEl.textContent = stumble.text;
+    this.pickupStarEl.classList.add('sg-hidden');
+    this.pickupCountEl.classList.add('sg-hidden');
+    this.pickupChipEl.classList.remove('sg-hidden');
+    this.pickupChipEl.classList.add('sg-chip-visible');
+    this.pickupBumpToggle = this.triggerBump(this.pickupChipEl, this.pickupBumpToggle);
+
+    this.stumbleFlashTimerSec = STUMBLE_FLASH_DURATION_SEC;
+    this.stumbleFlashEl.classList.add('sg-stumble-active');
+  }
+
+  private stepNotifications(dt: number): void {
+    if (this.pickupTimerSec > 0) {
+      this.pickupTimerSec -= dt;
+      if (this.pickupTimerSec <= 0.16 && this.pickupChipEl.classList.contains('sg-chip-visible')) {
+        this.pickupChipEl.classList.remove('sg-chip-visible');
       }
-      if (slot.remainingSec <= 0) {
-        slot.active = false;
-        slot.remainingSec = 0;
-        slot.root.classList.add('sg-hidden');
+      if (this.pickupTimerSec <= 0) {
+        this.pickupTimerSec = 0;
+        this.pickupAccumPoints = 0;
+        this.pickupAccumCount = 0;
+        this.pickupHasGolden = false;
+        this.pickupTone = '';
+        this.pickupChipEl.classList.add('sg-hidden');
+      }
+    }
+
+    if (this.ribbonTimerSec > 0) {
+      this.ribbonTimerSec -= dt;
+      if (this.ribbonTimerSec <= 0.18 && this.ribbonEl.classList.contains('sg-ribbon-visible')) {
+        this.ribbonEl.classList.remove('sg-ribbon-visible');
+      }
+      if (this.ribbonTimerSec <= 0) {
+        this.ribbonTimerSec = 0;
+        this.ribbonEl.classList.add('sg-hidden');
+      }
+    }
+
+    if (this.stageAnnounceTimerSec > 0) {
+      this.stageAnnounceTimerSec = Math.max(0, this.stageAnnounceTimerSec - dt);
+      if (this.stageAnnounceTimerSec === 0) {
+        this.stagePillEl.classList.remove('sg-stage-announce');
       }
     }
 
     if (this.edgeLeftTimerSec > 0) {
-      this.edgeLeftTimerSec = Math.max(0, this.edgeLeftTimerSec - dt);
-      this.edgeLeftEl.classList.toggle('sg-edge-active', this.edgeLeftTimerSec > 0);
+      this.edgeLeftTimerSec -= dt;
+      if (this.edgeLeftTimerSec <= 0.16 && this.edgeLeftEl.classList.contains('sg-edge-active')) {
+        this.edgeLeftEl.classList.remove('sg-edge-active');
+      }
+      if (this.edgeLeftTimerSec <= 0) {
+        this.edgeLeftTimerSec = 0;
+        this.edgeLeftEl.classList.add('sg-hidden');
+      }
     }
+
     if (this.edgeRightTimerSec > 0) {
-      this.edgeRightTimerSec = Math.max(0, this.edgeRightTimerSec - dt);
-      this.edgeRightEl.classList.toggle('sg-edge-active', this.edgeRightTimerSec > 0);
+      this.edgeRightTimerSec -= dt;
+      if (this.edgeRightTimerSec <= 0.16 && this.edgeRightEl.classList.contains('sg-edge-active')) {
+        this.edgeRightEl.classList.remove('sg-edge-active');
+      }
+      if (this.edgeRightTimerSec <= 0) {
+        this.edgeRightTimerSec = 0;
+        this.edgeRightEl.classList.add('sg-hidden');
+      }
+    }
+
+    if (this.stumbleFlashTimerSec > 0) {
+      this.stumbleFlashTimerSec = Math.max(0, this.stumbleFlashTimerSec - dt);
+      if (this.stumbleFlashTimerSec === 0) {
+        this.stumbleFlashEl.classList.remove('sg-stumble-active');
+      }
     }
   }
 
-  private pushPopup(desc: PopupDescriptor): void {
-    let target: PopupSlot | null = null;
-    for (let i = 0; i < this.popupSlots.length; i++) {
-      const candidate = this.popupSlots[i]!;
-      if (!candidate.active) {
-        target = candidate;
-        break;
-      }
-      if (!target || candidate.remainingSec < target.remainingSec) {
-        target = candidate;
-      }
-    }
-    if (!target) return;
-
-    target.active = true;
-    target.remainingSec = desc.durationSec;
-    if (target.lastTone !== desc.tone) {
-      target.lastTone = desc.tone;
-      target.root.dataset.tone = desc.tone;
-    }
-    target.titleEl.textContent = desc.title;
-    target.subEl.textContent = desc.subtitle;
-    target.root.classList.remove('sg-hidden');
-    target.root.classList.add('sg-popup-visible');
+  private triggerBump(el: HTMLElement, useA: boolean): boolean {
+    const next = !useA;
+    el.classList.remove('sg-bump-a', 'sg-bump-b');
+    el.classList.add(next ? 'sg-bump-a' : 'sg-bump-b');
+    return next;
   }
 
   private updateTelemetryPanel(data: GameUIUpdateData): void {
@@ -816,7 +1161,9 @@ export class GameUI {
       this.lastOverlayMode = overlayMode;
       const showOverlay = overlayMode !== 'playing';
       this.overlayEl.classList.toggle('sg-hidden', !showOverlay);
-      this.pauseBtn.textContent = overlayMode === 'paused' ? 'Resume [Esc]' : 'Pause [Esc]';
+      this.pauseBtn.dataset.paused = String(overlayMode === 'paused');
+      this.setAttr(this.pauseBtn, 'aria-label', overlayMode === 'paused' ? 'Resume' : 'Pause');
+      this.modalTogglesEl.classList.toggle('sg-hidden', overlayMode !== 'paused');
 
       if (overlayMode === 'start') {
         this.overlayKickerEl.textContent = 'Alpine Gift Courier';
@@ -856,15 +1203,21 @@ export class GameUI {
     }
   }
 
+  private setAttr(el: HTMLElement, name: string, value: string): void {
+    if (typeof el.setAttribute === 'function') {
+      el.setAttribute(name, value);
+    }
+  }
+
   private makeToggleButton(
     doc: Document,
     label: string,
-    extraClass: string,
+    className: string,
     onClick: () => void,
   ): HTMLButtonElement {
     const btn = doc.createElement('button');
     btn.type = 'button';
-    btn.className = `sg-toggle-btn ${extraClass}`;
+    btn.className = className;
     btn.textContent = label;
     btn.dataset.active = 'false';
     btn.addEventListener('click', onClick);

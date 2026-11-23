@@ -5,16 +5,20 @@ import { describe, expect, it } from 'vitest';
 import { SKIER_ALPINE, SKIER_CARVER } from '../../content/characters';
 import {
   computeRatio01,
+  formatCreatureEdgeBeacon,
   formatCreatureTelegraphPopup,
   formatDeliveryPopup,
+  formatDeliveryRibbon,
   formatDistanceM,
   formatForkEnteredPopup,
   formatLeakCheckSummary,
   formatMultiplier,
+  formatPickupBurstChip,
   formatPickupPopup,
   formatScore,
   formatSkierCardInfo,
   formatStageDisplay,
+  formatStumbleChip,
   formatTrianglesCount,
   formatWipeoutEventPopup,
 } from '../hudFormatting';
@@ -153,6 +157,121 @@ describe('UI formatting & architectural isolation', () => {
     ).toBe('stumble');
     expect(
       formatWipeoutEventPopup({
+        hazardId: 'pine_tree',
+        effect: 'wipeout',
+        presentsDropped: 3,
+        worldX: 0,
+        worldY: 0,
+        worldZ: 0,
+        recoverySec: 1.2,
+      }),
+    ).toBeNull();
+  });
+
+  it('formats coalesced pickup chips, delivery ribbons, creature edge beacons, and stumble chips', () => {
+    const singleGift = formatPickupBurstChip(25, 1, false);
+    expect(singleGift).toEqual({
+      pointsText: '+25',
+      countText: '',
+      hasGolden: false,
+      tone: 'gift',
+    });
+
+    const multiGold = formatPickupBurstChip(125.4, 3, true);
+    expect(multiGold).toEqual({
+      pointsText: '+125',
+      countText: '×3',
+      hasGolden: true,
+      tone: 'gold',
+    });
+
+    const deliveryWithCombo = formatDeliveryRibbon({
+      deliveryZoneId: 'village_plaza',
+      countDelivered: 4,
+      pointsAwarded: 1400,
+      comboMultiplier: 3,
+      totalScore: 4250,
+      worldX: 0,
+      worldY: 0,
+      worldZ: 0,
+    });
+    expect(deliveryWithCombo).toEqual({
+      pointsText: '+1,400',
+      detailText: '4 DELIVERED',
+      comboText: '×3',
+      durationSec: 2.1,
+    });
+
+    const deliveryNoCombo = formatDeliveryRibbon({
+      deliveryZoneId: 'child_solo',
+      countDelivered: 1,
+      pointsAwarded: 100,
+      comboMultiplier: 1,
+      totalScore: 100,
+      worldX: 0,
+      worldY: 0,
+      worldZ: 0,
+    });
+    expect(deliveryNoCombo.comboText).toBe('');
+    expect(deliveryNoCombo.detailText).toBe('1 DELIVERED');
+
+    const bearLeft = formatCreatureEdgeBeacon({
+      creatureDefId: 'bear_patrol',
+      soundId: 'bear_roar',
+      worldX: -6,
+      worldY: 0,
+      worldZ: -34,
+      distanceToPlayerM: 33.7,
+      showEdgeIndicator: false,
+      edgeSide: 'left',
+    });
+    expect(bearLeft).toEqual({
+      side: 'left',
+      distanceText: '34m',
+      creatureName: 'MOUNTAIN BEAR',
+      durationSec: 1.85,
+    });
+
+    const bearCenter = formatCreatureEdgeBeacon({
+      creatureDefId: 'unknown_beast',
+      soundId: 'roar',
+      worldX: 0,
+      worldY: 0,
+      worldZ: -10,
+      distanceToPlayerM: 0.2,
+      showEdgeIndicator: true,
+      edgeSide: 'center',
+    });
+    expect(bearCenter.side).toBe('center');
+    expect(bearCenter.distanceText).toBe('1m');
+    expect(bearCenter.creatureName).toBe('CREATURE');
+
+    expect(
+      formatStumbleChip({
+        hazardId: 'boulder_small',
+        effect: 'stumble',
+        presentsDropped: 2,
+        worldX: 0,
+        worldY: 0,
+        worldZ: 0,
+        recoverySec: 0,
+      }),
+    ).toEqual({ text: 'STUMBLE · -2', durationSec: 1.35 });
+
+    expect(
+      formatStumbleChip({
+        hazardId: 'boulder_small',
+        effect: 'stumble',
+        presentsDropped: 0,
+        worldX: 0,
+        worldY: 0,
+        worldZ: 0,
+        recoverySec: 0,
+      }),
+    ).toEqual({ text: 'STUMBLE', durationSec: 1.35 });
+
+    expect(
+      formatStumbleChip({
         hazardId: 'pine_tree',
         effect: 'wipeout',
         presentsDropped: 3,

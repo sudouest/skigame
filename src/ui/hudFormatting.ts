@@ -36,6 +36,32 @@ export interface PopupDescriptor {
   readonly durationSec: number;
 }
 
+export interface PickupBurstDisplay {
+  readonly pointsText: string;
+  readonly countText: string;
+  readonly hasGolden: boolean;
+  readonly tone: 'gift' | 'gold';
+}
+
+export interface DeliveryRibbonDisplay {
+  readonly pointsText: string;
+  readonly detailText: string;
+  readonly comboText: string;
+  readonly durationSec: number;
+}
+
+export interface CreatureBeaconDisplay {
+  readonly side: 'left' | 'right' | 'center';
+  readonly distanceText: string;
+  readonly creatureName: string;
+  readonly durationSec: number;
+}
+
+export interface StumbleChipDisplay {
+  readonly text: string;
+  readonly durationSec: number;
+}
+
 export function formatScore(score: number): string {
   const safe = Number.isFinite(score) ? Math.max(0, Math.round(score)) : 0;
   return safe.toLocaleString('en-US');
@@ -209,5 +235,65 @@ export function formatWipeoutEventPopup(ev: SimEventMap['PLAYER_WIPEOUT']): Popu
     subtitle: dropped,
     tone: 'stumble',
     durationSec: 1.4,
+  };
+}
+
+export function formatPickupBurstChip(
+  totalPoints: number,
+  count: number,
+  hasGolden: boolean,
+): PickupBurstDisplay {
+  const safePoints = Number.isFinite(totalPoints) ? Math.max(0, Math.round(totalPoints)) : 0;
+  const safeCount = Number.isFinite(count) ? Math.max(0, Math.round(count)) : 0;
+  return {
+    pointsText: `+${formatScore(safePoints)}`,
+    countText: safeCount > 1 ? `×${safeCount}` : '',
+    hasGolden,
+    tone: hasGolden ? 'gold' : 'gift',
+  };
+}
+
+export function formatDeliveryRibbon(
+  ev: SimEventMap['PRESENT_DELIVERED'],
+): DeliveryRibbonDisplay {
+  const safeCount = Number.isFinite(ev.countDelivered)
+    ? Math.max(0, Math.round(ev.countDelivered))
+    : 0;
+  const comboText =
+    ev.comboMultiplier > 1 ? formatMultiplier(ev.comboMultiplier).replace(/^x/, '×') : '';
+  return {
+    pointsText: `+${formatScore(ev.pointsAwarded)}`,
+    detailText: `${safeCount} DELIVERED`,
+    comboText,
+    durationSec: 2.1,
+  };
+}
+
+export function formatCreatureEdgeBeacon(
+  ev: SimEventMap['CREATURE_TELEGRAPH'],
+): CreatureBeaconDisplay {
+  const creature = getCreatureDef(ev.creatureDefId);
+  const creatureName = (creature?.name ?? 'CREATURE').toUpperCase();
+  const safeDist = Number.isFinite(ev.distanceToPlayerM)
+    ? Math.max(1, Math.round(ev.distanceToPlayerM))
+    : 1;
+  return {
+    side: ev.edgeSide,
+    distanceText: `${safeDist}m`,
+    creatureName,
+    durationSec: 1.85,
+  };
+}
+
+export function formatStumbleChip(ev: SimEventMap['PLAYER_WIPEOUT']): StumbleChipDisplay | null {
+  if (ev.effect !== 'stumble') {
+    return null;
+  }
+  const safeDropped = Number.isFinite(ev.presentsDropped)
+    ? Math.max(0, Math.round(ev.presentsDropped))
+    : 0;
+  return {
+    text: safeDropped > 0 ? `STUMBLE · -${safeDropped}` : 'STUMBLE',
+    durationSec: 1.35,
   };
 }
