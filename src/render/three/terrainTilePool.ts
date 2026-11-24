@@ -28,6 +28,27 @@ export const OUTER_TILE_POOL_CAPACITY = 96;
 
 const SPINE_BOUNDS_PAD_M = 310;
 
+/** onPiste || pisteWeight >= 0.5: suppresses cliff rock tinting. */
+const SURFACE_PISTE_TINT_BIT = 1 << 0;
+/** onPiste || pisteWeight > SCENERY_PISTE_WEIGHT_MAX: excludes off-piste scenery. */
+const SURFACE_PISTE_SCENERY_BIT = 1 << 1;
+/** inChasmZone: excludes off-piste scenery. */
+const SURFACE_CHASM_BIT = 1 << 2;
+const SCENERY_PISTE_WEIGHT_MAX = 0.15;
+
+export interface TileSurfaceSampleOut {
+  /** Bilinear height relative to slot.originY. */
+  relY: number;
+  /** Minimum top-surface normal Y over the 4 enclosing grid corners. */
+  minNormalY: number;
+  /** True when any enclosing corner is piste-adjacent (weight > 0.15) or inside a chasm zone. */
+  blocked: boolean;
+}
+
+export function createTileSurfaceSampleOut(): TileSurfaceSampleOut {
+  return { relY: 0, minNormalY: 1, blocked: false };
+}
+
 export interface TerrainLodSpec {
   readonly lod: TerrainLodTier;
   readonly tileSize: number;
@@ -103,8 +124,8 @@ export interface TerrainTileSlot {
   readonly relHeights: Float32Array;
   readonly baseColors: Float32Array;
   readonly cliffColors: Float32Array;
-  readonly isPisteMask: Uint8Array;
-  readonly isChasmMask: Uint8Array;
+  /** Per-halo-cell bitflags; see SURFACE_*_BIT. Layout is private to the pool (use sampleTileSurface). */
+  readonly surfaceMask: Uint8Array;
   readonly candidateSpines: SpineView[];
   inUse: boolean;
   ready: boolean;
@@ -327,8 +348,7 @@ export class TerrainTilePool {
           relHeights: new Float32Array(haloCount),
           baseColors: new Float32Array(haloCount * 3),
           cliffColors: new Float32Array(haloCount * 3),
-          isPisteMask: new Uint8Array(haloCount),
-          isChasmMask: new Uint8Array(haloCount),
+          surfaceMask: new Uint8Array(haloCount),
           candidateSpines: [],
           inUse: false,
           ready: false,
@@ -448,8 +468,13 @@ export class TerrainTilePool {
       slot.relHeights[haloIdx] = _scratchCol.heightY - slot.originY;
 
       const isPiste = _scratchCol.onPiste || _scratchCol.pisteWeight >= 0.5;
-      slot.isPisteMask[haloIdx] = isPiste ? 1 : 0;
-      slot.isChasmMask[haloIdx] = _scratchCol.inChasmZone ? 1 : 0;
+      let mask = 0;
+      if (isPiste) mask |= SURFACE_PISTE_TINT_BIT;
+      if (_scratchCol.onPiste || _scratchCol.pisteWeight > SCENERY_PISTE_WEIGHT_MAX) {
+        mask |= SURFACE_PISTE_SCENERY_BIT;
+      }
+      if (_scratchCol.inChasmZone) mask |= SURFACE_CHASM_BIT;
+      slot.surfaceMask[haloIdx] = mask;
 
       const primaryColors = this.getStageColors(_scratchCol.nearestStageId);
       this.computeBaseVertexColor(primaryColors, _scratchCol, isPiste, _scratchColorA);
@@ -517,7 +542,7 @@ export class TerrainTilePool {
         let g = slot.baseColors[h3 + 1]!;
         let b = slot.baseColors[h3 + 2]!;
 
-        if (slot.isPisteMask[haloIdx] === 0) {
+        if ((slot.surfaceMask[haloIdx]! & SURFACE_PISTE_TINT_BIT) === 0) {
           const cliffBlend = smoothstep(0.80, 0.70, ny);
           if (cliffBlend > 0) {
             r = lerp(r, slot.cliffColors[h3]!, cliffBlend);
@@ -554,6 +579,46 @@ export class TerrainTilePool {
     slot.geometry.computeBoundingSphere();
     slot.geometry.computeBoundingBox();
     slot.ready = true;
+  }
+
+  /**
+   * Samples the finished tile grid at tile-local (localX, localZ) without touching the
+   * mountain field. Keeps halo/vertex layout and bitflags private to the pool.
+   * Only valid after finishSlot(slot).
+   */
+  sampleTileSurface(
+    slot: TerrainTileSlot,
+    localX: number,
+    localZ: number,
+    out: TileSurfaceSampleOut,
+  ): void {
+    const { quads, spacing, vertSpan, haloSpan } = slot.spec;
+    const fgx = localX / spacing;
+    const fgz = localZ / spacing;
+    const gx0 = clamp(Math.floor(fgx), 0, quads - 1);
+    const gz0 = clamp(Math.floor(fgz), 0, quads - 1);
+    const tx = fgx - gx0;
+    const tz = fgz - gz0;
+    const h00 = (gz0 + 1) * haloSpan + gx0 + 1;
+    const h10 = h00 + 1;
+    const h01 = h00 + haloSpan;
+    const h11 = h01 + 1;
+
+    const mask =
+      slot.surfaceMask[h00]! | slot.surfaceMask[h10]! | slot.surfaceMask[h01]! | slot.surfaceMask[h11]!;
+    out.blocked = (mask & (SURFACE_PISTE_SCENERY_BIT | SURFACE_CHASM_BIT)) !== 0;
+
+    const t00 = gz0 * vertSpan + gx0;
+    out.minNormalY = Math.min(
+      slot.normals[t00 * 3 + 1]!,
+      slot.normals[(t00 + 1) * 3 + 1]!,
+      slot.normals[(t00 + vertSpan) * 3 + 1]!,
+      slot.normals[(t00 + vertSpan + 1) * 3 + 1]!,
+    );
+
+    const hA = slot.relHeights[h00]! * (1 - tx) + slot.relHeights[h10]! * tx;
+    const hB = slot.relHeights[h01]! * (1 - tx) + slot.relHeights[h11]! * tx;
+    out.relY = hA * (1 - tz) + hB * tz;
   }
 
   releaseSlot(slot: TerrainTileSlot): void {

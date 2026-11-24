@@ -21,7 +21,7 @@ import { SkierRig } from './skierRig';
 import { SkiTracks } from './skiTracks';
 import { SnowVfx } from './snowVfx';
 import { createCartoonSpriteAtlasTexture } from './spriteAtlas';
-import { TerrainStreamer } from './terrainStreamer';
+import { DEFAULT_TERRAIN_STREAM_BUDGET_MS, TerrainStreamer } from './terrainStreamer';
 import { createSharedToonMaterials, type SharedToonMaterials } from './toonMaterials';
 import { TossedPresents } from './tossedPresents';
 
@@ -335,7 +335,7 @@ export class ThreeRenderer {
     const effectiveBudgetMs =
       budgetMs !== undefined
         ? Math.max(1, budgetMs)
-        : Math.max(5 - Math.max(0, this.nowMs() - syncStartMs), 1);
+        : Math.max(DEFAULT_TERRAIN_STREAM_BUDGET_MS - Math.max(0, this.nowMs() - syncStartMs), 1);
 
     const camDx = simState.currCamera.lookAtX - simState.currCamera.posX;
     const camDz = simState.currCamera.lookAtZ - simState.currCamera.posZ;

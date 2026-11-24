@@ -3,10 +3,8 @@ import { hashCoords2DU32, SeededRng } from '../../core/rng';
 import { SpatialGrid } from '../../core/spatialGrid';
 import {
   createMountainColumnOut,
-  createMountainSampleOut,
   type MountainColumnOut,
   type MountainFieldView,
-  type MountainSampleOut,
   type TerrainSegmentView,
   type TrailWindowView,
 } from '../../sim/contracts';
@@ -15,18 +13,22 @@ import type { BillboardFrameName } from './spriteAtlas';
 import {
   OUTER_TILE_SIZE_M,
   TerrainTilePool,
+  createTileSurfaceSampleOut,
+  type TileSurfaceSampleOut,
   type TerrainLodTier,
   type TerrainTileSlot,
 } from './terrainTilePool';
 import type { SharedToonMaterials } from './toonMaterials';
 
+/** Default per-frame terrain streaming budget (ms), shared with ThreeRenderer. */
+export const DEFAULT_TERRAIN_STREAM_BUDGET_MS = 5;
 const ROWS_PER_YIELD = 4;
 const MAX_SCENERY_PER_TILE = 36;
 const INNER_FORWARD_SHIFT_M = 32;
 const OUTER_FORWARD_SHIFT_M = 64;
 const INNER_PARENT_HALF_EXTENT = 1; // 3 x 3 outer parent blocks -> 6 x 6 inner 32m tiles
 const OUTER_TILE_HALF_EXTENT = 3; // 7 x 7 outer 64m tiles
-const GRID_CENTER_HYSTERESIS_CELLS = 0.3;
+const GRID_CENTER_HYSTERESIS_CELLS = 0.2;
 const OUTER_DENSITY_TAPER = 0.22;
 
 const TILE_KEY_BIAS = 0x800000;
@@ -86,12 +88,12 @@ interface TileRecord {
 }
 
 const _colScratch: MountainColumnOut = createMountainColumnOut();
-const _sampleScratch: MountainSampleOut = createMountainSampleOut();
+const _surfaceScratch: TileSurfaceSampleOut = createTileSurfaceSampleOut();
 const compareJobPriority = (a: TileRecord, b: TileRecord): number => a.priority - b.priority;
 
 /**
  * Time-budgeted, 2-tier world-grid terrain & off-piste scenery streamer.
- * Streams forward-biased `6 x 6` inner (`32m`) and `9 x 9` outer (`64m`) absolute-grid tiles,
+ * Streams forward-biased `6 x 6` inner (`32m`) and `7 x 7` outer (`64m`) absolute-grid tiles,
  * swapping each `2 x 2` inner block atomically against its `64m` outer parent cell.
  */
 export class TerrainStreamer implements SceneryProvider {
@@ -152,7 +154,7 @@ export class TerrainStreamer implements SceneryProvider {
   }
 
   /**
-   * Reconciles active inner (`6 x 6`) and outer (`9 x 9`) absolute grid tiles around
+   * Reconciles active inner (`6 x 6`) and outer (`7 x 7`) absolute grid tiles around
    * `(focusX, focusZ)` biased forward along `(camFwdX, camFwdZ)`, stepping tile
    * generators within `budgetMs` and performing atomic `2 x 2` LOD swaps.
    */
@@ -163,7 +165,7 @@ export class TerrainStreamer implements SceneryProvider {
     focusZ: number,
     camFwdX = 0,
     camFwdZ = -1,
-    budgetMs = 5,
+    budgetMs = DEFAULT_TERRAIN_STREAM_BUDGET_MS,
   ): void {
     const clampedBudgetMs = Math.max(1, budgetMs);
     const startMs = this.nowMs();
@@ -475,45 +477,19 @@ export class TerrainStreamer implements SceneryProvider {
       1;
     rec.rng.setState(tileSeed);
 
+    // Coarse 8m LOD normals smooth over cliff lips, so gate outer tiles more strictly.
+    const minNormalY = rec.lod === 0 ? 0.78 : 0.85;
     const maxAttempts = targetCount * 3;
     let attempts = 0;
     while (rec.sceneryCount < targetCount && attempts < maxAttempts) {
       attempts++;
       const localX = rec.rng.nextRange(0, tileSize);
       const localZ = rec.rng.nextRange(0, tileSize);
-      const wx = slot.originX + localX;
-      const wz = slot.originZ + localZ;
-
-      const spacing = slot.spec.spacing;
-      const fgx = localX / spacing;
-      const fgz = localZ / spacing;
-      const gx0 = Math.min(slot.spec.quads - 1, Math.floor(fgx));
-      const gz0 = Math.min(slot.spec.quads - 1, Math.floor(fgz));
-      const tx = fgx - gx0;
-      const tz = fgz - gz0;
-      const haloSpan = slot.spec.haloSpan;
-      const h00 = (gz0 + 1) * haloSpan + gx0 + 1;
-      const cornerTop = gz0 * slot.spec.vertSpan + gx0;
-      if (
-        slot.isPisteMask[h00] === 1 ||
-        slot.isPisteMask[h00 + 1] === 1 ||
-        slot.isPisteMask[h00 + haloSpan] === 1 ||
-        slot.isPisteMask[h00 + haloSpan + 1] === 1 ||
-        slot.isChasmMask[h00] === 1 ||
-        slot.isChasmMask[h00 + 1] === 1 ||
-        slot.isChasmMask[h00 + haloSpan] === 1 ||
-        slot.isChasmMask[h00 + haloSpan + 1] === 1 ||
-        slot.normals[cornerTop * 3 + 1]! < 0.78 ||
-        slot.normals[(cornerTop + 1) * 3 + 1]! < 0.78 ||
-        slot.normals[(cornerTop + slot.spec.vertSpan) * 3 + 1]! < 0.78 ||
-        slot.normals[(cornerTop + slot.spec.vertSpan + 1) * 3 + 1]! < 0.78
-      ) {
+      this.tilePool.sampleTileSurface(slot, localX, localZ, _surfaceScratch);
+      if (_surfaceScratch.blocked || _surfaceScratch.minNormalY < minNormalY) {
         continue;
       }
-      const hA = slot.relHeights[h00]! * (1 - tx) + slot.relHeights[h00 + 1]! * tx;
-      const hB =
-        slot.relHeights[h00 + haloSpan]! * (1 - tx) + slot.relHeights[h00 + haloSpan + 1]! * tx;
-      const relY = hA * (1 - tz) + hB * tz;
+      const relY = _surfaceScratch.relY;
 
       const localStage = centerStage;
       const isShrub = rec.rng.nextBool(0.22);

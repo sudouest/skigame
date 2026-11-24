@@ -525,7 +525,7 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
 
     const simState = createMockSimState();
 
-    // Stream across multiple frames until all 36 inner + 81 outer = 117 tiles finish
+    // Stream across multiple frames until all 36 inner + 49 outer = 85 tiles finish
     for (let f = 0; f < 30; f++) {
       clockMs += 16;
       renderer.sync(simState, 0.5, 1 / 60, 50);
@@ -1058,6 +1058,43 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     expect(landmarkStreamer.activeCount).toBe(0);
 
     landmarkStreamer.clearAll();
+    tracker.disposeAll();
+  });
+
+  it('keeps scenery outside pisteWeight > 0.15 on wide-transition sunny-blue across both LOD tiers', () => {
+    const sim = new SkiSimulation({ seed: 321, startStageId: 'sunny-blue' });
+    const simState = sim.getState();
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const mats = createSharedToonMaterials(gfx);
+    const streamer = new TerrainStreamer(gfx, mats);
+
+    for (let f = 0; f < 30; f++) {
+      streamer.step(
+        simState.trailWindow,
+        simState.mountainField,
+        simState.currSkier.posX,
+        simState.currSkier.posZ,
+        0,
+        -1,
+        50,
+      );
+      if (streamer.queuedTileCount === 0) break;
+    }
+    expect(streamer.queuedTileCount).toBe(0);
+
+    const out = createMountainSampleOut();
+    let count = 0;
+    streamer.forEachActiveScenery((ox, _oy, oz, item) => {
+      count++;
+      simState.mountainField.evaluate(ox + item.localX, oz + item.localZ, out);
+      expect(out.onPiste).toBe(false);
+      expect(out.pisteWeight).toBeLessThanOrEqual(0.15);
+      expect(out.inChasmZone).toBe(false);
+    });
+    expect(count).toBeGreaterThan(0);
+
+    streamer.clearAll();
     tracker.disposeAll();
   });
 
