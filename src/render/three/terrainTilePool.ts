@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { getStageDef, STAGE_SUNNY_BLUE } from '../../content/stages';
 import type { StagePalette } from '../../content/types';
 import { clamp, lerp, smoothstep } from '../../core/math';
+import { fbm2D } from '../../core/noise';
 import {
   createMountainColumnOut,
   type MountainColumnOut,
@@ -27,6 +28,12 @@ export const OUTER_TILE_SKIRT_DEPTH_M = 12.0;
 export const OUTER_TILE_POOL_CAPACITY = 96;
 
 const SPINE_BOUNDS_PAD_M = 310;
+
+/** Steepness normal.y thresholds for off-piste snow-to-rock cliff transition. */
+export const CLIFF_ROCK_START_NY_INNER = 0.87; // ~29.5 deg
+export const CLIFF_ROCK_FULL_NY_INNER = 0.78;  // ~38.7 deg
+export const CLIFF_ROCK_START_NY_OUTER = 0.90; // ~25.8 deg (compensates for 8m grid smoothing)
+export const CLIFF_ROCK_FULL_NY_OUTER = 0.81;  // ~35.9 deg
 
 /** onPiste || pisteWeight >= 0.5: suppresses cliff rock tinting. */
 const SURFACE_PISTE_TINT_BIT = 1 << 0;
@@ -131,9 +138,11 @@ export interface TerrainTileSlot {
   readonly positions: Float32Array;
   readonly normals: Float32Array;
   readonly colors: Float32Array;
+  readonly rockInfo: Float32Array;
   readonly posAttr: THREE.BufferAttribute;
   readonly normAttr: THREE.BufferAttribute;
   readonly colAttr: THREE.BufferAttribute;
+  readonly rockInfoAttr: THREE.BufferAttribute;
   readonly relHeights: Float32Array;
   readonly baseColors: Float32Array;
   readonly cliffColors: Float32Array;
@@ -329,6 +338,7 @@ export class TerrainTilePool {
         const positions = new Float32Array(spec.totalVertexCount * 3);
         const normals = new Float32Array(spec.totalVertexCount * 3);
         const colors = new Float32Array(spec.totalVertexCount * 3);
+        const rockInfo = new Float32Array(spec.totalVertexCount * 4);
 
         const posAttr = new THREE.BufferAttribute(positions, 3);
         posAttr.setUsage(THREE.DynamicDrawUsage);
@@ -336,12 +346,15 @@ export class TerrainTilePool {
         normAttr.setUsage(THREE.DynamicDrawUsage);
         const colAttr = new THREE.BufferAttribute(colors, 3);
         colAttr.setUsage(THREE.DynamicDrawUsage);
+        const rockInfoAttr = new THREE.BufferAttribute(rockInfo, 4);
+        rockInfoAttr.setUsage(THREE.DynamicDrawUsage);
 
         const geometry = new THREE.BufferGeometry();
         geometry.name = `TerrainTileGeo_L${lod}_${i}`;
         geometry.setAttribute('position', posAttr);
         geometry.setAttribute('normal', normAttr);
         geometry.setAttribute('color', colAttr);
+        geometry.setAttribute('aRockInfo', rockInfoAttr);
         geometry.setIndex(sharedIndex);
 
         const container = new THREE.Group();
@@ -365,9 +378,11 @@ export class TerrainTilePool {
           positions,
           normals,
           colors,
+          rockInfo,
           posAttr,
           normAttr,
           colAttr,
+          rockInfoAttr,
           relHeights: new Float32Array(haloCount),
           baseColors: new Float32Array(haloCount * 3),
           cliffColors: new Float32Array(haloCount * 3),
@@ -557,9 +572,14 @@ export class TerrainTilePool {
     const spec = slot.spec;
     const { quads, spacing, vertSpan, haloSpan, skirtDepth, topVertexCount } = spec;
     const invTwoSpacing = 1 / (2 * spacing);
+    const cliffStartNy = slot.lod === 0 ? CLIFF_ROCK_START_NY_INNER : CLIFF_ROCK_START_NY_OUTER;
+    const cliffFullNy = slot.lod === 0 ? CLIFF_ROCK_FULL_NY_INNER : CLIFF_ROCK_FULL_NY_OUTER;
+    const tileAbsBaseX = slot.absTileX * spec.tileSize;
+    const tileAbsBaseZ = slot.absTileZ * spec.tileSize;
 
     for (let gz = 0; gz < vertSpan; gz++) {
       const hz = gz + 1;
+      const absWz = tileAbsBaseZ + gz * spacing;
       for (let gx = 0; gx < vertSpan; gx++) {
         const hx = gx + 1;
         const haloIdx = hz * haloSpan + hx;
@@ -578,6 +598,7 @@ export class TerrainTilePool {
 
         const topIdx = gz * vertSpan + gx;
         const v3 = topIdx * 3;
+        const v4 = topIdx * 4;
         slot.positions[v3] = gx * spacing;
         slot.positions[v3 + 1] = slot.relHeights[haloIdx]!;
         slot.positions[v3 + 2] = gz * spacing;
@@ -591,18 +612,37 @@ export class TerrainTilePool {
         let g = slot.baseColors[h3 + 1]!;
         let b = slot.baseColors[h3 + 2]!;
 
-        if ((slot.surfaceMask[haloIdx]! & SURFACE_PISTE_TINT_BIT) === 0) {
-          const cliffBlend = smoothstep(0.80, 0.70, ny);
+        const isPiste = (slot.surfaceMask[haloIdx]! & SURFACE_PISTE_TINT_BIT) !== 0;
+        let rockR = slot.cliffColors[h3]!;
+        let rockG = slot.cliffColors[h3 + 1]!;
+        let rockB = slot.cliffColors[h3 + 2]!;
+
+        if (!isPiste) {
+          const absWx = tileAbsBaseX + gx * spacing;
+          const relElev = slot.relElevationGrid[topIdx]!;
+          const rockNoise = fbm2D(absWx * 0.085, absWz * 0.085, 707, 2, 2.0, 0.5);
+          const strata = Math.sin(relElev * 0.75 + rockNoise * 2.8);
+          const rockShade = clamp(0.92 + rockNoise * 0.14 + strata * 0.07, 0.76, 1.12);
+          rockR = clamp(rockR * rockShade, 0, 1);
+          rockG = clamp(rockG * rockShade, 0, 1);
+          rockB = clamp(rockB * rockShade, 0, 1);
+
+          const cliffBlend = smoothstep(cliffStartNy, cliffFullNy, ny);
           if (cliffBlend > 0) {
-            r = lerp(r, slot.cliffColors[h3]!, cliffBlend);
-            g = lerp(g, slot.cliffColors[h3 + 1]!, cliffBlend);
-            b = lerp(b, slot.cliffColors[h3 + 2]!, cliffBlend);
+            r = lerp(r, rockR, cliffBlend);
+            g = lerp(g, rockG, cliffBlend);
+            b = lerp(b, rockB, cliffBlend);
           }
         }
 
         slot.colors[v3] = r;
         slot.colors[v3 + 1] = g;
         slot.colors[v3 + 2] = b;
+
+        slot.rockInfo[v4] = rockR;
+        slot.rockInfo[v4 + 1] = rockG;
+        slot.rockInfo[v4 + 2] = rockB;
+        slot.rockInfo[v4 + 3] = isPiste ? 0 : 1;
       }
     }
 
@@ -624,6 +664,7 @@ export class TerrainTilePool {
     slot.posAttr.needsUpdate = true;
     slot.normAttr.needsUpdate = true;
     slot.colAttr.needsUpdate = true;
+    slot.rockInfoAttr.needsUpdate = true;
     slot.positionUploadCount++;
     slot.geometry.computeBoundingSphere();
     slot.geometry.computeBoundingBox();
@@ -749,6 +790,13 @@ export class TerrainTilePool {
     slot.colors[d3] = slot.colors[s3]!;
     slot.colors[d3 + 1] = slot.colors[s3 + 1]!;
     slot.colors[d3 + 2] = slot.colors[s3 + 2]!;
+
+    const s4 = srcTopIdx * 4;
+    const d4 = dstVertIdx * 4;
+    slot.rockInfo[d4] = slot.rockInfo[s4]!;
+    slot.rockInfo[d4 + 1] = slot.rockInfo[s4 + 1]!;
+    slot.rockInfo[d4 + 2] = slot.rockInfo[s4 + 2]!;
+    slot.rockInfo[d4 + 3] = slot.rockInfo[s4 + 3]!;
   }
 
   private computeBaseVertexColor(

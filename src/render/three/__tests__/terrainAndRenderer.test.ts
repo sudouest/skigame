@@ -51,6 +51,8 @@ import {
   type SceneryEnvSignal,
 } from '../scenerySelector';
 import {
+  CLIFF_ROCK_FULL_NY_INNER,
+  CLIFF_ROCK_FULL_NY_OUTER,
   INNER_TILE_QUADS,
   INNER_TILE_SIZE_M,
   INNER_TILE_SPACING_M,
@@ -1704,5 +1706,72 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     expect(rendererBliz.runLeakCheck(0, true).totalLeaks).toBe(0);
     rendererBliz.dispose();
     tracker.disposeAll();
+  });
+
+  it('renders bare rock (no snow) on steep off-piste cliff faces across both LODs while keeping steep pistes snowy', () => {
+    const sim = new SkiSimulation({ seed: 2026, startStageId: 'granite-gorge' });
+    const simState = sim.getState();
+    const renderer = new ThreeRenderer(null, sim.eventBus, undefined, { headless: true });
+
+    for (let f = 0; f < 40; f++) {
+      renderer.sync(simState, 0.5, 1 / 60, 50);
+      if (renderer.terrainStreamer.queuedTileCount === 0) break;
+    }
+    expect(renderer.terrainStreamer.queuedTileCount).toBe(0);
+
+    const snowColor = new THREE.Color(STAGE_SUNNY_BLUE.palette.snowColor);
+    let innerSteepCount = 0;
+    let outerSteepCount = 0;
+    let pisteVertCount = 0;
+
+    for (const lod of [0, 1] as const) {
+      const cap =
+        lod === 0
+          ? renderer.terrainStreamer.tilePool.innerCapacity
+          : renderer.terrainStreamer.tilePool.outerCapacity;
+      const fullRockNy = lod === 0 ? CLIFF_ROCK_FULL_NY_INNER : CLIFF_ROCK_FULL_NY_OUTER;
+
+      for (let i = 0; i < cap; i++) {
+        const slot = renderer.terrainStreamer.tilePool.getSlot(lod, i)!;
+        if (!slot.inUse || !slot.ready) continue;
+        expect(slot.geometry.getAttribute('aRockInfo')).toBe(slot.rockInfoAttr);
+
+        for (let v = 0; v < slot.spec.topVertexCount; v++) {
+          const v3 = v * 3;
+          const v4 = v * 4;
+          const ny = slot.normals[v3 + 1]!;
+          const offPiste = slot.rockInfo[v4 + 3]!;
+          const r = slot.colors[v3]!;
+          const g = slot.colors[v3 + 1]!;
+          const b = slot.colors[v3 + 2]!;
+          const rockR = slot.rockInfo[v4]!;
+          const rockG = slot.rockInfo[v4 + 1]!;
+          const rockB = slot.rockInfo[v4 + 2]!;
+
+          if (offPiste < 0.5) {
+            pisteVertCount++;
+            // Piste vertices must stay snowy/icy, never replaced by dark cliff rock
+            const distFromRock = Math.hypot(r - rockR, g - rockG, b - rockB);
+            expect(distFromRock).toBeGreaterThan(0.15);
+          } else if (ny <= fullRockNy) {
+            if (lod === 0) innerSteepCount++;
+            else outerSteepCount++;
+            // Steep off-piste cliff faces must be 100% rock color (no snow blend)
+            expect(r).toBeCloseTo(rockR, 4);
+            expect(g).toBeCloseTo(rockG, 4);
+            expect(b).toBeCloseTo(rockB, 4);
+            // Rock must be clearly darker than snow
+            const distFromSnow = Math.hypot(r - snowColor.r, g - snowColor.g, b - snowColor.b);
+            expect(distFromSnow).toBeGreaterThan(0.5);
+          }
+        }
+      }
+    }
+
+    expect(pisteVertCount).toBeGreaterThan(0);
+    expect(innerSteepCount).toBeGreaterThan(50);
+    expect(outerSteepCount).toBeGreaterThan(50);
+
+    renderer.dispose();
   });
 });

@@ -66,13 +66,73 @@ uniform float uBlizzardDim;`,
     mat.customProgramCacheKey = () => 'toon-biome-blizzard-v1';
   };
 
+  const patchTerrainToon = (mat: THREE.MeshToonMaterial): void => {
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uBiomeTint = sharedUniforms.uBiomeTint;
+      shader.uniforms.uBlizzardDim = sharedUniforms.uBlizzardDim;
+
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+attribute vec4 aRockInfo;
+varying vec4 vRockInfo;
+varying vec3 vTerrainNormal;`,
+        )
+        .replace(
+          '#include <beginnormal_vertex>',
+          `#include <beginnormal_vertex>
+vRockInfo = aRockInfo;
+vTerrainNormal = normal;`,
+        );
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+uniform vec3 uBiomeTint;
+uniform float uBlizzardDim;
+varying vec4 vRockInfo;
+varying vec3 vTerrainNormal;`,
+        )
+        .replace(
+          '#include <color_fragment>',
+          `#include <color_fragment>
+float offPisteRockMask = smoothstep(0.25, 0.7, vRockInfo.a);
+float terrainNy = clamp(normalize(vTerrainNormal).y, 0.0, 1.0);
+float fragCliffRock = (1.0 - smoothstep(0.78, 0.87, terrainNy)) * offPisteRockMask;
+diffuseColor.rgb = mix(diffuseColor.rgb, vRockInfo.rgb, fragCliffRock);`,
+        )
+        .replace(
+          '#include <normal_fragment_begin>',
+          `#include <normal_fragment_begin>
+if (fragCliffRock > 0.01) {
+  vec3 rockFdx = dFdx(vViewPosition);
+  vec3 rockFdy = dFdy(vViewPosition);
+  vec3 rockCross = cross(rockFdx, rockFdy);
+  float rockCrossLen = length(rockCross);
+  if (rockCrossLen > 1e-5) {
+    vec3 rockFaceNormal = (rockCross / rockCrossLen) * faceDirection;
+    normal = normalize(mix(normal, rockFaceNormal, fragCliffRock * 0.65));
+  }
+}`,
+        )
+        .replace(
+          '#include <opaque_fragment>',
+          `outgoingLight *= mix(vec3(1.0), uBiomeTint, 0.25) * (1.0 - uBlizzardDim * 0.35);
+#include <opaque_fragment>`,
+        );
+    };
+    mat.customProgramCacheKey = () => 'terrain-toon-rock-v1';
+  };
+
   const terrainMaterial = new THREE.MeshToonMaterial({
     color: 0xffffff,
     vertexColors: true,
     gradientMap,
   });
   terrainMaterial.name = 'SharedTerrainRibbonToonMaterial';
-  patchToonTint(terrainMaterial);
+  patchTerrainToon(terrainMaterial);
   gfx.markAsCache(terrainMaterial, 'SharedTerrainRibbonToonMaterial');
 
   const propToonMaterial = new THREE.MeshToonMaterial({
