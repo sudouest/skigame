@@ -3,6 +3,7 @@ export * from './trailSpine';
 export * from './trailSegment';
 export * from './trailWindow';
 export * from './mountainField';
+export * from './surfaceSampler';
 export * from './entityPools';
 export * from './layoutEngine';
 export * from './creatureSystem';

@@ -690,50 +690,47 @@ export class TrailSpine implements SpineView {
       }
     }
 
-    // Refine s against continuous spine tangent (2 damped steps) while ensuring distSq never worsens
+    // Refine s against continuous spine tangent (1 damped step) while ensuring distSq never worsens
     let finalS = bestS;
-    this.sampleSpineFrame(finalS, this.scratchFrameA);
-    let curDx = wx - this.scratchFrameA.posX;
-    let curDz = wz - this.scratchFrameA.posZ;
+    let accepted = this.scratchFrameA;
+    const candidate = this.scratchFrameB;
+    this.sampleSpineFrame(finalS, accepted);
+    let curDx = wx - accepted.posX;
+    let curDz = wz - accepted.posZ;
     let curDistSq = curDx * curDx + curDz * curDz;
 
-    for (let iter = 0; iter < 2; iter++) {
-      const fwdX0 = -Math.sin(this.scratchFrameA.yawRad);
-      const fwdZ0 = -Math.cos(this.scratchFrameA.yawRad);
-      const cosP0 = Math.max(0.3, Math.cos(this.scratchFrameA.pitchRad));
-      const remFwd0 = curDx * fwdX0 + curDz * fwdZ0;
-      const deltaS = clamp(remFwd0 / cosP0, -this.polyStep, this.polyStep);
-      const candS = clamp(finalS + deltaS, 0, this.length);
-      if (candS === finalS) break;
-
-      this.sampleSpineFrame(candS, this.scratchFrameB);
-      const dx1 = wx - this.scratchFrameB.posX;
-      const dz1 = wz - this.scratchFrameB.posZ;
+    const fwdX0 = -Math.sin(accepted.yawRad);
+    const fwdZ0 = -Math.cos(accepted.yawRad);
+    const cosP0 = Math.max(0.3, Math.cos(accepted.pitchRad));
+    const remFwd0 = curDx * fwdX0 + curDz * fwdZ0;
+    const deltaS = clamp(remFwd0 / cosP0, -this.polyStep, this.polyStep);
+    const candS = clamp(finalS + deltaS, 0, this.length);
+    if (candS !== finalS) {
+      this.sampleSpineFrame(candS, candidate);
+      const dx1 = wx - candidate.posX;
+      const dz1 = wz - candidate.posZ;
       const distSq1 = dx1 * dx1 + dz1 * dz1;
       if (distSq1 <= curDistSq) {
         finalS = candS;
         curDistSq = distSq1;
         curDx = dx1;
         curDz = dz1;
-        this.sampleSpineFrame(finalS, this.scratchFrameA);
-      } else {
-        break;
+        accepted = candidate;
       }
     }
 
-    this.sampleSpineFrame(finalS, this.scratchFrameA);
-    const cosY = Math.cos(this.scratchFrameA.yawRad);
-    const sinY = Math.sin(this.scratchFrameA.yawRad);
+    const cosY = Math.cos(accepted.yawRad);
+    const sinY = Math.sin(accepted.yawRad);
     const fwdX = -sinY;
     const fwdZ = -cosY;
     const rightX = cosY;
     const rightZ = -sinY;
 
-    const dx = wx - this.scratchFrameA.posX;
-    const dz = wz - this.scratchFrameA.posZ;
+    const dx = curDx;
+    const dz = curDz;
     const alongFwd = dx * fwdX + dz * fwdZ;
     const signedX = dx * rightX + dz * rightZ;
-    const distSq = dx * dx + dz * dz;
+    const distSq = curDistSq;
 
     let longExt = 0;
     if (finalS === 0 && alongFwd < 0) {
@@ -746,17 +743,17 @@ export class TrailSpine implements SpineView {
     out.signedX = signedX;
     out.longExt = longExt;
     out.distSq = distSq;
-    out.spineX = this.scratchFrameA.posX;
-    out.spineY = this.scratchFrameA.posY;
-    out.spineZ = this.scratchFrameA.posZ;
-    out.forwardX = this.scratchFrameA.forwardX;
-    out.forwardY = this.scratchFrameA.forwardY;
-    out.forwardZ = this.scratchFrameA.forwardZ;
+    out.spineX = accepted.posX;
+    out.spineY = accepted.posY;
+    out.spineZ = accepted.posZ;
+    out.forwardX = accepted.forwardX;
+    out.forwardY = accepted.forwardY;
+    out.forwardZ = accepted.forwardZ;
     out.rightX = rightX;
     out.rightZ = rightZ;
-    out.pitchRad = this.scratchFrameA.pitchRad;
-    out.halfWidth = this.scratchFrameA.halfWidth;
-    out.dividerHalfWidth = this.scratchFrameA.dividerHalfWidth;
+    out.pitchRad = accepted.pitchRad;
+    out.halfWidth = accepted.halfWidth;
+    out.dividerHalfWidth = accepted.dividerHalfWidth;
   }
 
   /**

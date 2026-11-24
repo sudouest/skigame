@@ -68,8 +68,12 @@ export interface SurfaceSample {
   tangentZ: number;
   halfWidth: number;
   surfaceType: SurfaceType;
-  inBank: boolean;
+  onPiste: boolean;
+  pisteWeight: number;
   inDivider: boolean;
+  inChasmZone: boolean;
+  chasmWipeoutDepth: number;
+  nearestSpineY: number;
   valid: boolean;
 }
 
@@ -89,10 +93,61 @@ export function createSurfaceSample(): SurfaceSample {
     tangentZ: -1,
     halfWidth: 14,
     surfaceType: 'packed',
-    inBank: false,
+    onPiste: true,
+    pisteWeight: 1,
     inDivider: false,
+    inChasmZone: false,
+    chasmWipeoutDepth: 0,
+    nearestSpineY: 0,
     valid: false,
   };
+}
+
+export interface ActiveTrackProjectionOut {
+  segmentId: number;
+  s: number;
+  x: number;
+  halfWidth: number;
+  tangentX: number;
+  tangentY: number;
+  tangentZ: number;
+  distSq: number;
+  valid: boolean;
+}
+
+export function createActiveTrackProjectionOut(): ActiveTrackProjectionOut {
+  return {
+    segmentId: -1,
+    s: 0,
+    x: 0,
+    halfWidth: 14,
+    tangentX: 0,
+    tangentY: 0,
+    tangentZ: -1,
+    distSq: Infinity,
+    valid: false,
+  };
+}
+
+export interface ActiveTrackProjector {
+  projectActiveWindow(
+    posX: number,
+    posZ: number,
+    hintSegmentId: number,
+    hintS: number,
+    out: ActiveTrackProjectionOut,
+  ): ActiveTrackProjectionOut;
+}
+
+export interface SurfaceQueryView {
+  sampleSurface(
+    posX: number,
+    posZ: number,
+    hintSegmentId: number,
+    hintS: number,
+    out: SurfaceSample,
+  ): SurfaceSample;
+  evaluateHeight(wx: number, wz: number): number;
 }
 
 export interface CameraPose {
@@ -405,6 +460,12 @@ export interface MountainFieldView {
     out: MountainColumnOut,
     candidateSpines?: readonly SpineView[],
   ): MountainColumnOut;
+  /**
+   * Full column + central-difference normal sample for simulation/scenery.
+   * On strictly full interior groomed piste (`pisteWeight >= 1 - 1e-6`), skips off-piste macro/landscape
+   * aggregation for speed (`macroY` reports `nearestSpineY`, `secondaryStage*` are omitted); call
+   * `evaluateColumn` when full blended `macroY` and multi-stage metadata are needed.
+   */
   evaluate(
     wx: number,
     wz: number,
@@ -444,7 +505,7 @@ export interface SegmentLandmarkRequirement {
 
 /**
  * Read-only view of a trail segment in the 4-slot sliding window.
- * Used by RibbonPool and ChunkStreamer to build chunk meshes and scenery with zero allocation.
+ * Used by TerrainTilePool, LandmarkStreamer, and DebugDrawBuffer with zero allocation.
  */
 export interface TerrainSegmentView {
   readonly id: number;
@@ -462,8 +523,6 @@ export interface TerrainSegmentView {
 
   getChunkBounds(chunkIndex: number, out: ChunkRangeOut): void;
   sampleSpineFrame(s: number, out: SpineFrameOut): void;
-  /** Evaluates surface at arc-length s and normalized transverse coordinate u in [-1, 1]. */
-  evaluateRibbonPoint(s: number, u: number, out: RibbonPointOut): void;
   /** Evaluates surface at arc-length s and lateral offset x in meters. */
   evaluateSurfaceAtX(s: number, x: number, out: RibbonPointOut): void;
   /** Returns the guaranteed reachable centerline x offset at arc-length s. */

@@ -11,7 +11,7 @@ import { WEATHER_BLIZZARD } from '../content/stages';
 import type { SkierDef, WeatherProfile } from '../content/types';
 import { CameraRig } from './cameraRig';
 import {
-  createRibbonPointOut,
+  createSpineFrameOut,
   createSurfaceSample,
   type ActiveWeatherState,
   type CameraPose,
@@ -21,9 +21,10 @@ import {
   type PlayerIntent,
   type ReadonlySimState,
   type RebaseInfo,
-  type RibbonPointOut,
   type SimEventMap,
   type SkierPose,
+  type SpineForkMeta,
+  type SpineFrameOut,
   type SurfaceSample,
   type TrailWindowView,
 } from './contracts';
@@ -35,9 +36,11 @@ import { MountainField } from './mountainField';
 import {
   copySkierPose,
   createMutableSkierPose,
+  SKI_GRAVITY,
   SkiPhysics,
   type MutableSkierPose,
 } from './skiPhysics';
+import { MountainSurfaceSampler } from './surfaceSampler';
 import type { TrailSegment } from './trailSegment';
 import { DEFAULT_FORK_PRUNE_DISTANCE_M, TrailWindow } from './trailWindow';
 
@@ -127,6 +130,7 @@ export class SkiSimulation {
   private readonly layoutEngine: LayoutEngine;
   private readonly trailWindow: TrailWindow;
   private readonly mountainField: MountainField;
+  private readonly surfaceSampler: MountainSurfaceSampler;
   private readonly pools: EntityPools;
   private readonly physics: SkiPhysics;
   private readonly creatureSystem: CreatureSystem;
@@ -142,7 +146,8 @@ export class SkiSimulation {
   private seed: number | string;
   private startStageId: string;
   private scatterRng: SeededRng;
-  private readonly recoverRibbonScratch: RibbonPointOut = createRibbonPointOut();
+  private wipeoutRecoveryMode: 'local' | 'safeX' = 'local';
+  private readonly recoverFrameScratch: SpineFrameOut = createSpineFrameOut();
 
   // Pre-allocated synchronous EventBus payloads (zero hot-loop heap allocations)
   private readonly evPickup = {
@@ -290,6 +295,7 @@ export class SkiSimulation {
       this.onSegmentCreated(segment);
     });
     this.mountainField = new MountainField(this.trailWindow);
+    this.surfaceSampler = new MountainSurfaceSampler(this.trailWindow, this.mountainField);
 
     this.state = {
       tickCount: 0,
@@ -399,7 +405,7 @@ export class SkiSimulation {
     hintS = this.state.surfaceSample.s,
     out = createSurfaceSample(),
   ): SurfaceSample {
-    return this.trailWindow.sampleSurface(posX, posZ, hintSegmentId, hintS, out);
+    return this.surfaceSampler.sampleSurface(posX, posZ, hintSegmentId, hintS, out);
   }
 
   savePreviousPoses(): void {
@@ -429,6 +435,7 @@ export class SkiSimulation {
     this.state.livesRemaining = 3;
     this.state.gameOver = false;
     this.state.skierState = 'skiing';
+    this.wipeoutRecoveryMode = 'local';
     this.state.wipeoutTimerSec = 0;
     this.state.invulnerableTimerSec = 0;
     this.state.score = 0;
@@ -455,7 +462,7 @@ export class SkiSimulation {
     this.rebuildSpatialGrids();
 
     // Place skier cleanly on start of segment 1
-    this.trailWindow.sampleSurface(0, 0, this.trailWindow.curr.id, 0, this.state.surfaceSample);
+    this.surfaceSampler.sampleSurface(0, 0, this.trailWindow.curr.id, 0, this.state.surfaceSample);
     const curr = this.state.currSkier;
     curr.posX = 0;
     curr.posY = this.state.surfaceSample.groundY;
@@ -481,7 +488,7 @@ export class SkiSimulation {
 
     this.state.activeStageId = this.trailWindow.curr.stageId;
     this.syncWeatherImmediate(this.trailWindow.curr.stage.weather);
-    this.cameraRig.reset(curr, this.state.surfaceSample);
+    this.cameraRig.reset(curr, this.state.surfaceSample, this.surfaceSampler);
     this.debugDrawBuffer.update(this.trailWindow, this.pools, curr, this.state.surfaceSample);
   }
 
@@ -512,7 +519,8 @@ export class SkiSimulation {
     if (this.state.skierState === 'skiing' || this.state.skierState === 'recovering') {
       this.physics.stepSkiing(dt, intent, curr, {
         skierDef: this.skierDef,
-        trailWindow: this.trailWindow,
+        surfaceQuery: this.surfaceSampler,
+        forkBumper: this.selectNearestForkBumper(curr.posX, curr.posZ),
         surface: this.state.surfaceSample,
         ramps: this.pools.ramps,
         skiTracks: this.pools.skiTracks,
@@ -520,14 +528,25 @@ export class SkiSimulation {
       if (this.state.skierState === 'recovering' && this.state.invulnerableTimerSec <= 1.2) {
         this.state.skierState = 'skiing';
       }
+
+      // Chasm fall hazard bypasses invulnerability and triggers safeX recovery
+      const surf = this.state.surfaceSample;
+      if (
+        surf.inChasmZone &&
+        surf.chasmWipeoutDepth > 0 &&
+        curr.posY < surf.nearestSpineY - surf.chasmWipeoutDepth
+      ) {
+        this.wipeoutRecoveryMode = 'safeX';
+        this.triggerImpact('chasm_fall', 'wipeout', 2, 0.0);
+      }
     } else if (this.state.skierState === 'wipeout') {
-      // Slide to a halt during comical tumble, then recover onto nearest safeX world point
+      // Slide & tumble (integrating gravity if falling into a chasm), then recover
       const dampFactor = Math.exp(-4.5 * dt);
       curr.velX *= dampFactor;
       curr.velZ *= dampFactor;
       curr.posX += curr.velX * dt;
       curr.posZ += curr.velZ * dt;
-      this.trailWindow.sampleSurface(
+      this.surfaceSampler.sampleSurface(
         curr.posX,
         curr.posZ,
         this.state.surfaceSample.segmentId,
@@ -535,15 +554,24 @@ export class SkiSimulation {
         this.state.surfaceSample,
       );
       curr.groundY = this.state.surfaceSample.groundY;
-      curr.posY = curr.groundY;
+      if (curr.posY > curr.groundY) {
+        curr.velY -= SKI_GRAVITY * dt;
+        curr.posY = Math.max(curr.groundY, curr.posY + curr.velY * dt);
+        if (curr.posY <= curr.groundY) {
+          curr.velY = 0;
+        }
+      } else {
+        curr.posY = curr.groundY;
+        curr.velY = 0;
+      }
       curr.normalX = this.state.surfaceSample.normalX;
       curr.normalY = this.state.surfaceSample.normalY;
       curr.normalZ = this.state.surfaceSample.normalZ;
-      curr.speed = Math.hypot(curr.velX, curr.velZ);
+      curr.speed = Math.hypot(curr.velX, curr.velY, curr.velZ);
 
       this.state.wipeoutTimerSec = Math.max(0, this.state.wipeoutTimerSec - dt);
       if (this.state.wipeoutTimerSec <= 0) {
-        this.recoverOntoSafeX();
+        this.recoverFromWipeout();
       }
     }
 
@@ -556,7 +584,7 @@ export class SkiSimulation {
       curr.posZ,
       curr.headingRad,
       this.pools.creatures,
-      this.trailWindow,
+      this.surfaceSampler,
       this.eventBus,
     );
     this.pools.tossedPresents.step(dt);
@@ -595,6 +623,14 @@ export class SkiSimulation {
         this.layoutEngine.pruneSegment(prunedId);
       }
       this.rebuildSpatialGrids();
+      this.surfaceSampler.sampleSurface(
+        curr.posX,
+        curr.posZ,
+        this.trailWindow.curr.id,
+        0,
+        this.state.surfaceSample,
+      );
+      this.physics.invalidateSurfaceCache();
     }
 
     // Update activeStageId continuously when on active segment
@@ -607,7 +643,7 @@ export class SkiSimulation {
     this.updateWeather(dt, activeSeg ?? this.trailWindow.curr);
 
     // 6. Chase camera with 25m crest elevation look-ahead
-    this.cameraRig.update(dt, curr, this.state.surfaceSample, this.trailWindow);
+    this.cameraRig.update(dt, curr, this.state.surfaceSample, this.surfaceSampler);
 
     // 7. Translation-only 128m World Floating Origin Rebase
     if (
@@ -831,6 +867,7 @@ export class SkiSimulation {
       const def = defId ? getHazardDef(defId) : undefined;
       this.pools.hazards.triggered[idx] = 1;
       if (def) {
+        this.wipeoutRecoveryMode = 'local';
         this.triggerImpact(
           def.id,
           def.impact.effect === 'stumble' ? 'stumble' : 'wipeout',
@@ -858,6 +895,7 @@ export class SkiSimulation {
           const defId = creatures.defIds[i];
           const def = defId ? getCreatureDef(defId) : undefined;
           if (def) {
+            this.wipeoutRecoveryMode = 'local';
             this.triggerImpact(
               def.id,
               def.impact.effect === 'stumble' ? 'stumble' : 'wipeout',
@@ -942,24 +980,65 @@ export class SkiSimulation {
     this.eventBus.emit('PLAYER_WIPEOUT', this.evWipeout);
   }
 
-  private recoverOntoSafeX(): void {
-    const surface = this.state.surfaceSample;
-    const seg = this.trailWindow.getActiveSegmentById(surface.segmentId) ?? this.trailWindow.curr;
-    const safeX = seg.sampleSafeX(surface.s);
-    seg.evaluateSurfaceAtX(surface.s, safeX, this.recoverRibbonScratch);
+  private selectNearestForkBumper(wx: number, wz: number): SpineForkMeta | null {
+    const currFork = this.trailWindow.curr.fork;
+    const prevFork = this.trailWindow.prev?.fork ?? null;
+    let best: SpineForkMeta | null = currFork.hasFork ? currFork : null;
+    let bestDistSq = best
+      ? (wx - best.seamWorldX) * (wx - best.seamWorldX) +
+        (wz - best.seamWorldZ) * (wz - best.seamWorldZ)
+      : Infinity;
 
-    this.trailWindow.sampleSurface(
-      this.recoverRibbonScratch.posX,
-      this.recoverRibbonScratch.posZ,
-      seg.id,
-      surface.s,
-      this.state.surfaceSample,
-    );
+    if (prevFork && prevFork.hasFork) {
+      const dSq =
+        (wx - prevFork.seamWorldX) * (wx - prevFork.seamWorldX) +
+        (wz - prevFork.seamWorldZ) * (wz - prevFork.seamWorldZ);
+      if (dSq < bestDistSq) {
+        best = prevFork;
+      }
+    }
+    return best;
+  }
 
+  private recoverFromWipeout(): void {
     const curr = this.state.currSkier;
-    curr.posX = this.recoverRibbonScratch.posX;
-    curr.posY = this.state.surfaceSample.groundY;
-    curr.posZ = this.recoverRibbonScratch.posZ;
+    const oldX = curr.posX;
+    const oldY = curr.posY;
+    const oldZ = curr.posZ;
+    const surface = this.state.surfaceSample;
+
+    const forceSafeX =
+      this.wipeoutRecoveryMode === 'safeX' ||
+      surface.onPiste ||
+      surface.inChasmZone ||
+      surface.normalY < 0.72;
+
+    if (forceSafeX) {
+      let seg = this.trailWindow.getActiveSegmentById(surface.segmentId);
+      if (!seg || seg.id === this.trailWindow.prev?.id) {
+        seg = this.trailWindow.curr;
+      }
+      const targetS = seg.id === surface.segmentId ? clamp(surface.s, 0, seg.length) : 0;
+      const safeX = seg.sampleSafeX(targetS);
+      seg.sampleSpineFrame(targetS, this.recoverFrameScratch);
+      const wx = this.recoverFrameScratch.posX + safeX * this.recoverFrameScratch.rightX;
+      const wz = this.recoverFrameScratch.posZ + safeX * this.recoverFrameScratch.rightZ;
+
+      this.surfaceSampler.sampleSurface(wx, wz, seg.id, targetS, this.state.surfaceSample);
+      curr.posX = wx;
+      curr.posZ = wz;
+      curr.posY = this.state.surfaceSample.groundY;
+    } else {
+      this.surfaceSampler.sampleSurface(
+        curr.posX,
+        curr.posZ,
+        surface.segmentId,
+        surface.s,
+        this.state.surfaceSample,
+      );
+      curr.posY = this.state.surfaceSample.groundY;
+    }
+
     curr.groundY = this.state.surfaceSample.groundY;
     curr.normalX = this.state.surfaceSample.normalX;
     curr.normalY = this.state.surfaceSample.normalY;
@@ -974,14 +1053,22 @@ export class SkiSimulation {
     curr.velZ = this.state.surfaceSample.tangentZ * recoverSpeed;
     curr.speed = recoverSpeed;
     curr.carveAngleRad = 0;
+    curr.pitchRad = Math.asin(clamp(this.state.surfaceSample.tangentY, -0.9, 0.9));
     curr.grounded = true;
     curr.braking = false;
     this.physics.reset();
+    this.wipeoutRecoveryMode = 'local';
 
     this.state.skierState = 'skiing';
     this.state.wipeoutTimerSec = 0;
     this.state.invulnerableDurationSec = this.skierDef.stats.invulnerableSec;
     this.state.invulnerableTimerSec = this.state.invulnerableDurationSec;
+
+    const jumpDist = Math.hypot(curr.posX - oldX, curr.posY - oldY, curr.posZ - oldZ);
+    if (jumpDist > 18) {
+      copySkierPose(curr, this.state.prevSkier);
+      this.cameraRig.reset(curr, this.state.surfaceSample, this.surfaceSampler);
+    }
 
     this.evRecovered.worldX = curr.posX;
     this.evRecovered.worldY = curr.posY;
@@ -1011,8 +1098,10 @@ export class SkiSimulation {
     this.deliveryGrid.shiftOrigin(dx, dz);
     this.cameraRig.shiftOrigin(dx, dy, dz);
 
-    // Refresh surfaceSample groundY so it matches the shifted coordinate frame
+    // Refresh surfaceSample elevation references so they match the shifted coordinate frame
     this.state.surfaceSample.groundY -= dy;
+    this.state.surfaceSample.nearestSpineY -= dy;
+    this.physics.invalidateSurfaceCache();
 
     this.state.rebase.rebaseCount += 1;
     this.state.rebase.offsetX += dx;

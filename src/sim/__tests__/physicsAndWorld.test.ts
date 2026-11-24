@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { FIXED_DT } from '../../core/fixedLoop';
-import { createMutablePlayerIntent, createSurfaceSample } from '../contracts';
+import { createMutablePlayerIntent, createSpineFrameOut, createSurfaceSample } from '../contracts';
 import { SkiSimulation } from '../skiSimulation';
+import { TrailWindow } from '../trailWindow';
 
 describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
   it('simulates carving, +/-80 deg downhill heading clamp, ice perk, and ski track ring buffer', () => {
@@ -518,5 +519,360 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
         expect(dot).toBeGreaterThan(0.1);
       }
     }
+  });
+
+  it('allows open-mountain off-piste carving > 35m past corridor walls and off-piste fork branch switching/progression', () => {
+    const sim = new SkiSimulation({ seed: 55, startStageId: 'sunny-blue' });
+    const intent = createMutablePlayerIntent();
+    intent.steer = 1; // carve right off-piste continuously
+
+    let maxAbsX = 0;
+    let sawOffPiste = false;
+    for (let i = 0; i < 240; i++) {
+      sim.savePreviousPoses();
+      sim.step(FIXED_DT, intent);
+      const st = sim.getState();
+      const absX = Math.abs(st.surfaceSample.x);
+      if (absX > maxAbsX) maxAbsX = absX;
+      if (!st.surfaceSample.onPiste) {
+        sawOffPiste = true;
+        const fieldH = st.mountainField.evaluateHeight(st.currSkier.posX, st.currSkier.posZ);
+        expect(st.surfaceSample.groundY).toBeCloseTo(fieldH, 3);
+      }
+    }
+
+    // Legacy corridor wall clamped at halfWidth + skirtWidth (~28m); open-mountain allows free travel
+    expect(maxAbsX).toBeGreaterThan(35);
+    expect(sawOffPiste).toBe(true);
+
+    // Pre-commit fork branch switching & progression while far off-piste (no safeX rail)
+    const forkSim = new SkiSimulation({ seed: 777, startStageId: 'sunny-blue' });
+    const fState = forkSim.getState();
+    const curr = fState.trailWindow.curr;
+    const nextLeft = fState.trailWindow.nextLeft!;
+    const nextRight = fState.trailWindow.nextRight!;
+    const fork = curr.fork;
+    const fwdX = -Math.sin(fork.seamYawRad);
+    const fwdZ = -Math.cos(fork.seamYawRad);
+    const rightX = Math.cos(fork.seamYawRad);
+    const rightZ = -Math.sin(fork.seamYawRad);
+
+    // 15m past seam, 38m left off-piste -> resolves to nextLeft; 38m right -> resolves to nextRight
+    const offLeft = forkSim.sampleSurface(
+      fork.seamWorldX + fwdX * 15 - rightX * 38,
+      fork.seamWorldZ + fwdZ * 15 - rightZ * 38,
+      nextRight.id,
+      15,
+    );
+    expect(offLeft.segmentId).toBe(nextLeft.id);
+    expect(offLeft.onPiste).toBe(false);
+
+    const offRight = forkSim.sampleSurface(
+      fork.seamWorldX + fwdX * 15 + rightX * 38,
+      fork.seamWorldZ + fwdZ * 15 + rightZ * 38,
+      nextLeft.id,
+      15,
+    );
+    expect(offRight.segmentId).toBe(nextRight.id);
+    expect(offRight.onPiste).toBe(false);
+
+    // Advance skier off-piste past 40m prune threshold -> TrailWindow promotes chosen branch
+    let forkEntered = false;
+    forkSim.eventBus.on('FORK_ENTERED', () => {
+      forkEntered = true;
+    });
+    const internal = fState as unknown as {
+      currSkier: {
+        posX: number;
+        posY: number;
+        posZ: number;
+        velX: number;
+        velY: number;
+        velZ: number;
+        headingRad: number;
+      };
+      surfaceSample: ReturnType<typeof createSurfaceSample>;
+    };
+    const startOffX = fork.seamWorldX + fwdX * 45 + rightX * 32;
+    const startOffZ = fork.seamWorldZ + fwdZ * 45 + rightZ * 32;
+    const sStart = forkSim.sampleSurface(startOffX, startOffZ, curr.id, curr.length);
+    internal.currSkier.posX = startOffX;
+    internal.currSkier.posY = sStart.groundY;
+    internal.currSkier.posZ = startOffZ;
+    internal.currSkier.headingRad = fork.seamYawRad;
+    internal.currSkier.velX = fwdX * 18;
+    internal.currSkier.velY = -4;
+    internal.currSkier.velZ = fwdZ * 18;
+    internal.surfaceSample.segmentId = sStart.segmentId;
+    internal.surfaceSample.s = sStart.s;
+
+    const zeroIntent = createMutablePlayerIntent();
+    forkSim.savePreviousPoses();
+    forkSim.step(FIXED_DT, zeroIntent);
+    expect(forkEntered).toBe(true);
+    expect(forkSim.getState().trailWindow.curr.id).toBe(nextRight.id);
+
+    // Explicitly verify left-branch off-piste updateProgression (activeSegmentId still curr.id) promotes horizonLL/horizonLR cleanly
+    const leftWin = new TrailWindow(777, 'sunny-blue');
+    const lCurr = leftWin.curr;
+    const expectedChosenLeft = leftWin.nextLeft!;
+    const expectedHorizonLL = leftWin.horizonSpines[0]!;
+    const expectedHorizonLR = leftWin.horizonSpines[1]!;
+    const lFork = lCurr.fork;
+    const lFwdX = -Math.sin(lFork.seamYawRad);
+    const lFwdZ = -Math.cos(lFork.seamYawRad);
+    const lRightX = Math.cos(lFork.seamYawRad);
+    const lRightZ = -Math.sin(lFork.seamYawRad);
+    const offAdvanceLeft = leftWin.updateProgression(
+      lCurr.id,
+      lCurr.length,
+      40,
+      lFork.seamWorldX + lFwdX * 45 - lRightX * 32,
+      lFork.seamWorldZ + lFwdZ * 45 - lRightZ * 32,
+    );
+    expect(offAdvanceLeft.forkEntered?.chosenSide).toBe('left');
+    expect(leftWin.curr.id).toBe(expectedChosenLeft.id);
+    expect(leftWin.nextLeft!.spine).toBe(expectedHorizonLL);
+    expect(leftWin.nextRight!.spine).toBe(expectedHorizonLR);
+    const chosenEnd = expectedChosenLeft.getEndPose();
+    const childLeftStart = createSpineFrameOut();
+    leftWin.nextLeft!.sampleSpineFrame(0, childLeftStart);
+    expect(Math.hypot(childLeftStart.posX - chosenEnd.posX, childLeftStart.posZ - chosenEnd.posZ)).toBeLessThan(
+      chosenEnd.halfWidth + 1.0,
+    );
+  });
+
+  it('triggers chasm_fall even while invulnerable, falls continuously with gravity, and recovers onto safeX without prevSkier ghosting', () => {
+    const sim = new SkiSimulation({ seed: 100, startStageId: 'icy-black', skierId: 'skier_alpine' });
+    const state = sim.getState();
+    const curr = state.trailWindow.curr;
+    const frame = createSpineFrameOut();
+    curr.sampleSpineFrame(120, frame);
+    const rightX = Math.cos(frame.yawRad);
+    const rightZ = -Math.sin(frame.yawRad);
+
+    // Right side on icy-black is 'chasm' (chasmWipeoutDepth = 22m, reliefScale = 34m)
+    let chasmX = 0;
+    let chasmZ = 0;
+    let chasmSample = createSurfaceSample();
+    let foundDeepChasm = false;
+    for (let s = 40; s <= 220 && !foundDeepChasm; s += 20) {
+      curr.sampleSpineFrame(s, frame);
+      const rightX = Math.cos(frame.yawRad);
+      const rightZ = -Math.sin(frame.yawRad);
+      for (let off = 24; off <= 56; off += 8) {
+        const cx = frame.posX + rightX * (frame.halfWidth + off);
+        const cz = frame.posZ + rightZ * (frame.halfWidth + off);
+        const sample = sim.sampleSurface(cx, cz, curr.id, s);
+        if (
+          sample.inChasmZone &&
+          sample.nearestSpineY - sample.groundY >= sample.chasmWipeoutDepth + 3.0
+        ) {
+          chasmX = cx;
+          chasmZ = cz;
+          chasmSample = sample;
+          foundDeepChasm = true;
+          break;
+        }
+      }
+    }
+    expect(foundDeepChasm).toBe(true);
+    expect(chasmSample.chasmWipeoutDepth).toBe(22);
+
+    const wipeouts: string[] = [];
+    let recovered = false;
+    sim.eventBus.on('PLAYER_WIPEOUT', (ev) => wipeouts.push(ev.hazardId));
+    sim.eventBus.on('PLAYER_RECOVERED', () => {
+      recovered = true;
+    });
+
+    const internal = state as unknown as {
+      currSkier: {
+        posX: number;
+        posY: number;
+        posZ: number;
+        velX: number;
+        velY: number;
+        velZ: number;
+        grounded: boolean;
+      };
+      surfaceSample: ReturnType<typeof createSurfaceSample>;
+      invulnerableTimerSec: number;
+    };
+
+    // Place skier airborne just past chasmWipeoutDepth (with >= 2.5m drop remaining) while invulnerable
+    internal.invulnerableTimerSec = 2.0;
+    internal.currSkier.posX = chasmX;
+    internal.currSkier.posZ = chasmZ;
+    internal.currSkier.posY = chasmSample.nearestSpineY - (chasmSample.chasmWipeoutDepth + 0.5);
+    expect(internal.currSkier.posY - chasmSample.groundY).toBeGreaterThan(2.0);
+    internal.currSkier.velX = 0;
+    internal.currSkier.velY = -4;
+    internal.currSkier.velZ = -4;
+    internal.currSkier.grounded = false;
+    internal.surfaceSample.segmentId = chasmSample.segmentId;
+    internal.surfaceSample.s = chasmSample.s;
+
+    const intent = createMutablePlayerIntent();
+    sim.savePreviousPoses();
+    sim.step(FIXED_DT, intent);
+
+    expect(wipeouts).toEqual(['chasm_fall']);
+    expect(state.skierState).toBe('wipeout');
+    // Gravity integration: did NOT snap instantly down to chasm floor on tick 1
+    expect(state.currSkier.posY).toBeGreaterThan(state.currSkier.groundY + 1.0);
+
+    // Step through tumble recovery and verify prevSkier/currSkier snap onto safeX with no ghosting
+    let sawRecover = false;
+    for (let i = 0; i < 120; i++) {
+      sim.savePreviousPoses();
+      sim.step(FIXED_DT, intent);
+      if (recovered && !sawRecover) {
+        sawRecover = true;
+        expect(state.skierState).toBe('skiing');
+        expect(state.surfaceSample.onPiste).toBe(true);
+        const safeX = curr.sampleSafeX(state.surfaceSample.s);
+        expect(Math.abs(state.surfaceSample.x - safeX)).toBeLessThan(1.5);
+        expect(state.prevSkier.posX).toBeCloseTo(state.currSkier.posX, 6);
+        expect(state.prevSkier.posY).toBeCloseTo(state.currSkier.posY, 6);
+        expect(state.prevSkier.posZ).toBeCloseTo(state.currSkier.posZ, 6);
+        const camSurf = sim.sampleSurface(state.currCamera.posX, state.currCamera.posZ);
+        expect(state.currCamera.posY - camSurf.groundY).toBeGreaterThanOrEqual(1.9);
+        break;
+      }
+    }
+    expect(sawRecover).toBe(true);
+  });
+
+  it('slows steep canyon uphill climbs without uphill brake thrust or zero-clamp stall, and recovers skiable off-piste wipeouts locally', () => {
+    // 1. Uphill brake & gravity slide-back on icy-black left canyonWalls
+    const wallSim = new SkiSimulation({ seed: 100, startStageId: 'icy-black' });
+    const wState = wallSim.getState();
+    const frame = createSpineFrameOut();
+    wState.trailWindow.curr.sampleSpineFrame(120, frame);
+    const rightX = Math.cos(frame.yawRad);
+    const rightZ = -Math.sin(frame.yawRad);
+
+    // Find a steep canyon wall column on the left side facing uphill into the wall
+    let wallX = frame.posX - rightX * 32;
+    let wallZ = frame.posZ - rightZ * 32;
+    let wallSample = wallSim.sampleSurface(wallX, wallZ, wState.trailWindow.curr.id, 120);
+    for (let d = 24; d <= 52; d += 2) {
+      const cx = frame.posX - rightX * d;
+      const cz = frame.posZ - rightZ * d;
+      const s = wallSim.sampleSurface(cx, cz, wState.trailWindow.curr.id, 120);
+      if (s.normalY < 0.78) {
+        wallX = cx;
+        wallZ = cz;
+        wallSample = s;
+        break;
+      }
+    }
+    const downhillYaw = Math.atan2(-wallSample.tangentX, -wallSample.tangentZ);
+    const wallHeading = downhillYaw + (75 * Math.PI) / 180;
+    const hFwdX = -Math.sin(wallHeading);
+    const hFwdZ = -Math.cos(wallHeading);
+
+    const wInternal = wState as unknown as {
+      currSkier: {
+        posX: number;
+        posY: number;
+        posZ: number;
+        velX: number;
+        velY: number;
+        velZ: number;
+        headingRad: number;
+        grounded: boolean;
+      };
+      surfaceSample: ReturnType<typeof createSurfaceSample>;
+    };
+    wInternal.currSkier.posX = wallX;
+    wInternal.currSkier.posZ = wallZ;
+    wInternal.currSkier.posY = wallSample.groundY;
+    wInternal.currSkier.headingRad = wallHeading;
+    wInternal.currSkier.velX = hFwdX * 2.0;
+    wInternal.currSkier.velY = 0;
+    wInternal.currSkier.velZ = hFwdZ * 2.0;
+    wInternal.currSkier.grounded = true;
+    wInternal.surfaceSample.segmentId = wallSample.segmentId;
+    wInternal.surfaceSample.s = wallSample.s;
+
+    // Braking slowly at low speed on steep terrain must decelerate toward 0, never boost to 4.5 m/s
+    const brakeIntent = createMutablePlayerIntent();
+    brakeIntent.brake = true;
+    wallSim.savePreviousPoses();
+    wallSim.step(FIXED_DT, brakeIntent);
+    const postBrakeFwd =
+      wState.currSkier.velX * -Math.sin(wState.currSkier.headingRad) +
+      wState.currSkier.velZ * -Math.cos(wState.currSkier.headingRad);
+    expect(postBrakeFwd).toBeLessThan(2.0);
+
+    // Without braking, uphill stall pivots heading back toward downhillYaw instead of sticking
+    const preHeadingErr = Math.abs(wState.currSkier.headingRad - downhillYaw);
+    const freeIntent = createMutablePlayerIntent();
+    for (let i = 0; i < 30; i++) {
+      wallSim.savePreviousPoses();
+      wallSim.step(FIXED_DT, freeIntent);
+    }
+    const postHeadingErr = Math.abs(wState.currSkier.headingRad - downhillYaw);
+    expect(postHeadingErr).toBeLessThan(preHeadingErr);
+
+    // 2. Normal skiable off-piste wipeout recovers locally in place (sunny-blue, normalY >= 0.72)
+    const offSim = new SkiSimulation({ seed: 12, startStageId: 'sunny-blue' });
+    const oState = offSim.getState();
+    const oFrame = createSpineFrameOut();
+    oState.trailWindow.curr.sampleSpineFrame(80, oFrame);
+    const oRightX = Math.cos(oFrame.yawRad);
+    const oRightZ = -Math.sin(oFrame.yawRad);
+    const offX = oFrame.posX + oRightX * 32;
+    const offZ = oFrame.posZ + oRightZ * 32;
+    const offSurf = offSim.sampleSurface(offX, offZ, oState.trailWindow.curr.id, 80);
+    expect(offSurf.onPiste).toBe(false);
+    expect(offSurf.inChasmZone).toBe(false);
+    expect(offSurf.normalY).toBeGreaterThanOrEqual(0.72);
+
+    let recoveredLocal = false;
+    offSim.eventBus.on('PLAYER_RECOVERED', () => {
+      recoveredLocal = true;
+    });
+
+    const oInternal = oState as unknown as {
+      currSkier: {
+        posX: number;
+        posY: number;
+        posZ: number;
+        velX: number;
+        velY: number;
+        velZ: number;
+        grounded: boolean;
+      };
+      surfaceSample: ReturnType<typeof createSurfaceSample>;
+      skierState: 'skiing' | 'wipeout' | 'recovering';
+      wipeoutTimerSec: number;
+    };
+    oInternal.currSkier.posX = offX;
+    oInternal.currSkier.posZ = offZ;
+    oInternal.currSkier.posY = offSurf.groundY;
+    oInternal.currSkier.velX = 0;
+    oInternal.currSkier.velY = 0;
+    oInternal.currSkier.velZ = 0;
+    oInternal.currSkier.grounded = true;
+    oInternal.surfaceSample.segmentId = offSurf.segmentId;
+    oInternal.surfaceSample.s = offSurf.s;
+    oInternal.surfaceSample.onPiste = offSurf.onPiste;
+    oInternal.surfaceSample.inChasmZone = offSurf.inChasmZone;
+    oInternal.surfaceSample.normalY = offSurf.normalY;
+    oInternal.skierState = 'wipeout';
+    oInternal.wipeoutTimerSec = 0.04;
+
+    const zeroIntent = createMutablePlayerIntent();
+    for (let i = 0; i < 6 && !recoveredLocal; i++) {
+      offSim.savePreviousPoses();
+      offSim.step(FIXED_DT, zeroIntent);
+    }
+    expect(recoveredLocal).toBe(true);
+    expect(oState.skierState).toBe('skiing');
+    expect(oState.surfaceSample.onPiste).toBe(false);
+    expect(Math.hypot(oState.currSkier.posX - offX, oState.currSkier.posZ - offZ)).toBeLessThan(3.0);
   });
 });

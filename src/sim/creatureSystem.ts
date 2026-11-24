@@ -8,14 +8,14 @@ import {
   CREATURE_PHASE_TELEGRAPH,
   createSurfaceSample,
   type SimEventMap,
+  type SurfaceQueryView,
   type SurfaceSample,
 } from './contracts';
 import type { CreaturePool } from './entityPools';
-import type { TrailWindow } from './trailWindow';
 
 /**
  * Three-tier world-space creature behavior orchestrator for patrolling creatures (Bear).
- * Executes in authoritative World Space (X, Y, Z), querying TrailWindow.sampleSurface
+ * Executes in authoritative World Space (X, Y, Z), querying SurfaceQueryView.sampleSurface
  * with a non-authoritative hint cache for seamless cross-seam movement.
  */
 export class CreatureSystem {
@@ -46,7 +46,7 @@ export class CreatureSystem {
     skierPosZ: number,
     skierYawRad: number,
     creatures: CreaturePool,
-    trailWindow: TrailWindow,
+    surfaceQuery: SurfaceQueryView,
     eventBus: EventBus<SimEventMap>,
   ): void {
     const skierRightX = Math.cos(skierYawRad);
@@ -105,7 +105,7 @@ export class CreatureSystem {
         // Cross-trail patrol in World Space (X, Z) + gentle downhill drift
         const hintSeg = creatures.hintSegId[i]!;
         const hintS = creatures.hintS[i]!;
-        trailWindow.sampleSurface(cx, cz, hintSeg, hintS, this.sampleScratch);
+        surfaceQuery.sampleSurface(cx, cz, hintSeg, hintS, this.sampleScratch);
 
         if (this.sampleScratch.valid) {
           creatures.hintSegId[i] = this.sampleScratch.segmentId;
@@ -138,7 +138,7 @@ export class CreatureSystem {
 
           const nextX = cx + vx * dt;
           const nextZ = cz + vz * dt;
-          trailWindow.sampleSurface(
+          surfaceQuery.sampleSurface(
             nextX,
             nextZ,
             creatures.hintSegId[i]!,

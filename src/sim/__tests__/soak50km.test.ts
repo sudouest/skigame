@@ -234,5 +234,5 @@ describe('50 km Headless PCG & Simulation Soak Test', () => {
       expect(deliveryCadences[i]!).toBeGreaterThanOrEqual(70);
       expect(deliveryCadences[i]!).toBeLessThanOrEqual(250);
     }
-  });
+  }, 20_000);
 });

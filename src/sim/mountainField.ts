@@ -29,6 +29,7 @@ const LANDSCAPE_ATTEN_END_M = 260;
 const OUTER_FUNNEL_START_M = 110;
 const OUTER_FUNNEL_END_M = 200;
 const PISTE_LONG_HANDOFF_M = 14;
+const PISTE_AABB_CUTOFF_SQ = 58 * 58;
 const NORMAL_SAMPLE_EPS_M = 0.5;
 const ROCK_SLOPE_NORMAL_Y_THRESHOLD = 0.72;
 
@@ -54,6 +55,9 @@ export class MountainField implements MountainFieldView {
   private readonly heightColumnScratch: MountainColumnOut = createMountainColumnOut();
   private readonly stageIdsScratch: string[] = [];
   private readonly stageWeightsScratch: number[] = [];
+  private readonly evalSpinesScratch: SpineView[] = [];
+  private readonly singleSpineScratch: SpineView[] = [];
+  private interiorSinglePisteSpine: SpineView | null = null;
 
   constructor(spineSource: MountainSpineSource) {
     this.spineSource = spineSource;
@@ -80,7 +84,7 @@ export class MountainField implements MountainFieldView {
   }
 
   evaluateHeight(wx: number, wz: number, candidateSpines?: readonly SpineView[]): number {
-    return this.evaluateColumnCore(wx, wz, this.heightColumnScratch, candidateSpines, false).heightY;
+    return this.evaluateColumnCore(wx, wz, this.heightColumnScratch, candidateSpines, false, true).heightY;
   }
 
   evaluateColumn(
@@ -89,7 +93,7 @@ export class MountainField implements MountainFieldView {
     out: MountainColumnOut,
     candidateSpines?: readonly SpineView[],
   ): MountainColumnOut {
-    return this.evaluateColumnCore(wx, wz, out, candidateSpines, true);
+    return this.evaluateColumnCore(wx, wz, out, candidateSpines, true, false);
   }
 
   evaluate(
@@ -98,12 +102,29 @@ export class MountainField implements MountainFieldView {
     out: MountainSampleOut,
     candidateSpines?: readonly SpineView[],
   ): MountainSampleOut {
-    this.evaluateColumnCore(wx, wz, out, candidateSpines, true);
+    this.evaluateColumnCore(wx, wz, out, candidateSpines, true, true);
 
-    const hL = this.evaluateHeight(wx - NORMAL_SAMPLE_EPS_M, wz, candidateSpines);
-    const hR = this.evaluateHeight(wx + NORMAL_SAMPLE_EPS_M, wz, candidateSpines);
-    const hD = this.evaluateHeight(wx, wz - NORMAL_SAMPLE_EPS_M, candidateSpines);
-    const hU = this.evaluateHeight(wx, wz + NORMAL_SAMPLE_EPS_M, candidateSpines);
+    let evalSpines = candidateSpines;
+    if (this.interiorSinglePisteSpine !== null) {
+      this.singleSpineScratch[0] = this.interiorSinglePisteSpine;
+      this.singleSpineScratch.length = 1;
+      evalSpines = this.singleSpineScratch;
+    } else if (!evalSpines || evalSpines.length === 0) {
+      this.collectSpinesInBounds(
+        wx - 1,
+        wx + 1,
+        wz - 1,
+        wz + 1,
+        310,
+        this.evalSpinesScratch,
+      );
+      evalSpines = this.evalSpinesScratch;
+    }
+
+    const hL = this.evaluateHeight(wx - NORMAL_SAMPLE_EPS_M, wz, evalSpines);
+    const hR = this.evaluateHeight(wx + NORMAL_SAMPLE_EPS_M, wz, evalSpines);
+    const hD = this.evaluateHeight(wx, wz - NORMAL_SAMPLE_EPS_M, evalSpines);
+    const hU = this.evaluateHeight(wx, wz + NORMAL_SAMPLE_EPS_M, evalSpines);
 
     const span = 2 * NORMAL_SAMPLE_EPS_M;
     const dHx = (hR - hL) / span;
@@ -125,7 +146,9 @@ export class MountainField implements MountainFieldView {
     out: MountainColumnOut,
     candidateSpines: readonly SpineView[] | undefined,
     includeMetadata: boolean,
+    skipMacroOnFullPiste: boolean,
   ): MountainColumnOut {
+    this.interiorSinglePisteSpine = null;
     const spines =
       candidateSpines && candidateSpines.length > 0
         ? candidateSpines
@@ -162,7 +185,100 @@ export class MountainField implements MountainFieldView {
     let fallbackAabbDistSq = Infinity;
 
     let stageCount = 0;
+    let pisteNearCount = 0;
 
+    // Pass 1: Piste stamp pre-pass over local AABB candidates (lossless early exit on-piste)
+    for (let i = 0; i < spines.length; i++) {
+      const sp = spines[i]!;
+      const aabbDx =
+        wx < sp.boundsMinX ? sp.boundsMinX - wx : wx > sp.boundsMaxX ? wx - sp.boundsMaxX : 0;
+      const aabbDz =
+        wz < sp.boundsMinZ ? sp.boundsMinZ - wz : wz > sp.boundsMaxZ ? wz - sp.boundsMaxZ : 0;
+      const aabbDistSq = aabbDx * aabbDx + aabbDz * aabbDz;
+      if (aabbDistSq > PISTE_AABB_CUTOFF_SQ) continue;
+
+      sp.projectXZ(wx, wz, this.projScratch);
+      const proj = this.projScratch;
+      const absLongExt = Math.abs(proj.longExt);
+      if (absLongExt >= PISTE_LONG_HANDOFF_M + 1.0) continue;
+
+      const landscape = this.resolveLandscape(sp);
+      const sideSpec = proj.signedX < 0 ? landscape.left : landscape.right;
+      const blendW = Math.min(sideSpec.transitionWidth * 0.5, 10);
+      if (Math.abs(proj.signedX) < proj.halfWidth + blendW + 1.0) {
+        pisteNearCount++;
+      }
+
+      const longMask = 1 - smoothstep(0, PISTE_LONG_HANDOFF_M, absLongExt);
+      if (longMask <= 0) continue;
+
+      const pisteW =
+        (1 - smoothstep(proj.halfWidth, proj.halfWidth + blendW, Math.abs(proj.signedX))) *
+        longMask;
+
+      if (pisteW > 1e-6) {
+        const extDeltaY = proj.longExt * Math.tan(clamp(proj.pitchRad, -1.2, 1.2));
+        sp.evaluatePisteHeight(proj.s, proj.signedX, this.pisteScratch);
+        const pisteH = this.pisteScratch.heightY + extDeltaY;
+        pisteSumW += pisteW;
+        pisteWeightedH += pisteW * pisteH;
+
+        if (pisteW > maxPisteW) {
+          maxPisteW = pisteW;
+          dominantPisteSpine = sp;
+          dominantPisteS = proj.s;
+          dominantPisteSignedX = proj.signedX;
+          dominantPisteInDivider = this.pisteScratch.inDivider;
+          this.copyProjection(proj, this.nearestProjScratch);
+        }
+      }
+    }
+
+    const isFullPiste = maxPisteW >= 1 - 1e-6;
+    if (isFullPiste && dominantPisteSpine !== null) {
+      const heightY = pisteWeightedH / pisteSumW;
+      if (!includeMetadata) {
+        out.heightY = heightY;
+        return out;
+      }
+      if (skipMacroOnFullPiste) {
+        const np = this.nearestProjScratch;
+        out.heightY = heightY;
+        out.macroY = np.spineY;
+        out.pisteWeight = maxPisteW;
+        out.onPiste = true;
+        out.pisteSurfaceType = dominantPisteSpine.evaluatePisteSurface(
+          dominantPisteS,
+          dominantPisteSignedX,
+        );
+        out.inDivider = dominantPisteInDivider;
+        out.inChasmZone = false;
+        out.chasmWipeoutDepth = 0;
+        out.chasmDepthBelowSpine = Math.max(0, np.spineY - heightY);
+        out.nearestSpineY = np.spineY;
+        out.nearestSegmentId = dominantPisteSpine.id;
+        out.nearestStageId = dominantPisteSpine.stageId;
+        out.secondaryStageId = null;
+        out.secondaryStageWeight = 0;
+        out.nearestS = dominantPisteS;
+        out.nearestSignedX = dominantPisteSignedX;
+        out.nearestHalfWidth = np.halfWidth;
+        out.downhillX = np.forwardX;
+        out.downhillY = np.forwardY;
+        out.downhillZ = np.forwardZ;
+        if (
+          pisteNearCount === 1 &&
+          Math.abs(dominantPisteSignedX) <= np.halfWidth - 0.75 &&
+          dominantPisteS >= 1.0 &&
+          dominantPisteS <= dominantPisteSpine.length - 1.0
+        ) {
+          this.interiorSinglePisteSpine = dominantPisteSpine;
+        }
+        return out;
+      }
+    }
+
+    // Pass 2: Macro sheet + off-piste landscape evaluation (skipping landscape noise when isFullPiste)
     for (let i = 0; i < spines.length; i++) {
       const sp = spines[i]!;
       const aabbDx =
@@ -201,45 +317,23 @@ export class MountainField implements MountainFieldView {
 
       const extDeltaY = proj.longExt * Math.tan(clamp(proj.pitchRad, -1.2, 1.2));
       const rawExtY = proj.spineY + extDeltaY;
-      const landscape = this.resolveLandscape(sp);
 
       if (w > 0) {
         const extY = this.evaluateSmoothMacroSpineY(sp, wx, wz, rawExtY, dist, distSq);
         sumW += w;
         weightedMacroY += w * extY;
 
-        const dH = this.evaluateSpineLandscape(sp, landscape, proj, edgeDist, dist, absX, absZ);
-        weightedLandscapeDH += w * dH;
+        if (!isFullPiste) {
+          const landscape = this.resolveLandscape(sp);
+          const dH = this.evaluateSpineLandscape(sp, landscape, proj, edgeDist, dist, absX, absZ);
+          weightedLandscapeDH += w * dH;
+        }
 
         if (includeMetadata) {
           downhillAccX += w * proj.forwardX;
           downhillAccY += w * proj.forwardY;
           downhillAccZ += w * proj.forwardZ;
           stageCount = this.accumulateStageWeight(sp.stageId, w, stageCount);
-        }
-      }
-
-      const longMask = 1 - smoothstep(0, PISTE_LONG_HANDOFF_M, Math.abs(proj.longExt));
-      if (longMask > 0) {
-        const sideSpec = proj.signedX < 0 ? landscape.left : landscape.right;
-        const blendW = Math.min(sideSpec.transitionWidth * 0.5, 10);
-        const pisteW =
-          (1 - smoothstep(proj.halfWidth, proj.halfWidth + blendW, Math.abs(proj.signedX))) *
-          longMask;
-
-        if (pisteW > 1e-6) {
-          sp.evaluatePisteHeight(proj.s, proj.signedX, this.pisteScratch);
-          const pisteH = this.pisteScratch.heightY + extDeltaY;
-          pisteSumW += pisteW;
-          pisteWeightedH += pisteW * pisteH;
-
-          if (pisteW > maxPisteW) {
-            maxPisteW = pisteW;
-            dominantPisteSpine = sp;
-            dominantPisteS = proj.s;
-            dominantPisteSignedX = proj.signedX;
-            dominantPisteInDivider = this.pisteScratch.inDivider;
-          }
         }
       }
     }
@@ -264,10 +358,19 @@ export class MountainField implements MountainFieldView {
         dist,
         np.distSq,
       );
-      const landscape = this.resolveLandscape(nearestSpine);
-      const dH = this.evaluateSpineLandscape(nearestSpine, landscape, np, minEdgeDist, dist, absX, absZ);
-      const outerFunnel = this.evaluateOuterValleyFunnel(minEdgeDist, absX, absZ);
-      const offPisteRelief = (dH + outerFunnel) * (1 - maxPisteW);
+      const offPisteRelief = isFullPiste
+        ? 0
+        : (this.evaluateSpineLandscape(
+            nearestSpine,
+            this.resolveLandscape(nearestSpine),
+            np,
+            minEdgeDist,
+            dist,
+            absX,
+            absZ,
+          ) +
+            this.evaluateOuterValleyFunnel(minEdgeDist, absX, absZ)) *
+          (1 - maxPisteW);
       const finalPisteH = pisteSumW > 1e-6 ? pisteWeightedH / pisteSumW : macroY;
       const heightY = lerp(macroY + offPisteRelief, finalPisteH, maxPisteW);
 
@@ -296,9 +399,10 @@ export class MountainField implements MountainFieldView {
     }
 
     const macroY = weightedMacroY / sumW;
-    const avgLandscapeDH = weightedLandscapeDH / sumW;
-    const outerFunnel = this.evaluateOuterValleyFunnel(minEdgeDist, absX, absZ);
-    const offPisteRelief = (avgLandscapeDH + outerFunnel) * (1 - maxPisteW);
+    const offPisteRelief = isFullPiste
+      ? 0
+      : (weightedLandscapeDH / sumW + this.evaluateOuterValleyFunnel(minEdgeDist, absX, absZ)) *
+        (1 - maxPisteW);
     const finalPisteH = pisteSumW > 1e-6 ? pisteWeightedH / pisteSumW : macroY;
     const heightY = lerp(macroY + offPisteRelief, finalPisteH, maxPisteW);
 
@@ -470,25 +574,29 @@ export class MountainField implements MountainFieldView {
     absX: number,
     absZ: number,
   ): number {
-    const absLat = proj.halfWidth + edgeDist;
-    let leftDH = this.evaluateSideSpec(landscape.left, proj.halfWidth, absLat, absX, absZ);
-    let rightDH = this.evaluateSideSpec(landscape.right, proj.halfWidth, absLat, absX, absZ);
+    const distAtten = 1 - smoothstep(LANDSCAPE_ATTEN_START_M, LANDSCAPE_ATTEN_END_M, dist);
+    if (distAtten <= 0) return 0;
 
-    // Smoothly attenuate inner-fork side landscape over s in [20, 85] so chasms/walls
-    // never crater the V-wedge nose immediately downstream of a fork seam
-    if (spine.fork.isForkChild) {
-      const innerAtten = smoothstep(20, 85, proj.s);
-      if (spine.fork.forkSide === 'left') {
-        rightDH *= innerAtten;
-      } else if (spine.fork.forkSide === 'right') {
-        leftDH *= innerAtten;
+    const absLat = proj.halfWidth + edgeDist;
+    const sideBlend = smoothstep(-2, 2, proj.signedX);
+
+    let leftDH = 0;
+    if (sideBlend < 1) {
+      leftDH = this.evaluateSideSpec(landscape.left, proj.halfWidth, absLat, absX, absZ);
+      if (spine.fork.isForkChild && spine.fork.forkSide === 'right') {
+        leftDH *= smoothstep(20, 85, proj.s);
       }
     }
 
-    const sideBlend = smoothstep(-2, 2, proj.signedX);
-    const blended = lerp(leftDH, rightDH, sideBlend);
-    const distAtten = 1 - smoothstep(LANDSCAPE_ATTEN_START_M, LANDSCAPE_ATTEN_END_M, dist);
-    return blended * distAtten;
+    let rightDH = 0;
+    if (sideBlend > 0) {
+      rightDH = this.evaluateSideSpec(landscape.right, proj.halfWidth, absLat, absX, absZ);
+      if (spine.fork.isForkChild && spine.fork.forkSide === 'left') {
+        rightDH *= smoothstep(20, 85, proj.s);
+      }
+    }
+
+    return lerp(leftDH, rightDH, sideBlend) * distAtten;
   }
 
   private evaluateSideSpec(

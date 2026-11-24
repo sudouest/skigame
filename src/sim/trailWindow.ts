@@ -3,13 +3,14 @@ import { SeededRng } from '../core/rng';
 import { getAllStages, getStageDef } from '../content/stages';
 import type { StageDef } from '../content/types';
 import {
-  createRibbonPointOut,
   createSpineFrameOut,
+  createSpineProjectionOut,
+  type ActiveTrackProjectionOut,
+  type ActiveTrackProjector,
   type MountainSpineSource,
-  type RibbonPointOut,
   type SpineFrameOut,
+  type SpineProjectionOut,
   type SpineView,
-  type SurfaceSample,
   type TrailSlotRole,
   type TrailWindowView,
 } from './contracts';
@@ -39,14 +40,15 @@ interface PolyQueryOut {
   s: number;
   x: number;
   distSq: number;
+  hitInteriorBound: boolean;
 }
 
 /**
  * 4-slot sliding segment window [prev, curr, nextLeft, nextRight] paired with
  * 1-level deeper horizon spine lookahead and bounded ghost-spine elevation history,
- * providing O(1) warm-started surface sampling and seamless Model A fork crossing.
+ * providing O(1) warm-started active-track projection and seamless Model A fork crossing.
  */
-export class TrailWindow implements TrailWindowView, MountainSpineSource {
+export class TrailWindow implements TrailWindowView, MountainSpineSource, ActiveTrackProjector {
   prev: TrailSegment | null = null;
   curr!: TrailSegment;
   nextLeft: TrailSegment | null = null;
@@ -68,11 +70,11 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource {
   private readonly stageResolver: ((id: string) => StageDef | undefined) | undefined;
 
   // Pre-allocated query scratch structs (zero hot-loop heap allocations)
-  private readonly queryScratchA: PolyQueryOut = { s: 0, x: 0, distSq: Infinity };
-  private readonly queryScratchB: PolyQueryOut = { s: 0, x: 0, distSq: Infinity };
-  private readonly queryScratchC: PolyQueryOut = { s: 0, x: 0, distSq: Infinity };
+  private readonly queryScratchA: PolyQueryOut = { s: 0, x: 0, distSq: Infinity, hitInteriorBound: false };
+  private readonly queryScratchB: PolyQueryOut = { s: 0, x: 0, distSq: Infinity, hitInteriorBound: false };
+  private readonly queryScratchC: PolyQueryOut = { s: 0, x: 0, distSq: Infinity, hitInteriorBound: false };
   private readonly frameScratch: SpineFrameOut = createSpineFrameOut();
-  private readonly ribbonScratch: RibbonPointOut = createRibbonPointOut();
+  private readonly spineProjScratch: SpineProjectionOut = createSpineProjectionOut();
   private readonly validForkTargetsScratch: string[] = [];
   private readonly forkPairScratch: { left: string; right: string } = { left: '', right: '' };
   private readonly prunedIdScratch: number[] = [];
@@ -217,41 +219,58 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource {
   }
 
   /**
-   * Warm-started O(1) zero-allocation surface query mapping world (posX, posZ) onto
-   * the active TrailWindow, resolving fork seams continuously across grounded/straddling/airborne states.
+   * Warm-started O(1) zero-allocation active-window projection mapping world (posX, posZ)
+   * onto [prev, curr, nextLeft, nextRight] across on-piste, off-piste, and Model A fork seams.
    */
-  sampleSurface(
+  projectActiveWindow(
     posX: number,
     posZ: number,
     hintSegmentId: number,
     hintS: number,
-    out: SurfaceSample,
-  ): SurfaceSample {
+    out: ActiveTrackProjectionOut,
+  ): ActiveTrackProjectionOut {
     const hintSeg = hintSegmentId >= 0 ? this.getActiveSegmentById(hintSegmentId) : null;
-    let bestSeg: TrailSegment = this.curr;
-    let bestS = 0;
-    let bestDistSq = Infinity;
+    if (hintSeg === null) {
+      this.findBestAcrossWindow(posX, posZ, out);
+      return out;
+    }
 
-    if (hintSeg !== null) {
-      // Inspect ~5 adjacent polyline edges around hintS
-      this.projectLocalWindow(hintSeg, posX, posZ, hintS, 3, this.queryScratchA);
-      bestSeg = hintSeg;
-      bestS = this.queryScratchA.s;
-      bestDistSq = this.queryScratchA.distSq;
+    const overflowed = this.projectLocalWindow(hintSeg, posX, posZ, hintS, 3, this.queryScratchA);
+    let bestSeg: TrailSegment = hintSeg;
+    let bestS = this.queryScratchA.s;
+    let bestDistSq = this.queryScratchA.distSq;
 
-      // Also check connected child/parent near segment ends
-      if (hintSeg.id === this.curr.id && bestS >= this.curr.length - 18) {
+    if (this.prev && bestSeg.id === this.prev.id) {
+      const pf = this.prev.fork;
+      let alongPrevSeam = -1;
+      if (pf.hasFork) {
+        const pfFwdX = -Math.sin(pf.seamYawRad);
+        const pfFwdZ = -Math.cos(pf.seamYawRad);
+        alongPrevSeam = (posX - pf.seamWorldX) * pfFwdX + (posZ - pf.seamWorldZ) * pfFwdZ;
+      }
+      if (alongPrevSeam > 0 || bestS >= this.prev.length - 15) {
+        this.projectFullSegment(this.curr, posX, posZ, this.queryScratchB);
+        if (alongPrevSeam > 0 || this.queryScratchB.distSq < bestDistSq) {
+          bestSeg = this.curr;
+          bestS = this.queryScratchB.s;
+          bestDistSq = this.queryScratchB.distSq;
+        }
+      }
+    }
+
+    if (bestSeg.id === this.curr.id && this.nextLeft !== null) {
+      if (this.curr.fork.hasFork) {
         const fork = this.curr.fork;
         const seamFwdX = -Math.sin(fork.seamYawRad);
         const seamFwdZ = -Math.cos(fork.seamYawRad);
         const alongSeam =
           (posX - fork.seamWorldX) * seamFwdX + (posZ - fork.seamWorldZ) * seamFwdZ;
 
-        if (alongSeam > 0 && this.nextLeft !== null) {
+        if (alongSeam > 0) {
           if (this.nextRight !== null) {
-            this.projectLocalWindow(this.nextLeft, posX, posZ, 0, 5, this.queryScratchB);
-            this.projectLocalWindow(this.nextRight, posX, posZ, 0, 5, this.queryScratchC);
-            if (Math.abs(this.queryScratchB.x) <= Math.abs(this.queryScratchC.x)) {
+            this.projectFullSegment(this.nextLeft, posX, posZ, this.queryScratchB);
+            this.projectFullSegment(this.nextRight, posX, posZ, this.queryScratchC);
+            if (this.queryScratchB.distSq <= this.queryScratchC.distSq) {
               bestSeg = this.nextLeft;
               bestS = this.queryScratchB.s;
               bestDistSq = this.queryScratchB.distSq;
@@ -261,96 +280,90 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource {
               bestDistSq = this.queryScratchC.distSq;
             }
           } else {
-            this.projectLocalWindow(this.nextLeft, posX, posZ, 0, 5, this.queryScratchB);
+            this.projectFullSegment(this.nextLeft, posX, posZ, this.queryScratchB);
             bestSeg = this.nextLeft;
             bestS = this.queryScratchB.s;
             bestDistSq = this.queryScratchB.distSq;
           }
+        } else if (this.prev && bestS <= 12) {
+          this.projectFullSegment(this.prev, posX, posZ, this.queryScratchB);
+          if (this.queryScratchB.distSq < bestDistSq) {
+            bestSeg = this.prev;
+            bestS = this.queryScratchB.s;
+            bestDistSq = this.queryScratchB.distSq;
+          }
         }
-      } else if (this.prev && hintSeg.id === this.prev.id && bestS >= this.prev.length - 15) {
-        this.projectLocalWindow(this.curr, posX, posZ, 0, 5, this.queryScratchB);
-        if (this.queryScratchB.distSq < bestDistSq) {
-          bestSeg = this.curr;
-          bestS = this.queryScratchB.s;
-          bestDistSq = this.queryScratchB.distSq;
-        }
-      } else if (
-        (hintSeg.id === this.nextLeft?.id || hintSeg.id === this.nextRight?.id) &&
-        bestS <= 10
-      ) {
-        // Check if skier moved back slightly upstream of seam or switched sides at s ~ 0
-        const fork = this.curr.fork;
-        const seamFwdX = -Math.sin(fork.seamYawRad);
-        const seamFwdZ = -Math.cos(fork.seamYawRad);
-        const alongSeam =
-          (posX - fork.seamWorldX) * seamFwdX + (posZ - fork.seamWorldZ) * seamFwdZ;
-        if (alongSeam <= 0) {
-          this.projectLocalWindow(this.curr, posX, posZ, this.curr.length, 4, this.queryScratchB);
-          bestSeg = this.curr;
-          bestS = this.queryScratchB.s;
-          bestDistSq = this.queryScratchB.distSq;
-        } else if (this.nextLeft && this.nextRight) {
-          const sibling = hintSeg.id === this.nextLeft.id ? this.nextRight : this.nextLeft;
-          this.projectLocalWindow(sibling, posX, posZ, bestS, 4, this.queryScratchB);
-          if (Math.abs(this.queryScratchB.x) < Math.abs(this.queryScratchA.x)) {
-            bestSeg = sibling;
+      } else {
+        const endPose = this.curr.getEndPose();
+        const seamFwdX = -Math.sin(endPose.yawRad);
+        const seamFwdZ = -Math.cos(endPose.yawRad);
+        const alongSeam = (posX - endPose.posX) * seamFwdX + (posZ - endPose.posZ) * seamFwdZ;
+        if (alongSeam > 0 || bestS >= this.curr.length - 15) {
+          this.projectFullSegment(this.nextLeft, posX, posZ, this.queryScratchB);
+          if (alongSeam > 0 || this.queryScratchB.distSq < bestDistSq) {
+            bestSeg = this.nextLeft;
+            bestS = this.queryScratchB.s;
+            bestDistSq = this.queryScratchB.distSq;
+          }
+        } else if (this.prev && bestS <= 12) {
+          this.projectFullSegment(this.prev, posX, posZ, this.queryScratchB);
+          if (this.queryScratchB.distSq < bestDistSq) {
+            bestSeg = this.prev;
             bestS = this.queryScratchB.s;
             bestDistSq = this.queryScratchB.distSq;
           }
         }
       }
-
-      // Fallback full-active scan only when hint misses far (e.g., teleport)
-      if (bestDistSq > 1600) {
-        this.findBestAcrossWindow(posX, posZ, out);
-        return out;
+    } else if (
+      bestSeg.id === this.nextLeft?.id ||
+      bestSeg.id === this.nextRight?.id
+    ) {
+      const fork = this.curr.fork;
+      let seamX = fork.seamWorldX;
+      let seamZ = fork.seamWorldZ;
+      let seamYaw = fork.seamYawRad;
+      if (!fork.hasFork) {
+        const endPose = this.curr.getEndPose();
+        seamX = endPose.posX;
+        seamZ = endPose.posZ;
+        seamYaw = endPose.yawRad;
       }
-    } else {
+      const seamFwdX = -Math.sin(seamYaw);
+      const seamFwdZ = -Math.cos(seamYaw);
+      const alongSeam = (posX - seamX) * seamFwdX + (posZ - seamZ) * seamFwdZ;
+
+      if (alongSeam <= 0) {
+        this.projectFullSegment(this.curr, posX, posZ, this.queryScratchB);
+        bestSeg = this.curr;
+        bestS = this.queryScratchB.s;
+        bestDistSq = this.queryScratchB.distSq;
+      } else if (
+        this.nextLeft &&
+        this.nextRight &&
+        bestS < DEFAULT_FORK_PRUNE_DISTANCE_M
+      ) {
+        const sibling = bestSeg.id === this.nextLeft.id ? this.nextRight : this.nextLeft;
+        this.projectFullSegment(sibling, posX, posZ, this.queryScratchB);
+        if (this.queryScratchB.distSq < bestDistSq) {
+          bestSeg = sibling;
+          bestS = this.queryScratchB.s;
+          bestDistSq = this.queryScratchB.distSq;
+        }
+      }
+    }
+
+    if (overflowed && (bestS <= 1e-4 || bestS >= bestSeg.length - 1e-4)) {
       this.findBestAcrossWindow(posX, posZ, out);
       return out;
     }
 
-    this.populateSurfaceSample(bestSeg, bestS, posX, posZ, out);
+    this.populateTrackProjection(bestSeg, bestS, bestDistSq, posX, posZ, out);
     return out;
   }
 
   /**
-   * Probes terrain groundY `lookAheadM` meters ahead of `(segmentId, s, lateralX)`,
-   * seamlessly stepping into `nextLeft`/`nextRight` across seams.
-   */
-  probeAheadGroundY(segmentId: number, s: number, lateralX: number, lookAheadM: number): number {
-    const seg = this.getActiveSegmentById(segmentId) ?? this.curr;
-    const targetS = s + lookAheadM;
-    if (targetS <= seg.length) {
-      seg.evaluateSurfaceAtX(targetS, lateralX, this.ribbonScratch);
-      return this.ribbonScratch.posY;
-    }
-
-    const overflow = targetS - seg.length;
-    if (seg.id === this.curr.id && this.nextLeft) {
-      let targetBranch = this.nextLeft;
-      let childX = lateralX;
-      if (this.nextRight) {
-        const pickRight = lateralX > 0;
-        targetBranch = pickRight ? this.nextRight : this.nextLeft;
-        const offset = 0.5 * this.curr.getEndPose().halfWidth;
-        childX = pickRight ? lateralX - offset : lateralX + offset;
-      }
-      targetBranch.evaluateSurfaceAtX(
-        clamp(overflow, 0, targetBranch.length),
-        childX,
-        this.ribbonScratch,
-      );
-      return this.ribbonScratch.posY;
-    }
-
-    seg.evaluateSurfaceAtX(seg.length, lateralX, this.ribbonScratch);
-    return this.ribbonScratch.posY;
-  }
-
-  /**
-   * Advances the sliding window when the skier passes `pruneDistanceM` (~40m) onto a chosen branch,
-   * promoting chosen horizon spines, moving pruned spines to ghostSpines, and pruning stale ghosts.
+   * Advances the sliding window when the skier passes `pruneDistanceM` (~40m) onto a chosen branch
+   * (either on-piste or off-piste past the fork seam plane), promoting horizon spines and pruning old segments.
    */
   updateProgression(
     activeSegmentId: number,
@@ -365,15 +378,57 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource {
 
     const onLeft = this.nextLeft !== null && activeSegmentId === this.nextLeft.id;
     const onRight = this.nextRight !== null && activeSegmentId === this.nextRight.id;
-    if (!onLeft && !onRight) {
-      return this.advanceResultScratch;
+
+    let chosen: TrailSegment | null = onLeft ? this.nextLeft : onRight ? this.nextRight : null;
+    let unchosen: TrailSegment | null = onLeft ? this.nextRight : onRight ? this.nextLeft : null;
+    let chosenSide: 'left' | 'right' = onLeft ? 'left' : 'right';
+    let effectiveS = activeS;
+
+    if (!chosen) {
+      if (skierPosX === undefined || skierPosZ === undefined || this.nextLeft === null) {
+        return this.advanceResultScratch;
+      }
+      const fork = this.curr.fork;
+      let seamX = fork.seamWorldX;
+      let seamZ = fork.seamWorldZ;
+      let seamYaw = fork.seamYawRad;
+      if (!fork.hasFork) {
+        const endPose = this.curr.getEndPose();
+        seamX = endPose.posX;
+        seamZ = endPose.posZ;
+        seamYaw = endPose.yawRad;
+      }
+      const seamFwdX = -Math.sin(seamYaw);
+      const seamFwdZ = -Math.cos(seamYaw);
+      const alongSeam = (skierPosX - seamX) * seamFwdX + (skierPosZ - seamZ) * seamFwdZ;
+      if (alongSeam <= 0.2) {
+        return this.advanceResultScratch;
+      }
+
+      if (this.nextRight !== null) {
+        this.projectFullSegment(this.nextLeft, skierPosX, skierPosZ, this.queryScratchB);
+        this.projectFullSegment(this.nextRight, skierPosX, skierPosZ, this.queryScratchC);
+        if (this.queryScratchB.distSq <= this.queryScratchC.distSq) {
+          chosen = this.nextLeft;
+          unchosen = this.nextRight;
+          chosenSide = 'left';
+          effectiveS = Math.max(this.queryScratchB.s, alongSeam);
+        } else {
+          chosen = this.nextRight;
+          unchosen = this.nextLeft;
+          chosenSide = 'right';
+          effectiveS = Math.max(this.queryScratchC.s, alongSeam);
+        }
+      } else {
+        this.projectFullSegment(this.nextLeft, skierPosX, skierPosZ, this.queryScratchB);
+        chosen = this.nextLeft;
+        unchosen = null;
+        chosenSide = 'left';
+        effectiveS = Math.max(this.queryScratchB.s, alongSeam);
+      }
     }
 
-    const chosen = onLeft ? this.nextLeft! : this.nextRight!;
-    const unchosen = onLeft ? this.nextRight : this.nextLeft;
-    const chosenSide: 'left' | 'right' = onLeft ? 'left' : 'right';
-
-    if (!this.forkAnnouncedOnCurr && activeS > 0.2) {
+    if (!this.forkAnnouncedOnCurr && effectiveS > 0.2) {
       this.forkAnnouncedOnCurr = true;
       this.advanceResultScratch.forkEntered = {
         chosenSide,
@@ -383,15 +438,16 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource {
     }
 
     const pruneThreshold = Math.min(pruneDistanceM, chosen.length * 0.35);
-    if (activeS < pruneThreshold) {
+    if (effectiveS < pruneThreshold) {
       return this.advanceResultScratch;
     }
 
     // Extract chosen vs unchosen horizon spines before clearing slots (strict single ownership)
-    const promotedLeft = onLeft ? this.horizonLL : this.horizonRL;
-    const promotedRight = onLeft ? this.horizonLR : this.horizonRR;
-    const unchosenHorizonA = onLeft ? this.horizonRL : this.horizonLL;
-    const unchosenHorizonB = onLeft ? this.horizonRR : this.horizonLR;
+    const choseLeft = chosenSide === 'left';
+    const promotedLeft = choseLeft ? this.horizonLL : this.horizonRL;
+    const promotedRight = choseLeft ? this.horizonLR : this.horizonRR;
+    const unchosenHorizonA = choseLeft ? this.horizonRL : this.horizonLL;
+    const unchosenHorizonB = choseLeft ? this.horizonRR : this.horizonLR;
 
     this.horizonLL = null;
     this.horizonLR = null;
@@ -918,12 +974,39 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource {
     hintS: number,
     edgeRadius: number,
     out: PolyQueryOut,
-  ): void {
+  ): boolean {
     const maxEdge = seg.polyCount - 2;
     const centerEdge = clamp(Math.floor(hintS / seg.polyStep), 0, maxEdge);
     const startEdge = Math.max(0, centerEdge - edgeRadius);
     const endEdge = Math.min(maxEdge, centerEdge + edgeRadius);
     this.projectEdgeRange(seg, posX, posZ, startEdge, endEdge, out);
+
+    const hitInteriorLeft = startEdge > 0 && out.s <= seg.polyS[startEdge]! + 1e-4;
+    const hitInteriorRight = endEdge < maxEdge && out.s >= seg.polyS[endEdge + 1]! - 1e-4;
+    if (hitInteriorLeft || hitInteriorRight) {
+      this.projectFullSegment(seg, posX, posZ, out);
+      return true;
+    }
+    return false;
+  }
+
+  private projectFullSegment(
+    seg: TrailSegment,
+    posX: number,
+    posZ: number,
+    out: PolyQueryOut,
+  ): void {
+    seg.projectXZ(posX, posZ, this.spineProjScratch);
+    out.s = this.spineProjScratch.s;
+    out.distSq = this.spineProjScratch.distSq;
+    out.hitInteriorBound = false;
+
+    seg.sampleSpineFrame(out.s, this.frameScratch);
+    const dx = posX - this.frameScratch.posX;
+    const dz = posZ - this.frameScratch.posZ;
+    const r0X = Math.cos(this.frameScratch.yawRad);
+    const r0Z = -Math.sin(this.frameScratch.yawRad);
+    out.x = (dx * r0X + dz * r0Z) / Math.max(0.5, Math.cos(this.frameScratch.bankRad));
   }
 
   private projectEdgeRange(
@@ -959,24 +1042,35 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource {
       }
     }
 
-    // Refine `s` once against continuous spine tangent for sub-millimeter accuracy on turns
+    // Refine `s` once against continuous spine tangent while keeping distSq non-increasing
     seg.sampleSpineFrame(bestS, this.frameScratch);
-    const cosY = Math.cos(this.frameScratch.yawRad);
-    const sinY = Math.sin(this.frameScratch.yawRad);
-    const fwdX = -sinY;
-    const fwdZ = -cosY;
-    const r0X = cosY;
-    const r0Z = -sinY;
-    const dx = posX - this.frameScratch.posX;
-    const dz = posZ - this.frameScratch.posZ;
-    const xApprox = (dx * r0X + dz * r0Z) / Math.max(0.5, Math.cos(this.frameScratch.bankRad));
-    const remX = posX - (this.frameScratch.posX + xApprox * this.frameScratch.rightX);
-    const remZ = posZ - (this.frameScratch.posZ + xApprox * this.frameScratch.rightZ);
-    const cosP = Math.max(0.3, Math.cos(this.frameScratch.pitchRad));
-    const deltaS = (remX * fwdX + remZ * fwdZ) / cosP;
+    const curDx = posX - this.frameScratch.posX;
+    const curDz = posZ - this.frameScratch.posZ;
+    const curDistSq = curDx * curDx + curDz * curDz;
 
-    bestS = clamp(bestS + deltaS, 0, seg.length);
-    seg.sampleSpineFrame(bestS, this.frameScratch);
+    const fwdX0 = -Math.sin(this.frameScratch.yawRad);
+    const fwdZ0 = -Math.cos(this.frameScratch.yawRad);
+    const cosP0 = Math.max(0.3, Math.cos(this.frameScratch.pitchRad));
+    const remFwd0 = curDx * fwdX0 + curDz * fwdZ0;
+    const deltaS = clamp(remFwd0 / cosP0, -seg.polyStep, seg.polyStep);
+    const candS = clamp(bestS + deltaS, 0, seg.length);
+
+    if (candS !== bestS) {
+      seg.sampleSpineFrame(candS, this.frameScratch);
+      const candDx = posX - this.frameScratch.posX;
+      const candDz = posZ - this.frameScratch.posZ;
+      const candDistSq = candDx * candDx + candDz * candDz;
+      if (candDistSq <= curDistSq) {
+        bestS = candS;
+        bestDistSq = candDistSq;
+      } else {
+        seg.sampleSpineFrame(bestS, this.frameScratch);
+        bestDistSq = curDistSq;
+      }
+    } else {
+      bestDistSq = curDistSq;
+    }
+
     const rx = posX - this.frameScratch.posX;
     const rz = posZ - this.frameScratch.posZ;
     const r0Xf = Math.cos(this.frameScratch.yawRad);
@@ -986,46 +1080,47 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource {
     out.s = bestS;
     out.x = refinedX;
     out.distSq = bestDistSq;
+    out.hitInteriorBound = false;
   }
 
-  private findBestAcrossWindow(posX: number, posZ: number, out: SurfaceSample): void {
+  private findBestAcrossWindow(posX: number, posZ: number, out: ActiveTrackProjectionOut): void {
     const fork = this.curr.fork;
     const seamFwdX = -Math.sin(fork.seamYawRad);
     const seamFwdZ = -Math.cos(fork.seamYawRad);
     const alongSeam = (posX - fork.seamWorldX) * seamFwdX + (posZ - fork.seamWorldZ) * seamFwdZ;
 
     if (fork.hasFork && alongSeam > 0 && this.nextLeft && this.nextRight) {
-      this.projectEdgeRange(
-        this.nextLeft,
-        posX,
-        posZ,
-        0,
-        this.nextLeft.polyCount - 2,
-        this.queryScratchB,
-      );
-      this.projectEdgeRange(
-        this.nextRight,
-        posX,
-        posZ,
-        0,
-        this.nextRight.polyCount - 2,
-        this.queryScratchC,
-      );
-      if (Math.abs(this.queryScratchB.x) <= Math.abs(this.queryScratchC.x)) {
-        this.populateSurfaceSample(this.nextLeft, this.queryScratchB.s, posX, posZ, out);
+      this.projectFullSegment(this.nextLeft, posX, posZ, this.queryScratchB);
+      this.projectFullSegment(this.nextRight, posX, posZ, this.queryScratchC);
+      if (this.queryScratchB.distSq <= this.queryScratchC.distSq) {
+        this.populateTrackProjection(
+          this.nextLeft,
+          this.queryScratchB.s,
+          this.queryScratchB.distSq,
+          posX,
+          posZ,
+          out,
+        );
       } else {
-        this.populateSurfaceSample(this.nextRight, this.queryScratchC.s, posX, posZ, out);
+        this.populateTrackProjection(
+          this.nextRight,
+          this.queryScratchC.s,
+          this.queryScratchC.distSq,
+          posX,
+          posZ,
+          out,
+        );
       }
       return;
     }
 
     let bestSeg = this.curr;
-    this.projectEdgeRange(this.curr, posX, posZ, 0, this.curr.polyCount - 2, this.queryScratchA);
+    this.projectFullSegment(this.curr, posX, posZ, this.queryScratchA);
     let bestS = this.queryScratchA.s;
     let bestDistSq = this.queryScratchA.distSq;
 
     if (this.prev) {
-      this.projectEdgeRange(this.prev, posX, posZ, 0, this.prev.polyCount - 2, this.queryScratchB);
+      this.projectFullSegment(this.prev, posX, posZ, this.queryScratchB);
       if (this.queryScratchB.distSq < bestDistSq) {
         bestSeg = this.prev;
         bestS = this.queryScratchB.s;
@@ -1033,14 +1128,7 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource {
       }
     }
     if (this.nextLeft && alongSeam > 0) {
-      this.projectEdgeRange(
-        this.nextLeft,
-        posX,
-        posZ,
-        0,
-        this.nextLeft.polyCount - 2,
-        this.queryScratchB,
-      );
+      this.projectFullSegment(this.nextLeft, posX, posZ, this.queryScratchB);
       if (this.queryScratchB.distSq < bestDistSq) {
         bestSeg = this.nextLeft;
         bestS = this.queryScratchB.s;
@@ -1048,15 +1136,16 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource {
       }
     }
 
-    this.populateSurfaceSample(bestSeg, bestS, posX, posZ, out);
+    this.populateTrackProjection(bestSeg, bestS, bestDistSq, posX, posZ, out);
   }
 
-  private populateSurfaceSample(
+  private populateTrackProjection(
     seg: TrailSegment,
     s: number,
+    distSq: number,
     posX: number,
     posZ: number,
-    out: SurfaceSample,
+    out: ActiveTrackProjectionOut,
   ): void {
     seg.sampleSpineFrame(s, this.frameScratch);
     const dx = posX - this.frameScratch.posX;
@@ -1065,21 +1154,14 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource {
     const r0Z = -Math.sin(this.frameScratch.yawRad);
     const x = (dx * r0X + dz * r0Z) / Math.max(0.5, Math.cos(this.frameScratch.bankRad));
 
-    seg.evaluateSurfaceAtX(s, x, this.ribbonScratch);
     out.segmentId = seg.id;
     out.s = s;
     out.x = x;
-    out.groundY = this.ribbonScratch.posY;
-    out.normalX = this.ribbonScratch.normalX;
-    out.normalY = this.ribbonScratch.normalY;
-    out.normalZ = this.ribbonScratch.normalZ;
+    out.halfWidth = this.frameScratch.halfWidth;
     out.tangentX = this.frameScratch.forwardX;
     out.tangentY = this.frameScratch.forwardY;
     out.tangentZ = this.frameScratch.forwardZ;
-    out.halfWidth = this.ribbonScratch.halfWidth;
-    out.surfaceType = this.ribbonScratch.surfaceType;
-    out.inBank = Math.abs(x) > this.ribbonScratch.halfWidth;
-    out.inDivider = this.ribbonScratch.inDivider;
+    out.distSq = distSq;
     out.valid = true;
   }
 

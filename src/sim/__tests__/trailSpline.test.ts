@@ -8,6 +8,8 @@ import {
   createSurfaceSample,
 } from '../contracts';
 import { PacingDirector } from '../layoutEngine';
+import { MountainField } from '../mountainField';
+import { MountainSurfaceSampler } from '../surfaceSampler';
 import { SkiSimulation } from '../skiSimulation';
 import {
   FORK_RUNWAY_OBSTACLE_FREE_M,
@@ -153,8 +155,10 @@ describe('TrailSegment & TrailWindow invariants', () => {
     expect(innerAt25.localHeight).toBeGreaterThan(0.5);
   });
 
-  it('provides continuous O(1) warm-started sampleSurface across Model A forks (grounded, straddling, airborne) and prunes at ~40m', () => {
+  it('provides continuous O(1) warm-started MountainSurfaceSampler across Model A forks (grounded, straddling, airborne) and prunes at ~40m', () => {
     const trailWin = new TrailWindow(777, 'sunny-blue');
+    const field = new MountainField(trailWin);
+    const sampler = new MountainSurfaceSampler(trailWin, field);
     const curr = trailWin.curr;
     const left = trailWin.nextLeft!;
     const right = trailWin.nextRight!;
@@ -172,7 +176,7 @@ describe('TrailSegment & TrailWindow invariants', () => {
     const sampleStraddle = createSurfaceSample();
 
     // 0.25m before seam on centerline (straddling x ~ 0)
-    trailWin.sampleSurface(
+    sampler.sampleSurface(
       endFrame.posX - fwdX * 0.25,
       endFrame.posZ - fwdZ * 0.25,
       curr.id,
@@ -182,21 +186,21 @@ describe('TrailSegment & TrailWindow invariants', () => {
     expect(sampleBefore.segmentId).toBe(curr.id);
 
     // 0.25m past seam slightly left, slightly right, and straddling center
-    trailWin.sampleSurface(
+    sampler.sampleSurface(
       endFrame.posX + fwdX * 0.25 - rightX * 1.2,
       endFrame.posZ + fwdZ * 0.25 - rightZ * 1.2,
       curr.id,
       curr.length - 0.25,
       sampleAfterLeft,
     );
-    trailWin.sampleSurface(
+    sampler.sampleSurface(
       endFrame.posX + fwdX * 0.25 + rightX * 1.2,
       endFrame.posZ + fwdZ * 0.25 + rightZ * 1.2,
       curr.id,
       curr.length - 0.25,
       sampleAfterRight,
     );
-    trailWin.sampleSurface(
+    sampler.sampleSurface(
       endFrame.posX + fwdX * 0.25 - rightX * 0.01,
       endFrame.posZ + fwdZ * 0.25 - rightZ * 0.01,
       curr.id,

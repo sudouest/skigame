@@ -1,8 +1,7 @@
-import { clamp, clampAngleAround, degToRad, lerp, wrapAngle } from '../core/math';
+import { clamp, clampAngleAround, degToRad, lerp, lerpAngle, smoothstep, wrapAngle } from '../core/math';
 import type { SkierDef, SurfaceType } from '../content/types';
-import type { PlayerIntent, SkierPose, SurfaceSample } from './contracts';
+import type { PlayerIntent, SkierPose, SpineForkMeta, SurfaceQueryView, SurfaceSample } from './contracts';
 import type { RampPool, SkiTrackPool } from './entityPools';
-import type { TrailWindow } from './trailWindow';
 
 export const SKI_GRAVITY = 22.0;
 const POINTER_STEER_GAIN = 8.0;
@@ -71,7 +70,8 @@ export function copySkierPose(src: SkierPose, dst: MutableSkierPose): void {
 
 export interface PhysicsStepContext {
   readonly skierDef: SkierDef;
-  readonly trailWindow: TrailWindow;
+  readonly surfaceQuery: SurfaceQueryView;
+  readonly forkBumper: SpineForkMeta | null;
   readonly surface: SurfaceSample;
   readonly ramps: RampPool;
   readonly skiTracks: SkiTrackPool;
@@ -80,16 +80,19 @@ export interface PhysicsStepContext {
 /**
  * World-space (X, Y, Z) 60 Hz skiing physics solver:
  * - World gravity (0, -g, 0) projected onto surfaceNormal
- * - Carving forward/lateral traction decomposition across packed/powder/ice + perks
- * - +/-80 deg downhill heading clamp
- * - Soft snowbank containment & V-wedge nose bumper deflection
- * - Seamless 3D ballistic airtime over ski ramps, ollie jumps, and convex crests
+ * - Carving forward/lateral traction decomposition across packed/powder/ice/rock + perks
+ * - +/-80 deg downhill heading clamp relative to blended surface downhill tangent
+ * - Open-mountain carving with natural gravity deceleration, slope-scaled start assist, and signed drag
+ * - Model A V-wedge nose bumper deflection and true 3D ballistic airtime
  */
 export class SkiPhysics {
   private coyoteTimerSec = 0;
   private activeRampIndex = -1;
   private trackAccumDist = 0;
   private wasGroundedLastTick = true;
+  private lastSampleX = NaN;
+  private lastSampleZ = NaN;
+  private lastSampleSegId = -1;
   private readonly rampScratch = {
     inRamp: false,
     rampIndex: -1,
@@ -102,6 +105,13 @@ export class SkiPhysics {
     this.activeRampIndex = -1;
     this.trackAccumDist = 0;
     this.wasGroundedLastTick = true;
+    this.invalidateSurfaceCache();
+  }
+
+  invalidateSurfaceCache(): void {
+    this.lastSampleX = NaN;
+    this.lastSampleZ = NaN;
+    this.lastSampleSegId = -1;
   }
 
   stepSkiing(
@@ -110,20 +120,27 @@ export class SkiPhysics {
     skier: MutableSkierPose,
     ctx: PhysicsStepContext,
   ): void {
-    const { skierDef, trailWindow, surface, ramps, skiTracks } = ctx;
+    const { skierDef, surfaceQuery, forkBumper, surface, ramps, skiTracks } = ctx;
     const prevPosX = skier.posX;
     const prevPosY = skier.posY;
     const prevPosZ = skier.posZ;
     const prevVelY = skier.velY;
 
-    // 1. Sample surface at current position using warm-started hint
-    trailWindow.sampleSurface(
-      skier.posX,
-      skier.posZ,
-      surface.segmentId,
-      surface.s,
-      surface,
-    );
+    // 1. Reuse previous tick's post-integrate surface sample unless position/segment invalidated externally
+    if (
+      !surface.valid ||
+      surface.segmentId !== this.lastSampleSegId ||
+      Math.abs(skier.posX - this.lastSampleX) > 1e-6 ||
+      Math.abs(skier.posZ - this.lastSampleZ) > 1e-6
+    ) {
+      surfaceQuery.sampleSurface(
+        skier.posX,
+        skier.posZ,
+        surface.segmentId,
+        surface.s,
+        surface,
+      );
+    }
 
     const surfaceGrip = this.computeSurfaceGrip(surface.surfaceType, skierDef);
     const steerInput = clamp(intent.steer + intent.pointerSteerDelta * POINTER_STEER_GAIN, -1, 1);
@@ -164,22 +181,26 @@ export class SkiPhysics {
       skier.velY += gy * dt;
       skier.velZ += gz * dt;
 
+      // Signed terrain slope along ski heading (< 0 downhill, > 0 uphill)
+      const slopeAlongHeading = -(fwdX * nx + fwdZ * nz) / Math.max(0.35, ny);
+
       // Forward / lateral velocity decomposition relative to ski edges
       let vFwd = skier.velX * fwdX + skier.velZ * fwdZ;
       let vLat = skier.velX * rightX + skier.velZ * rightZ;
 
-      // Ensure gentle forward momentum when pointing downhill from rest
-      if (vFwd < 6.0 && !braking) {
-        vFwd += 7.5 * dt;
+      // Slope-scaled start assist on flat/downhill; disappears on uphill walls
+      if (vFwd < 6.0 && vFwd >= -0.5 && !braking) {
+        const assistScale = 1 - smoothstep(0.0, 0.15, slopeAlongHeading);
+        vFwd += 7.5 * assistScale * dt;
       }
 
-      // Edge-grip opposes sideslip; low grip on ice increases lateral drift
+      // Edge-grip opposes sideslip; low grip on ice/rock increases lateral drift
       const lateralDamp = Math.exp(-9.5 * surfaceGrip * dt);
       const carvedTransfer = (vLat - vLat * lateralDamp) * 0.18;
       vLat *= lateralDamp;
-      vFwd = Math.max(0, vFwd + Math.abs(carvedTransfer) * 0.25);
+      vFwd += Math.abs(carvedTransfer) * 0.25;
 
-      // Surface drag (powder & snowbanks add extra drag; braking applies snowplow deceleration)
+      // Surface drag (off-piste snow adds smooth drag; braking decelerates safely on steep slopes)
       let quadDrag: number;
       let linearDrag: number;
       switch (surface.surfaceType) {
@@ -204,15 +225,27 @@ export class SkiPhysics {
           throw new Error(`Unhandled surface type: ${String(_exhaustive)}`);
         }
       }
-      if (surface.inBank) {
-        linearDrag += 0.45;
+      if (surface.surfaceType !== 'rock') {
+        linearDrag += 0.18 * (1 - clamp(surface.pisteWeight, 0, 1));
       }
       if (braking) {
-        vFwd = Math.max(4.5, vFwd - 18.0 * dt);
+        if (vFwd > 4.5 && slopeAlongHeading < 0.05) {
+          vFwd = Math.max(4.5, vFwd - 18.0 * dt);
+        } else if (vFwd > 0) {
+          vFwd = Math.max(0, vFwd - 18.0 * dt);
+        } else if (vFwd < 0) {
+          vFwd = Math.min(0, vFwd + 18.0 * dt);
+        }
         vLat *= Math.exp(-6.0 * dt);
       }
 
-      vFwd = Math.max(0, vFwd - (quadDrag * vFwd * vFwd + linearDrag * vFwd) * dt);
+      // Signed drag opposes motion without erasing backward gravity slide on uphill stalls
+      const dragDecel = (quadDrag * Math.abs(vFwd) + linearDrag) * Math.abs(vFwd) * dt;
+      if (vFwd > 0) {
+        vFwd = Math.max(0, vFwd - dragDecel);
+      } else if (vFwd < 0) {
+        vFwd = Math.min(0, vFwd + dragDecel);
+      }
 
       // Soft aerodynamic top-speed governor around skierDef.stats.maxSpeed
       if (vFwd > skierDef.stats.maxSpeed) {
@@ -222,6 +255,15 @@ export class SkiPhysics {
 
       skier.velX = fwdX * vFwd + rightX * vLat;
       skier.velZ = fwdZ * vFwd + rightZ * vLat;
+
+      // Gently pivot skis back toward local fall-line when stalling nose-up on steep walls
+      if (vFwd < 1.5 && slopeAlongHeading > 0.05) {
+        skier.headingRad = clampAngleAround(
+          lerpAngle(skier.headingRad, downhillYaw, 1 - Math.exp(-2.8 * dt)),
+          downhillYaw,
+          DOWNHILL_CLAMP_RAD,
+        );
+      }
     } else {
       this.coyoteTimerSec = Math.max(0, this.coyoteTimerSec - dt);
       // True 3D ballistic airtime
@@ -237,7 +279,7 @@ export class SkiPhysics {
     skier.posZ += skier.velZ * dt;
 
     // 5. Re-sample surface at new horizontal coordinates
-    trailWindow.sampleSurface(
+    surfaceQuery.sampleSurface(
       skier.posX,
       skier.posZ,
       surface.segmentId,
@@ -245,8 +287,11 @@ export class SkiPhysics {
       surface,
     );
 
-    // 6. Soft snowbank boundary clamp & Model B divider pushback + Model A V-wedge nose deflection
-    this.applyContainmentAndBumper(dt, skier, surface, trailWindow, skierDef.stats.collisionRadius);
+    // 6. Model A V-wedge nose bumper deflection (open-mountain skiing: zero corridor walls)
+    this.applyForkNoseBumper(skier, surface, forkBumper, surfaceQuery, skierDef.stats.collisionRadius);
+    this.lastSampleX = skier.posX;
+    this.lastSampleZ = skier.posZ;
+    this.lastSampleSegId = surface.segmentId;
 
     // 7. Evaluate ramp contact and vertical ground tracking / ballistic launch
     this.evaluateRampAt(skier.posX, skier.posZ, ramps);
@@ -320,7 +365,7 @@ export class SkiPhysics {
     const horizSpeed = Math.max(0.5, Math.hypot(skier.velX, skier.velZ));
     if (skier.grounded) {
       const fy = -(fwdX * surface.normalX + fwdZ * surface.normalZ) / Math.max(0.35, surface.normalY);
-      skier.pitchRad = Math.atan2(fy, 1);
+      skier.pitchRad = clamp(Math.atan2(fy, 1), -0.85, 0.65);
     } else {
       skier.pitchRad = clamp(Math.atan2(skier.velY, horizSpeed), -0.7, 0.65);
     }
@@ -386,75 +431,44 @@ export class SkiPhysics {
     return base * skierDef.stats.carveGrip;
   }
 
-  private applyContainmentAndBumper(
-    dt: number,
+  private applyForkNoseBumper(
     skier: MutableSkierPose,
     surface: SurfaceSample,
-    trailWindow: TrailWindow,
+    forkBumper: SpineForkMeta | null,
+    surfaceQuery: SurfaceQueryView,
     skierRadius: number,
   ): void {
-    const seg = trailWindow.getActiveSegmentById(surface.segmentId) ?? trailWindow.curr;
-    const maxAllowedX = surface.halfWidth + seg.stage.terrain.skirtWidth - 0.6;
-
-    // Gentle snowbank inward steering nudge outside playable halfWidth
-    if (surface.inBank) {
-      const sign = surface.x >= 0 ? 1 : -1;
-      const rightX = Math.cos(Math.atan2(-surface.tangentX, -surface.tangentZ));
-      const rightZ = -Math.sin(Math.atan2(-surface.tangentX, -surface.tangentZ));
-      const pushAccel = 14.0 * dt;
-      skier.velX -= rightX * sign * pushAccel;
-      skier.velZ -= rightZ * sign * pushAccel;
-
-      if (Math.abs(surface.x) > maxAllowedX) {
-        const excess = Math.abs(surface.x) - maxAllowedX;
-        skier.posX -= rightX * sign * excess;
-        skier.posZ -= rightZ * sign * excess;
-        const outwardVel = skier.velX * rightX * sign + skier.velZ * rightZ * sign;
-        if (outwardVel > 0) {
-          skier.velX -= rightX * sign * outwardVel;
-          skier.velZ -= rightZ * sign * outwardVel;
-        }
-        trailWindow.sampleSurface(skier.posX, skier.posZ, surface.segmentId, surface.s, surface);
-      }
-    }
-
     // Model A rounded soft-bumper V-wedge nose deflection (r = 1.5m)
-    const checkFork = trailWindow.curr.fork.hasFork
-      ? trailWindow.curr.fork
-      : trailWindow.prev?.fork.hasFork
-        ? trailWindow.prev.fork
-        : null;
+    if (!forkBumper || !forkBumper.hasFork) return;
 
-    if (checkFork) {
-      const dx = skier.posX - checkFork.seamWorldX;
-      const dz = skier.posZ - checkFork.seamWorldZ;
-      const distXZ = Math.hypot(dx, dz);
-      const minClear = checkFork.seamNoseRadius + skierRadius;
-      const clearanceY = skier.posY - surface.groundY;
+    const dx = skier.posX - forkBumper.seamWorldX;
+    const dz = skier.posZ - forkBumper.seamWorldZ;
+    const distXZ = Math.hypot(dx, dz);
+    const minClear = forkBumper.seamNoseRadius + skierRadius;
+    const clearanceY = skier.posY - surface.groundY;
 
-      if (distXZ < minClear && clearanceY < 1.65) {
-        const seamRightX = Math.cos(checkFork.seamYawRad);
-        const seamRightZ = -Math.sin(checkFork.seamYawRad);
-        const seamFwdX = -Math.sin(checkFork.seamYawRad);
-        const seamFwdZ = -Math.cos(checkFork.seamYawRad);
-        const latDot = dx * seamRightX + dz * seamRightZ;
-        const side = latDot < 0 ? -1 : 1;
+    if (distXZ < minClear && clearanceY < 1.65) {
+      const seamRightX = Math.cos(forkBumper.seamYawRad);
+      const seamRightZ = -Math.sin(forkBumper.seamYawRad);
+      const seamFwdX = -Math.sin(forkBumper.seamYawRad);
+      const seamFwdZ = -Math.cos(forkBumper.seamYawRad);
+      const latDot = dx * seamRightX + dz * seamRightZ;
+      const side = latDot < 0 ? -1 : 1;
 
-        const push = minClear - distXZ + 0.08;
-        skier.posX += (seamRightX * side * 0.92 + seamFwdX * 0.35) * push;
-        skier.posZ += (seamRightZ * side * 0.92 + seamFwdZ * 0.35) * push;
+      const push = minClear - distXZ + 0.08;
+      skier.posX += (seamRightX * side * 0.92 + seamFwdX * 0.35) * push;
+      skier.posZ += (seamRightZ * side * 0.92 + seamFwdZ * 0.35) * push;
 
-        // Nudge velocity & heading smoothly onto chosen branch
-        const vLat = skier.velX * seamRightX + skier.velZ * seamRightZ;
-        if (vLat * side < 4.5) {
-          const deltaV = 4.5 * side - vLat;
-          skier.velX += seamRightX * deltaV * 0.5;
-          skier.velZ += seamRightZ * deltaV * 0.5;
-        }
-        skier.headingRad = wrapAngle(skier.headingRad - side * 0.14);
-
-        trailWindow.sampleSurface(skier.posX, skier.posZ, surface.segmentId, surface.s, surface);
+      // Nudge velocity & heading smoothly onto chosen branch
+      const vLat = skier.velX * seamRightX + skier.velZ * seamRightZ;
+      if (vLat * side < 4.5) {
+        const deltaV = 4.5 * side - vLat;
+        skier.velX += seamRightX * deltaV * 0.5;
+        skier.velZ += seamRightZ * deltaV * 0.5;
       }
+      skier.headingRad = wrapAngle(skier.headingRad - side * 0.14);
+
+      surfaceQuery.sampleSurface(skier.posX, skier.posZ, surface.segmentId, surface.s, surface);
     }
   }
 

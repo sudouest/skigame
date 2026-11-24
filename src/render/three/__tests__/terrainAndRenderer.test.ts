@@ -10,6 +10,7 @@ import {
   createMountainColumnOut,
   createMountainSampleOut,
   createMutablePlayerIntent,
+  createSurfaceSample,
   type ChunkRangeOut,
   type MountainColumnOut,
   type MountainFieldView,
@@ -103,30 +104,26 @@ function createMockSegment(
       out.skirtWidth = 12;
       out.dividerHalfWidth = 0;
     },
-    evaluateRibbonPoint(s: number, u: number, out: RibbonPointOut): void {
+    evaluateSurfaceAtX(s: number, x: number, out: RibbonPointOut): void {
       const halfW = 14;
       const skirt = 12;
-      const totalHalf = halfW + skirt;
-      const x = totalHalf * 0.5 * u * (1 + u * u);
-      const bankRaise = Math.abs(x) > halfW ? (Math.abs(x) - halfW) * 0.18 : 0;
-      out.posX = x;
+      const clampedX = Math.max(-(halfW + skirt), Math.min(halfW + skirt, x));
+      const bankRaise = Math.abs(clampedX) > halfW ? (Math.abs(clampedX) - halfW) * 0.18 : 0;
+      out.posX = clampedX;
       out.posY = -s * 0.25 + bankRaise;
       out.posZ = startZ - s;
       out.normalX = 0;
       out.normalY = 0.97;
-      out.normalZ = 0.24;
-      out.lateralX = x;
+      out.normalZ = -0.24;
+      out.lateralX = clampedX;
       out.halfWidth = halfW;
       out.skirtWidth = skirt;
       out.slopeDeg = 14;
       out.localHeight = bankRaise;
-      out.surfaceType = Math.abs(x) < 3 && s > 40 && s < 70 ? 'ice' : 'packed';
-      out.inPlayableCorridor = Math.abs(x) <= halfW;
+      out.surfaceType = Math.abs(clampedX) < 3 && s > 40 && s < 70 ? 'ice' : 'packed';
+      out.inPlayableCorridor = Math.abs(clampedX) <= halfW;
       out.inDivider = false;
       out.isInnerForkSlope = false;
-    },
-    evaluateSurfaceAtX(s: number, x: number, out: RibbonPointOut): void {
-      this.evaluateRibbonPoint(s, Math.max(-1, Math.min(1, x / 26)), out);
     },
     sampleSafeX(): number {
       return 0;
@@ -299,19 +296,21 @@ function createMockSimState(): ReadonlySimState {
       braking: false,
     },
     surfaceSample: {
+      ...createSurfaceSample(),
       segmentId: 1,
       s: 10,
       x: 0.4,
       groundY: -2.5,
       normalX: 0,
       normalY: 0.97,
-      normalZ: 0.24,
+      normalZ: -0.24,
       tangentX: 0,
       tangentY: -0.24,
       tangentZ: -0.97,
       halfWidth: 14,
       surfaceType: 'packed',
-      inBank: false,
+      onPiste: true,
+      pisteWeight: 1,
       inDivider: false,
       valid: true,
     },
@@ -539,7 +538,7 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     expect(renderer.terrainStreamer.tilePool.innerCapacity).toBe(48);
     expect(renderer.terrainStreamer.tilePool.outerCapacity).toBe(96);
 
-    // Check visible counts: all 36 lod=0 inner tiles visible, 9 inner parents hidden, 72 outer visible
+    // Check visible counts: all 36 lod=0 inner tiles visible, 9 inner parents hidden, 40 outer visible
     let innerVisible = 0;
     let outerVisible = 0;
     let outerHiddenReady = 0;

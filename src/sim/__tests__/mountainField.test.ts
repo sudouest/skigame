@@ -733,4 +733,44 @@ describe('TrailSpine, Horizon/Ghost Buffers, and MountainField', () => {
     slowField.evaluateColumn(30, -40, sOut);
     expect(fOut.macroY).toBeCloseTo(sOut.macroY, 4);
   });
+
+  it('matches evaluate() interior-piste normals to central-difference evaluateHeight() normals on steep banked curves', () => {
+    const win = new TrailWindow(17, 'icy-black');
+    const field = new MountainField(win);
+    const sp = win.curr;
+    const frame = createSpineFrameOut();
+
+    // Find a high-curvature interior point past s >= 30 (well away from fork seams)
+    let bestS = 60;
+    let maxAbsK = 0;
+    for (let s = 30; s <= sp.length - 40; s += 4) {
+      sp.sampleSpineFrame(s, frame);
+      if (Math.abs(frame.curvature) > maxAbsK) {
+        maxAbsK = Math.abs(frame.curvature);
+        bestS = s;
+      }
+    }
+    expect(maxAbsK).toBeGreaterThan(0.005);
+
+    const sample = createMountainSampleOut();
+    const eps = 0.5;
+    for (const latFrac of [-0.6, 0, 0.6]) {
+      sp.sampleSpineFrame(bestS, frame);
+      const wx = frame.posX + frame.rightX * (frame.halfWidth * latFrac);
+      const wz = frame.posZ + frame.rightZ * (frame.halfWidth * latFrac);
+
+      field.evaluate(wx, wz, sample);
+      const hL = field.evaluateHeight(wx - eps, wz);
+      const hR = field.evaluateHeight(wx + eps, wz);
+      const hD = field.evaluateHeight(wx, wz - eps);
+      const hU = field.evaluateHeight(wx, wz + eps);
+      const dHx = (hR - hL) / (2 * eps);
+      const dHz = (hU - hD) / (2 * eps);
+      const invLen = 1 / Math.hypot(-dHx, 1, -dHz);
+
+      expect(sample.normalX).toBeCloseTo(-dHx * invLen, 5);
+      expect(sample.normalY).toBeCloseTo(invLen, 5);
+      expect(sample.normalZ).toBeCloseTo(-dHz * invLen, 5);
+    }
+  });
 });
