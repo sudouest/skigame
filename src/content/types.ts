@@ -51,8 +51,8 @@ export interface StageTerrainProfile {
   /** Playable corridor half-width range in meters. */
   readonly halfWidth: readonly [min: number, max: number];
   /**
-   * Outer scenic snowbank & flank skirt width beyond halfWidth in meters.
-   * Governs the legacy `RibbonPool` mesh skirt until Milestone 3 retires `RibbonPool` in favor of `TerrainTilePool` + `transitionWidth`.
+   * Outer flank envelope beyond halfWidth in meters, used by the spine curvature safety clamp
+   * `|k| * (halfWidth + skirtWidth) <= 0.4` to guarantee smooth outer curves without foldover.
    */
   readonly skirtWidth: number;
   /** Subtle terrain bank angle factor into turns. */
@@ -115,13 +115,37 @@ export interface StageDeliveryRule {
   readonly band: PlacementBand;
 }
 
+export type ScenerySpeciesKind =
+  | 'pine_green'
+  | 'pine_frosted'
+  | 'snow_shrub'
+  | 'alpine_rock'
+  | 'rock_crag';
+
+export type SceneryLayer = 'canopy' | 'ground';
+
+export interface SceneryTierRule {
+  readonly species: ScenerySpeciesKind;
+  readonly layer: SceneryLayer;
+  readonly minNormalY: number;
+  readonly preferredNormalY: number;
+  readonly normalYSpread: number;
+  readonly minDistFromTrailM: number;
+  readonly idealDistFromTrailM: number;
+  readonly elevationBias: number;
+  readonly baseWeight: number;
+  readonly widthRange: readonly [min: number, max: number];
+  readonly heightRange: readonly [min: number, max: number];
+}
+
 export interface StageSceneryConfig {
-  readonly pineDensity: number;
+  readonly offPisteTreeDensity: number;
   readonly rockDensity: number;
+  readonly shrubDensity: number;
+  readonly frostedPineChance: number;
   readonly groundMinRadius: number;
   readonly canopyMinRadius: number;
-  readonly offPisteTreeDensity: number;
-  readonly frostedPineChance: number;
+  readonly tierRules?: readonly SceneryTierRule[];
 }
 
 export interface StagePalette {
@@ -174,7 +198,6 @@ export interface StageBadge {
 }
 
 export interface StageLayoutConfig {
-  readonly segmentLengthRange: readonly [min: number, max: number];
   readonly forkIntervalM: readonly [min: number, max: number];
   readonly islandDividerChance: number;
   readonly deliveryCadenceM: readonly [min: number, max: number];

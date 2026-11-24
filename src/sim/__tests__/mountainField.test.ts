@@ -569,7 +569,9 @@ describe('TrailSpine, Horizon/Ghost Buffers, and MountainField', () => {
     winBlue.curr.sampleSpineFrame(winBlue.curr.length, endFrame);
     fieldBlue.evaluateColumn(endFrame.posX, endFrame.posZ, col);
     expect(col.nearestStageId).toBe('sunny-blue');
-    expect(col.secondaryStageId).toBe('icy-black');
+    expect(col.secondaryStageId).not.toBeNull();
+    expect(col.secondaryStageId).not.toBe('sunny-blue');
+    expect(STAGE_SUNNY_BLUE.forkTargets).toContain(col.secondaryStageId!);
     expect(col.secondaryStageWeight).toBeGreaterThan(0);
     expect(col.secondaryStageWeight).toBeLessThan(1);
   });
@@ -772,5 +774,190 @@ describe('TrailSpine, Horizon/Ghost Buffers, and MountainField', () => {
       expect(sample.normalY).toBeCloseTo(invLen, 5);
       expect(sample.normalZ).toBeCloseTo(-dHz * invLen, 5);
     }
+  });
+
+  it('produces asymmetric left chasm + right bowl for blizzard-ridge and smooth icy-black -> blizzard-ridge fork continuity', () => {
+    const icyDef = getStageDef('icy-black')!;
+    const blizzardDef = getStageDef('blizzard-ridge')!;
+    const powderDef = getStageDef('powder-bowl')!;
+    const gorgeDef = getStageDef('granite-gorge')!;
+
+    // Verify powder-bowl symmetric alpineBowl & granite-gorge symmetric canyonWalls
+    const winPowder = new TrailWindow(41, 'powder-bowl');
+    const fieldPowder = new MountainField(winPowder);
+    const frame = createSpineFrameOut();
+    const col = createMountainColumnOut();
+    winPowder.curr.sampleSpineFrame(120, frame);
+    const pRightX = Math.cos(frame.yawRad);
+    const pRightZ = -Math.sin(frame.yawRad);
+    fieldPowder.evaluateColumn(frame.posX - pRightX * 48, frame.posZ - pRightZ * 48, col);
+    expect(col.heightY).toBeGreaterThan(col.macroY + 3);
+    fieldPowder.evaluateColumn(frame.posX + pRightX * 48, frame.posZ + pRightZ * 48, col);
+    expect(col.heightY).toBeGreaterThan(col.macroY + 3);
+
+    const winGorge = new TrailWindow(43, 'granite-gorge');
+    const fieldGorge = new MountainField(winGorge);
+    winGorge.curr.sampleSpineFrame(120, frame);
+    const gRightX = Math.cos(frame.yawRad);
+    const gRightZ = -Math.sin(frame.yawRad);
+    const gSample = createMountainSampleOut();
+    let sawLeftRock = false;
+    let sawRightRock = false;
+    for (let d = frame.halfWidth + 4; d <= frame.halfWidth + 24; d += 3) {
+      fieldGorge.evaluate(frame.posX - gRightX * d, frame.posZ - gRightZ * d, gSample);
+      if (gSample.normalY < 0.72 && gSample.surfaceType === 'rock') sawLeftRock = true;
+      fieldGorge.evaluate(frame.posX + gRightX * d, frame.posZ + gRightZ * d, gSample);
+      if (gSample.normalY < 0.72 && gSample.surfaceType === 'rock') sawRightRock = true;
+    }
+    expect(sawLeftRock).toBe(true);
+    expect(sawRightRock).toBe(true);
+
+    // Verify blizzard-ridge left chasm & right alpineBowl, plus fork seam into blizzard-ridge
+    const icyForkToBlizzard: StageDef = {
+      ...icyDef,
+      id: 'icy-fork-bliz',
+      forkTargets: [powderDef.id, blizzardDef.id],
+    };
+    const blizzardLoop: StageDef = {
+      ...blizzardDef,
+      forkTargets: [gorgeDef.id, 'icy-fork-bliz'],
+    };
+    const resolver = (id: string): StageDef | undefined =>
+      id === 'icy-fork-bliz'
+        ? icyForkToBlizzard
+        : id === blizzardDef.id
+          ? blizzardLoop
+          : getStageDef(id);
+
+    const winFork = new TrailWindow(909, 'icy-fork-bliz', undefined, resolver);
+    const blizBranch =
+      winFork.nextLeft?.stageId === blizzardDef.id
+        ? winFork.nextLeft
+        : winFork.nextRight?.stageId === blizzardDef.id
+          ? winFork.nextRight
+          : null;
+    expect(blizBranch).not.toBeNull();
+
+    const fieldFork = new MountainField(winFork);
+    const endF = createSpineFrameOut();
+    winFork.curr.sampleSpineFrame(winFork.curr.length, endF);
+    const bSampleBefore = createMountainSampleOut();
+    const bSampleAt = createMountainSampleOut();
+    const sFwdX = -Math.sin(endF.yawRad);
+    const sFwdZ = -Math.cos(endF.yawRad);
+    fieldFork.evaluate(endF.posX - sFwdX * 0.25, endF.posZ - sFwdZ * 0.25, bSampleBefore);
+    fieldFork.evaluate(endF.posX + sFwdX * 0.25, endF.posZ + sFwdZ * 0.25, bSampleAt);
+    expect(Math.abs(bSampleAt.heightY - bSampleBefore.heightY)).toBeLessThan(0.4);
+
+    // Mid-segment on blizzard-ridge branch: left side drops into chasm zone, right side rises as alpineBowl
+    blizBranch!.sampleSpineFrame(120, frame);
+    const bRightX = Math.cos(frame.yawRad);
+    const bRightZ = -Math.sin(frame.yawRad);
+    fieldFork.evaluate(
+      frame.posX - bRightX * (frame.halfWidth + 28),
+      frame.posZ - bRightZ * (frame.halfWidth + 28),
+      gSample,
+    );
+    expect(gSample.onPiste).toBe(false);
+    expect(gSample.inChasmZone).toBe(true);
+    expect(gSample.chasmWipeoutDepth).toBe(22);
+    expect(gSample.heightY).toBeLessThan(gSample.macroY - 8);
+
+    fieldFork.evaluateColumn(
+      frame.posX + bRightX * (frame.halfWidth + 32),
+      frame.posZ + bRightZ * (frame.halfWidth + 32),
+      col,
+    );
+    expect(col.inChasmZone).toBe(false);
+    expect(col.heightY).toBeGreaterThan(col.macroY + 3);
+
+    // Standalone blizzard-ridge left chasm drops deeply below spine elevation
+    const winBliz = new TrailWindow(909, blizzardDef.id);
+    const fieldBliz = new MountainField(winBliz);
+    winBliz.curr.sampleSpineFrame(120, frame);
+    const sbRightX = Math.cos(frame.yawRad);
+    const sbRightZ = -Math.sin(frame.yawRad);
+    fieldBliz.evaluate(
+      frame.posX - sbRightX * (frame.halfWidth + 28),
+      frame.posZ - sbRightZ * (frame.halfWidth + 28),
+      gSample,
+    );
+    expect(gSample.inChasmZone).toBe(true);
+    expect(gSample.heightY).toBeLessThan(frame.posY - 15);
+  });
+
+  it('prevents a height-divergent foreign corridor from tearing a sinkhole in an active dominant piste', () => {
+    const baseStage = getStageDef('sunny-blue')!;
+    const activeSpine = new TrailSpine({
+      id: 1,
+      stage: baseStage,
+      seed: 10,
+      length: 200,
+      startPosX: 0,
+      startPosY: 0,
+      startPosZ: 0,
+      startYawRad: 0,
+      startPitchRad: -0.22,
+      startHalfWidth: 14,
+      endHalfWidth: 14,
+      hasFork: false,
+      leftStageId: null,
+      rightStageId: null,
+      isForkChild: false,
+      forkSide: 'none',
+      seamWorldX: 0,
+      seamWorldY: 0,
+      seamWorldZ: 0,
+      seamYawRad: 0,
+      allowIslandDivider: false,
+    });
+    const deepForeignSpine = new TrailSpine({
+      id: 2,
+      stage: baseStage,
+      seed: 20,
+      length: 200,
+      startPosX: 20,
+      startPosY: -40,
+      startPosZ: 0,
+      startYawRad: 0,
+      startPitchRad: -0.22,
+      startHalfWidth: 16,
+      endHalfWidth: 16,
+      hasFork: false,
+      leftStageId: null,
+      rightStageId: null,
+      isForkChild: false,
+      forkSide: 'none',
+      seamWorldX: 0,
+      seamWorldY: 0,
+      seamWorldZ: 0,
+      seamYawRad: 0,
+      allowIslandDivider: false,
+    });
+
+    const source = {
+      elevationSpines: [deepForeignSpine, activeSpine],
+      collectSpinesInBounds(
+        _minX: number,
+        _maxX: number,
+        _minZ: number,
+        _maxZ: number,
+        _padM: number,
+        outSpines: SpineView[],
+      ): void {
+        outSpines.length = 0;
+        outSpines.push(deepForeignSpine, activeSpine);
+      },
+    };
+    const field = new MountainField(source);
+    const frame = createSpineFrameOut();
+    const pisteOut = createPisteHeightOut();
+    const sample = createMountainSampleOut();
+
+    activeSpine.sampleSpineFrame(90, frame);
+    activeSpine.evaluatePisteHeight(90, 0, pisteOut);
+    field.evaluate(frame.posX, frame.posZ, sample);
+    expect(sample.onPiste).toBe(true);
+    expect(sample.heightY).toBeCloseTo(pisteOut.heightY, 4);
   });
 });

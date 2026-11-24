@@ -475,9 +475,9 @@ export interface MountainFieldView {
 }
 
 /**
- * Static chunk-anchored landmark metadata consumed by ChunkStreamer & scenery exclusion SpatialGrid.
+ * Static landmark metadata consumed by LandmarkStreamer & scenery exclusion SpatialGrid.
  * Ownership boundaries (prevents double-spawning):
- * - 'forkArch' & 'deliveryLandmark': static scenery landmarks placed by ChunkStreamer (cabins,
+ * - 'forkArch' & 'deliveryLandmark': static scenery landmarks placed by LandmarkStreamer (cabins,
  *   lanterns, twin per-branch entrance gates at a trail split). Waiting/cheering children remain in DeliveryZonePoolView.
  * - Playable ski ramps belong exclusively to EntityPoolViews.ramps (not landmarks).
  */
@@ -485,7 +485,6 @@ export interface SegmentLandmarkRequirement {
   readonly id: string;
   readonly kind: 'forkArch' | 'deliveryLandmark';
   readonly segmentId: number;
-  readonly chunkIndex: number;
   readonly s: number;
   readonly x: number;
   readonly worldX: number;

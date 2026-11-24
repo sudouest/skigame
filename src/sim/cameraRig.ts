@@ -71,20 +71,16 @@ export class CameraRig {
         surfaceQuery.evaluateHeight(targetPosX, targetPosZ) + 2.6,
       );
     }
-    if (surface.valid && surface.normalY >= 0.45) {
-      const camDx = targetPosX - skier.posX;
-      const camDz = targetPosZ - skier.posZ;
-      const planeRise = clamp(
-        -(camDx * surface.normalX + camDz * surface.normalZ) / Math.max(0.35, surface.normalY),
-        -6.0,
-        16.0,
+    if (surface.valid && surface.normalY >= 0.20) {
+      targetPosY = Math.max(
+        targetPosY,
+        computeMinFrontFaceY(
+          skier.posY,
+          targetPosX - skier.posX,
+          targetPosZ - skier.posZ,
+          surface,
+        ),
       );
-      const curLen = Math.hypot(camDx, Math.max(0, targetPosY - skier.posY), camDz);
-      const minOffsetY = Math.max(
-        2.2,
-        (0.16 * Math.max(12, curLen)) / Math.max(0.45, surface.normalY),
-      );
-      targetPosY = Math.max(targetPosY, skier.posY + planeRise + minOffsetY);
     }
 
     const lookAtX = skier.posX + fwdX * 18.0;
@@ -208,20 +204,13 @@ export class CameraRig {
       this.currCamera.posY = minCamY;
     }
 
-    if (surface.valid && surface.normalY >= 0.45) {
-      const camDx = this.currCamera.posX - skier.posX;
-      const camDz = this.currCamera.posZ - skier.posZ;
-      const planeRise = clamp(
-        -(camDx * surface.normalX + camDz * surface.normalZ) / Math.max(0.35, surface.normalY),
-        -6.0,
-        16.0,
+    if (surface.valid && surface.normalY >= 0.20) {
+      const minFrontFaceY = computeMinFrontFaceY(
+        skier.posY,
+        this.currCamera.posX - skier.posX,
+        this.currCamera.posZ - skier.posZ,
+        surface,
       );
-      const curLen = Math.hypot(camDx, Math.max(0, this.currCamera.posY - skier.posY), camDz);
-      const minOffsetY = Math.max(
-        2.2,
-        (0.16 * Math.max(12, curLen)) / Math.max(0.45, surface.normalY),
-      );
-      const minFrontFaceY = skier.posY + planeRise + minOffsetY;
       if (this.currCamera.posY < minFrontFaceY) {
         this.currCamera.posY = minFrontFaceY;
       }
@@ -282,4 +271,20 @@ function computeUphillSlopeRise(surface: SurfaceSample, trailDist: number): numb
     : 0.975;
   const downhillY = Math.max(0, -tangentYOrDefault(surface));
   return (downhillY / horizTangent) * trailDist;
+}
+
+function computeMinFrontFaceY(
+  skierPosY: number,
+  camDx: number,
+  camDz: number,
+  surface: SurfaceSample,
+): number {
+  const k = 0.14;
+  const ny = surface.normalY;
+  const b = -(camDx * surface.normalX + camDz * surface.normalZ);
+  const hSq = camDx * camDx + camDz * camDz;
+  const a = ny * ny - k * k;
+  const exactOffsetY = (b * ny + k * Math.sqrt(b * b + a * hSq)) / a;
+  const safePlaneOffset = clamp(b / ny, -6.0, 26.0) + 2.2;
+  return skierPosY + Math.max(exactOffsetY, safePlaneOffset);
 }

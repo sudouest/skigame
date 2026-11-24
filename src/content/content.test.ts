@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CREATURES,
+  DEFAULT_SCENERY_TIER_RULES,
   DELIVERY_ZONES,
   HAZARDS,
   PRESENTS,
@@ -17,15 +18,52 @@ import {
 } from './index';
 
 describe('content registries & invariants', () => {
-  it('exposes contrasting forkable sunny-blue and icy-black stages', () => {
-    const sunny = getStageDef('sunny-blue');
-    const icy = getStageDef('icy-black');
+  it('exposes all 5 forkable stages covering every landscape archetype, difficulty badge, and weather profile', () => {
+    const allStages = getAllStages();
+    expect(allStages).toHaveLength(5);
 
+    const powder = getStageDef('powder-bowl');
+    const sunny = getStageDef('sunny-blue');
+    const gorge = getStageDef('granite-gorge');
+    const icy = getStageDef('icy-black');
+    const blizzard = getStageDef('blizzard-ridge');
+
+    expect(powder).toBeDefined();
     expect(sunny).toBeDefined();
+    expect(gorge).toBeDefined();
     expect(icy).toBeDefined();
-    expect(getAllStages()).toHaveLength(2);
-    expect(STAGES['sunny-blue']).toBe(sunny);
-    expect(STAGES['icy-black']).toBe(icy);
+    expect(blizzard).toBeDefined();
+
+    for (const stage of allStages) {
+      expect(STAGES[stage.id]).toBe(stage);
+      expect(stage.forkTargets.length).toBeGreaterThanOrEqual(2);
+      for (const targetId of stage.forkTargets) {
+        expect(STAGES[targetId]).toBeDefined();
+      }
+    }
+
+    // Coverage across all 3 badge shapes & difficulties
+    expect(new Set(allStages.map((s) => s.badge.shape))).toEqual(
+      new Set(['circle', 'square', 'diamond']),
+    );
+    expect(new Set(allStages.map((s) => s.difficulty))).toEqual(
+      new Set(['green', 'blue', 'black']),
+    );
+
+    // Coverage across all 4 landscape archetypes
+    const archetypes = new Set<string>();
+    for (const stage of allStages) {
+      archetypes.add(stage.landscape.left.archetype);
+      archetypes.add(stage.landscape.right.archetype);
+    }
+    expect(archetypes).toEqual(
+      new Set(['rollingHills', 'alpineBowl', 'canyonWalls', 'chasm']),
+    );
+
+    // Coverage across all 3 weather profiles
+    expect(new Set(allStages.map((s) => s.weather.id))).toEqual(
+      new Set(['weather_sunny', 'weather_crisp_mountain', 'weather_blizzard']),
+    );
 
     // Contrasting gameplay characteristics
     expect(sunny!.terrain.halfWidth[0]).toBeGreaterThan(icy!.terrain.halfWidth[1]);
@@ -33,19 +71,27 @@ describe('content registries & invariants', () => {
     expect(icy!.terrain.icePatchChance).toBeGreaterThan(sunny!.terrain.icePatchChance);
     expect(icy!.terrain.rampChance).toBeGreaterThan(sunny!.terrain.rampChance);
     expect(icy!.scoreMultiplier).toBeGreaterThan(sunny!.scoreMultiplier);
-    expect(sunny!.forkTargets).toContain('icy-black');
-    expect(icy!.forkTargets).toContain('sunny-blue');
-
-    // Contrasting off-piste landscape profiles
-    expect(sunny!.landscape.left.archetype).toBe('rollingHills');
-    expect(sunny!.landscape.right.archetype).toBe('rollingHills');
+    expect(powder!.landscape.left.archetype).toBe('alpineBowl');
+    expect(powder!.landscape.right.archetype).toBe('alpineBowl');
+    expect(gorge!.landscape.left.archetype).toBe('canyonWalls');
+    expect(gorge!.landscape.right.archetype).toBe('canyonWalls');
     expect(icy!.landscape.left.archetype).toBe('canyonWalls');
     expect(icy!.landscape.right.archetype).toBe('chasm');
+    expect(blizzard!.landscape.left.archetype).toBe('chasm');
+    expect(blizzard!.landscape.right.archetype).toBe('alpineBowl');
   });
 
-  it('satisfies terrain patch probabilities, landscape profiles, palette hex colors, and off-piste tree density invariants', () => {
+  it('satisfies terrain patch probabilities, landscape profiles, palette hex colors, and scenery tier rule invariants', () => {
     const hexColorRegex = /^#[0-9a-fA-F]{6}$/;
     const validArchetypes = new Set(['rollingHills', 'alpineBowl', 'canyonWalls', 'chasm']);
+
+    expect(DEFAULT_SCENERY_TIER_RULES.length).toBeGreaterThanOrEqual(5);
+    for (const rule of DEFAULT_SCENERY_TIER_RULES) {
+      expect(rule.minNormalY).toBeGreaterThanOrEqual(0.72);
+      expect(rule.normalYSpread).toBeGreaterThan(0);
+      expect(rule.widthRange[1]).toBeGreaterThanOrEqual(rule.widthRange[0]);
+      expect(rule.heightRange[1]).toBeGreaterThanOrEqual(rule.heightRange[0]);
+    }
 
     for (const stage of getAllStages()) {
       expect(stage.terrain.icePatchChance).toBeGreaterThanOrEqual(0);
@@ -59,10 +105,17 @@ describe('content registries & invariants', () => {
         expect(stage.palette.chasmFloorColor).toMatch(hexColorRegex);
       }
 
-      expect(stage.layout.scenery.offPisteTreeDensity).toBeGreaterThanOrEqual(0);
-      expect(stage.layout.scenery.offPisteTreeDensity).toBeLessThanOrEqual(1);
-      expect(stage.layout.scenery.frostedPineChance).toBeGreaterThanOrEqual(0);
-      expect(stage.layout.scenery.frostedPineChance).toBeLessThanOrEqual(1);
+      const sc = stage.layout.scenery;
+      expect(sc.offPisteTreeDensity).toBeGreaterThanOrEqual(0);
+      expect(sc.offPisteTreeDensity).toBeLessThanOrEqual(1);
+      expect(sc.rockDensity).toBeGreaterThanOrEqual(0);
+      expect(sc.rockDensity).toBeLessThanOrEqual(1);
+      expect(sc.shrubDensity).toBeGreaterThanOrEqual(0);
+      expect(sc.shrubDensity).toBeLessThanOrEqual(1);
+      expect(sc.frostedPineChance).toBeGreaterThanOrEqual(0);
+      expect(sc.frostedPineChance).toBeLessThanOrEqual(1);
+      expect(sc.groundMinRadius).toBeGreaterThan(0);
+      expect(sc.canopyMinRadius).toBeGreaterThanOrEqual(sc.groundMinRadius);
 
       for (const side of [stage.landscape.left, stage.landscape.right]) {
         expect(validArchetypes.has(side.archetype)).toBe(true);

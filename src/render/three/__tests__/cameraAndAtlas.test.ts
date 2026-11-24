@@ -5,7 +5,15 @@ import type { CameraPose } from '../../../sim/contracts';
 import { computeVerticalFovDeg, syncPerspectiveCamera } from '../cameraSync';
 import { GraphicsTracker } from '../graphicsTracker';
 import { GraphicsUtils } from '../graphicsUtils';
-import { createCartoonSpriteAtlasTexture, dilateAtlasEdges } from '../spriteAtlas';
+import {
+  ATLAS_FRAMES,
+  ATLAS_HEIGHT,
+  ATLAS_ROWS,
+  ATLAS_WIDTH,
+  createCartoonSpriteAtlasTexture,
+  dilateAtlasEdges,
+  type BillboardFrameName,
+} from '../spriteAtlas';
 import { createSharedToonMaterials } from '../toonMaterials';
 
 describe('Responsive Camera Sync, Toon Materials, and 2.5D Atlas Dilation', () => {
@@ -103,6 +111,24 @@ describe('Responsive Camera Sync, Toon Materials, and 2.5D Atlas Dilation', () =
     const atlas = createCartoonSpriteAtlasTexture(gfx);
     expect(atlas.isTexture).toBe(true);
     expect(atlas.colorSpace).toBe(THREE.SRGBColorSpace);
+
+    expect(ATLAS_WIDTH).toBe(1024);
+    expect(ATLAS_HEIGHT).toBe(1024);
+    expect(ATLAS_ROWS).toBe(4);
+    const frames = Object.entries(ATLAS_FRAMES) as [BillboardFrameName, (typeof ATLAS_FRAMES)['pine_green']][];
+    expect(frames.length).toBe(10);
+    const seenCells = new Set<string>();
+    for (const [name, rect] of frames) {
+      expect(rect.uOffset).toBeGreaterThanOrEqual(0);
+      expect(rect.vOffset).toBeGreaterThanOrEqual(0);
+      expect(rect.uOffset + rect.uScale).toBeLessThanOrEqual(1);
+      expect(rect.vOffset + rect.vScale).toBeLessThanOrEqual(1);
+      const cellKey = `${rect.col},${rect.row}`;
+      expect(seenCells.has(cellKey), `duplicate atlas cell on ${name}`).toBe(false);
+      seenCells.add(cellKey);
+    }
+    expect(ATLAS_FRAMES.alpine_rock.row).toBe(2);
+    expect(ATLAS_FRAMES.rock_crag.row).toBe(2);
 
     tracker.disposeAll();
   });

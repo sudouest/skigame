@@ -32,6 +32,7 @@ const PISTE_LONG_HANDOFF_M = 14;
 const PISTE_AABB_CUTOFF_SQ = 58 * 58;
 const NORMAL_SAMPLE_EPS_M = 0.5;
 const ROCK_SLOPE_NORMAL_Y_THRESHOLD = 0.72;
+const MAX_PISTE_CANDIDATES = 8;
 
 /**
  * Continuous unified mountain heightfield combining macro sheet elevation Y_macro(wx, wz),
@@ -57,6 +58,8 @@ export class MountainField implements MountainFieldView {
   private readonly stageWeightsScratch: number[] = [];
   private readonly evalSpinesScratch: SpineView[] = [];
   private readonly singleSpineScratch: SpineView[] = [];
+  private readonly candWScratch = new Float64Array(MAX_PISTE_CANDIDATES);
+  private readonly candHScratch = new Float64Array(MAX_PISTE_CANDIDATES);
   private interiorSinglePisteSpine: SpineView | null = null;
 
   constructor(spineSource: MountainSpineSource) {
@@ -172,6 +175,9 @@ export class MountainField implements MountainFieldView {
     let pisteSumW = 0;
     let pisteWeightedH = 0;
     let maxPisteW = 0;
+    let dominantAbsX = Infinity;
+    let dominantCandIdx = -1;
+    let pisteCandCount = 0;
     let dominantPisteSpine: SpineView | null = null;
     let dominantPisteS = 0;
     let dominantPisteSignedX = 0;
@@ -205,7 +211,8 @@ export class MountainField implements MountainFieldView {
       const landscape = this.resolveLandscape(sp);
       const sideSpec = proj.signedX < 0 ? landscape.left : landscape.right;
       const blendW = Math.min(sideSpec.transitionWidth * 0.5, 10);
-      if (Math.abs(proj.signedX) < proj.halfWidth + blendW + 1.0) {
+      const absSignedX = Math.abs(proj.signedX);
+      if (absSignedX < proj.halfWidth + blendW + 1.0) {
         pisteNearCount++;
       }
 
@@ -213,24 +220,70 @@ export class MountainField implements MountainFieldView {
       if (longMask <= 0) continue;
 
       const pisteW =
-        (1 - smoothstep(proj.halfWidth, proj.halfWidth + blendW, Math.abs(proj.signedX))) *
-        longMask;
+        (1 - smoothstep(proj.halfWidth, proj.halfWidth + blendW, absSignedX)) * longMask;
 
       if (pisteW > 1e-6) {
         const extDeltaY = proj.longExt * Math.tan(clamp(proj.pitchRad, -1.2, 1.2));
         sp.evaluatePisteHeight(proj.s, proj.signedX, this.pisteScratch);
         const pisteH = this.pisteScratch.heightY + extDeltaY;
-        pisteSumW += pisteW;
-        pisteWeightedH += pisteW * pisteH;
 
-        if (pisteW > maxPisteW) {
+        const betterWeight = pisteW > maxPisteW + 1e-5;
+        const tiedCloser = Math.abs(pisteW - maxPisteW) <= 1e-5 && absSignedX < dominantAbsX;
+
+        let slotIdx = -1;
+        if (pisteCandCount < MAX_PISTE_CANDIDATES) {
+          slotIdx = pisteCandCount++;
+        } else {
+          let minW = Infinity;
+          for (let k = 0; k < MAX_PISTE_CANDIDATES; k++) {
+            if (k === dominantCandIdx) continue;
+            const wK = this.candWScratch[k]!;
+            if (wK < minW) {
+              minW = wK;
+              slotIdx = k;
+            }
+          }
+          if (slotIdx >= 0 && !(pisteW > minW || betterWeight || tiedCloser)) {
+            slotIdx = -1;
+          }
+        }
+        if (slotIdx >= 0) {
+          this.candWScratch[slotIdx] = pisteW;
+          this.candHScratch[slotIdx] = pisteH;
+        }
+
+        if (betterWeight || tiedCloser) {
           maxPisteW = pisteW;
+          dominantAbsX = absSignedX;
+          if (slotIdx >= 0) {
+            dominantCandIdx = slotIdx;
+          }
           dominantPisteSpine = sp;
           dominantPisteS = proj.s;
           dominantPisteSignedX = proj.signedX;
           dominantPisteInDivider = this.pisteScratch.inDivider;
           this.copyProjection(proj, this.nearestProjScratch);
         }
+      }
+    }
+
+    if (pisteCandCount === 1) {
+      pisteSumW = this.candWScratch[0]!;
+      pisteWeightedH = pisteSumW * this.candHScratch[0]!;
+    } else if (pisteCandCount > 1 && dominantCandIdx >= 0) {
+      // Attenuate height-divergent foreign corridors on-piste while keeping smooth seam & off-piste blending
+      const domH = this.candHScratch[dominantCandIdx]!;
+      const domLock = smoothstep(0.5, 0.98, maxPisteW);
+      for (let k = 0; k < pisteCandCount; k++) {
+        const w = this.candWScratch[k]!;
+        const h = this.candHScratch[k]!;
+        let effW = w;
+        if (k !== dominantCandIdx && domLock > 0) {
+          const agree = 1 - smoothstep(3.0, 9.0, Math.abs(h - domH));
+          effW = w * lerp(1, agree, domLock);
+        }
+        pisteSumW += effW;
+        pisteWeightedH += effW * h;
       }
     }
 

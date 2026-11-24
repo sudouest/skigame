@@ -43,10 +43,23 @@ export interface TileSurfaceSampleOut {
   minNormalY: number;
   /** True when any enclosing corner is piste-adjacent (weight > 0.15) or inside a chasm zone. */
   blocked: boolean;
+  /** Nearest top-grid corner stage ID (cross-fork accurate). */
+  stageId: string;
+  /** Bilinear lateral distance beyond nearest trail halfWidth (m). */
+  distFromTrail: number;
+  /** Bilinear height offset relative to macro mountain elevation (m). */
+  relElevation: number;
 }
 
 export function createTileSurfaceSampleOut(): TileSurfaceSampleOut {
-  return { relY: 0, minNormalY: 1, blocked: false };
+  return {
+    relY: 0,
+    minNormalY: 1,
+    blocked: false,
+    stageId: STAGE_SUNNY_BLUE.id,
+    distFromTrail: 0,
+    relElevation: 0,
+  };
 }
 
 export interface TerrainLodSpec {
@@ -126,6 +139,14 @@ export interface TerrainTileSlot {
   readonly cliffColors: Float32Array;
   /** Per-halo-cell bitflags; see SURFACE_*_BIT. Layout is private to the pool (use sampleTileSurface). */
   readonly surfaceMask: Uint8Array;
+  /** Per-top-vertex interned stage index (`topIdx = gz * vertSpan + gx`). */
+  readonly stageIndexGrid: Uint8Array;
+  /** Per-top-vertex lateral distance beyond nearest spine halfWidth (`topIdx`). */
+  readonly offPisteDistGrid: Float32Array;
+  /** Per-top-vertex height relative to macro elevation (`topIdx`). */
+  readonly relElevationGrid: Float32Array;
+  readonly uniqueStageIndices: Uint8Array;
+  uniqueStageCount: number;
   readonly candidateSpines: SpineView[];
   inUse: boolean;
   ready: boolean;
@@ -272,6 +293,8 @@ export class TerrainTilePool {
   private readonly freeIndicesByLod: [number[], number[]] = [[], []];
   private readonly sharedIndexByLod: readonly [THREE.BufferAttribute, THREE.BufferAttribute];
   private readonly stageColorCache = new Map<string, ParsedStageColors>();
+  private readonly stageIdTable: string[] = [STAGE_SUNNY_BLUE.id];
+  private readonly stageIdToIndex = new Map<string, number>([[STAGE_SUNNY_BLUE.id, 0]]);
   private readonly defaultColors: ParsedStageColors;
 
   constructor(
@@ -349,6 +372,11 @@ export class TerrainTilePool {
           baseColors: new Float32Array(haloCount * 3),
           cliffColors: new Float32Array(haloCount * 3),
           surfaceMask: new Uint8Array(haloCount),
+          stageIndexGrid: new Uint8Array(spec.topVertexCount),
+          offPisteDistGrid: new Float32Array(spec.topVertexCount),
+          relElevationGrid: new Float32Array(spec.topVertexCount),
+          uniqueStageIndices: new Uint8Array(16),
+          uniqueStageCount: 0,
           candidateSpines: [],
           inUse: false,
           ready: false,
@@ -414,6 +442,7 @@ export class TerrainTilePool {
     const spec = slot.spec;
     slot.inUse = true;
     slot.ready = false;
+    slot.uniqueStageCount = 0;
     slot.absTileX = absTileX;
     slot.absTileZ = absTileZ;
     slot.originX = absTileX * spec.tileSize - mountainField.originOffsetX;
@@ -475,6 +504,26 @@ export class TerrainTilePool {
       }
       if (_scratchCol.inChasmZone) mask |= SURFACE_CHASM_BIT;
       slot.surfaceMask[haloIdx] = mask;
+
+      const topIdx = gz * spec.vertSpan + gx;
+      const stageIdx = this.internStageId(_scratchCol.nearestStageId);
+      slot.stageIndexGrid[topIdx] = stageIdx;
+      slot.offPisteDistGrid[topIdx] = Math.max(
+        0,
+        Math.abs(_scratchCol.nearestSignedX) - _scratchCol.nearestHalfWidth,
+      );
+      slot.relElevationGrid[topIdx] = _scratchCol.heightY - _scratchCol.macroY;
+
+      let seenStage = false;
+      for (let u = 0; u < slot.uniqueStageCount; u++) {
+        if (slot.uniqueStageIndices[u] === stageIdx) {
+          seenStage = true;
+          break;
+        }
+      }
+      if (!seenStage && slot.uniqueStageCount < slot.uniqueStageIndices.length) {
+        slot.uniqueStageIndices[slot.uniqueStageCount++] = stageIdx;
+      }
 
       const primaryColors = this.getStageColors(_scratchCol.nearestStageId);
       this.computeBaseVertexColor(primaryColors, _scratchCol, isPiste, _scratchColorA);
@@ -609,22 +658,53 @@ export class TerrainTilePool {
     out.blocked = (mask & (SURFACE_PISTE_SCENERY_BIT | SURFACE_CHASM_BIT)) !== 0;
 
     const t00 = gz0 * vertSpan + gx0;
+    const t10 = t00 + 1;
+    const t01 = t00 + vertSpan;
+    const t11 = t01 + 1;
+
     out.minNormalY = Math.min(
       slot.normals[t00 * 3 + 1]!,
-      slot.normals[(t00 + 1) * 3 + 1]!,
-      slot.normals[(t00 + vertSpan) * 3 + 1]!,
-      slot.normals[(t00 + vertSpan + 1) * 3 + 1]!,
+      slot.normals[t10 * 3 + 1]!,
+      slot.normals[t01 * 3 + 1]!,
+      slot.normals[t11 * 3 + 1]!,
     );
 
     const hA = slot.relHeights[h00]! * (1 - tx) + slot.relHeights[h10]! * tx;
     const hB = slot.relHeights[h01]! * (1 - tx) + slot.relHeights[h11]! * tx;
     out.relY = hA * (1 - tz) + hB * tz;
+
+    const dA = slot.offPisteDistGrid[t00]! * (1 - tx) + slot.offPisteDistGrid[t10]! * tx;
+    const dB = slot.offPisteDistGrid[t01]! * (1 - tx) + slot.offPisteDistGrid[t11]! * tx;
+    out.distFromTrail = dA * (1 - tz) + dB * tz;
+
+    const eA = slot.relElevationGrid[t00]! * (1 - tx) + slot.relElevationGrid[t10]! * tx;
+    const eB = slot.relElevationGrid[t01]! * (1 - tx) + slot.relElevationGrid[t11]! * tx;
+    out.relElevation = eA * (1 - tz) + eB * tz;
+
+    const nearGx = tx < 0.5 ? gx0 : gx0 + 1;
+    const nearGz = tz < 0.5 ? gz0 : gz0 + 1;
+    const nearStageIdx = slot.stageIndexGrid[nearGz * vertSpan + nearGx]!;
+    out.stageId = this.stageIdTable[nearStageIdx] ?? STAGE_SUNNY_BLUE.id;
+  }
+
+  /**
+   * Populates `out` with distinct stage IDs sampled inside `slot`, zero-allocation.
+   */
+  getSlotStageIds(slot: TerrainTileSlot, out: string[]): number {
+    const count = slot.uniqueStageCount;
+    for (let i = 0; i < count; i++) {
+      const idx = slot.uniqueStageIndices[i]!;
+      out[i] = this.stageIdTable[idx] ?? STAGE_SUNNY_BLUE.id;
+    }
+    out.length = count;
+    return count;
   }
 
   releaseSlot(slot: TerrainTileSlot): void {
     if (!slot.inUse) return;
     slot.inUse = false;
     slot.ready = false;
+    slot.uniqueStageCount = 0;
     slot.absTileX = 0;
     slot.absTileZ = 0;
     slot.candidateSpines.length = 0;
@@ -714,6 +794,20 @@ export class TerrainTilePool {
       const chasmT = clamp(col.chasmDepthBelowSpine / 32, 0, 1);
       outColor.lerp(colors.chasmFloor, chasmT);
     }
+  }
+
+  private internStageId(stageId: string): number {
+    const existing = this.stageIdToIndex.get(stageId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    if (this.stageIdTable.length >= 255) {
+      return 0;
+    }
+    const nextIdx = this.stageIdTable.length;
+    this.stageIdTable.push(stageId);
+    this.stageIdToIndex.set(stageId, nextIdx);
+    return nextIdx;
   }
 
   private getStageColors(stageId: string): ParsedStageColors {

@@ -1,0 +1,73 @@
+/**
+ * Pure declarative default off-piste scenery tier rules.
+ * Zero simulation, math, or Three.js dependencies.
+ */
+import type { SceneryTierRule } from './types';
+
+export const DEFAULT_SCENERY_TIER_RULES: readonly SceneryTierRule[] = [
+  {
+    species: 'pine_green',
+    layer: 'canopy',
+    minNormalY: 0.78,
+    preferredNormalY: 0.94,
+    normalYSpread: 0.18,
+    minDistFromTrailM: 1.5,
+    idealDistFromTrailM: 12,
+    elevationBias: -0.15,
+    baseWeight: 1.0,
+    widthRange: [3.9, 6.4],
+    heightRange: [5.8, 9.5],
+  },
+  {
+    species: 'pine_frosted',
+    layer: 'canopy',
+    minNormalY: 0.78,
+    preferredNormalY: 0.92,
+    normalYSpread: 0.18,
+    minDistFromTrailM: 1.5,
+    idealDistFromTrailM: 14,
+    elevationBias: 0.35,
+    baseWeight: 1.0,
+    widthRange: [3.9, 6.4],
+    heightRange: [5.8, 9.5],
+  },
+  {
+    species: 'snow_shrub',
+    layer: 'ground',
+    minNormalY: 0.80,
+    preferredNormalY: 0.96,
+    normalYSpread: 0.16,
+    minDistFromTrailM: 0.5,
+    idealDistFromTrailM: 6,
+    elevationBias: -0.2,
+    baseWeight: 0.95,
+    widthRange: [1.7, 2.7],
+    heightRange: [1.35, 2.15],
+  },
+  {
+    species: 'alpine_rock',
+    layer: 'ground',
+    minNormalY: 0.72,
+    preferredNormalY: 0.82,
+    normalYSpread: 0.16,
+    minDistFromTrailM: 0.5,
+    idealDistFromTrailM: 8,
+    elevationBias: 0.1,
+    baseWeight: 1.1,
+    widthRange: [1.8, 2.5],
+    heightRange: [1.3, 1.9],
+  },
+  {
+    species: 'rock_crag',
+    layer: 'ground',
+    minNormalY: 0.72,
+    preferredNormalY: 0.75,
+    normalYSpread: 0.12,
+    minDistFromTrailM: 3.0,
+    idealDistFromTrailM: 18,
+    elevationBias: 0.45,
+    baseWeight: 1.25,
+    widthRange: [2.0, 2.6],
+    heightRange: [2.3, 3.4],
+  },
+];

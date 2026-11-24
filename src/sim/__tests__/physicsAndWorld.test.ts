@@ -442,7 +442,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
 
     const intent = createMutablePlayerIntent();
     let sawRebase = false;
-    for (let i = 0; i < 600; i++) {
+    for (let i = 0; i < 1500; i++) {
       const pre = sim.getState();
       const targetX = pre.trailWindow.curr.sampleSafeX(pre.surfaceSample.s + 10);
       intent.steer = Math.max(-1, Math.min(1, (targetX - pre.surfaceSample.x) * 0.12));

@@ -1,6 +1,12 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
-import { STAGE_ICY_BLACK, STAGE_SUNNY_BLUE } from '../../../content/stages';
+import {
+  STAGE_BLIZZARD_RIDGE,
+  STAGE_ICY_BLACK,
+  STAGE_POWDER_BOWL,
+  STAGE_SUNNY_BLUE,
+} from '../../../content/stages';
+import { DEFAULT_SCENERY_TIER_RULES } from '../../../content/sceneryRules';
 import { EventBus } from '../../../core/eventBus';
 import { FIXED_DT } from '../../../core/fixedLoop';
 import { clamp } from '../../../core/math';
@@ -32,9 +38,18 @@ import { GraphicsTracker } from '../graphicsTracker';
 import { GraphicsUtils } from '../graphicsUtils';
 import { InstancePools, MAX_STATIC_BILLBOARDS } from '../instancePools';
 import { LandmarkStreamer } from '../landmarkStreamer';
-import { createProceduralMeshAssets } from '../meshFactory';
+import { createForkArchObject, createProceduralMeshAssets } from '../meshFactory';
 import { ThreeRenderer } from '../renderer';
-import { TerrainStreamer, packTileKey } from '../terrainStreamer';
+import {
+  TerrainStreamer,
+  packTileKey,
+  type TileSceneryItem,
+} from '../terrainStreamer';
+import {
+  evaluateSceneryRuleFitness,
+  selectWinningSceneryRule,
+  type SceneryEnvSignal,
+} from '../scenerySelector';
 import {
   INNER_TILE_QUADS,
   INNER_TILE_SIZE_M,
@@ -199,7 +214,6 @@ function createMockSimState(): ReadonlySimState {
       id: 'fork_arch_1_left',
       kind: 'forkArch',
       segmentId: 1,
-      chunkIndex: 3,
       s: 140,
       x: -13,
       worldX: -13,
@@ -216,7 +230,6 @@ function createMockSimState(): ReadonlySimState {
       id: 'fork_arch_1_right',
       kind: 'forkArch',
       segmentId: 1,
-      chunkIndex: 3,
       s: 140,
       x: 13,
       worldX: 13,
@@ -233,7 +246,6 @@ function createMockSimState(): ReadonlySimState {
       id: 'cabin_1',
       kind: 'deliveryLandmark',
       segmentId: 1,
-      chunkIndex: 0,
       s: 20,
       x: -10,
       worldX: -10,
@@ -954,7 +966,6 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
         id: 'fork_arch_1_left',
         kind: 'forkArch',
         segmentId: 1,
-        chunkIndex: 3,
         s: 140,
         x: -13,
         worldX: -13,
@@ -971,7 +982,6 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
         id: 'cabin_1',
         kind: 'deliveryLandmark',
         segmentId: 1,
-        chunkIndex: 0,
         s: 20,
         x: -10,
         worldX: -10,
@@ -985,7 +995,6 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
         id: 'hero_gate',
         kind: 'deliveryLandmark',
         segmentId: 1,
-        chunkIndex: 1,
         s: 55,
         x: 8,
         worldX: 8,
@@ -1026,7 +1035,6 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
         id: 'fork_arch_1_left',
         kind: 'forkArch',
         segmentId: 1,
-        chunkIndex: 3,
         s: 140,
         x: -10,
         worldX: 22,
@@ -1378,5 +1386,323 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     expect(afterDispose.cachedGeometries).toBe(0);
     expect(afterDispose.cachedMaterials).toBe(0);
     expect(afterDispose.cachedTextures).toBe(0);
+  });
+
+  it('evaluates SceneryTierRule slope gates, canopy suppression, and LOD margins accurately', () => {
+    const talusSignal: SceneryEnvSignal = {
+      minNormalY: 0.74,
+      distFromTrail: 12,
+      relElevation: 8,
+      worldNoise01: 0.35,
+      lod: 0,
+      scenery: STAGE_ICY_BLACK.layout.scenery,
+    };
+    const pineRule = DEFAULT_SCENERY_TIER_RULES.find((r) => r.species === 'pine_green')!;
+    const shrubRule = DEFAULT_SCENERY_TIER_RULES.find((r) => r.species === 'snow_shrub')!;
+    const rockRule = DEFAULT_SCENERY_TIER_RULES.find((r) => r.species === 'alpine_rock')!;
+
+    expect(evaluateSceneryRuleFitness(pineRule, talusSignal)).toBe(0);
+    expect(evaluateSceneryRuleFitness(shrubRule, talusSignal)).toBe(0);
+    expect(evaluateSceneryRuleFitness(rockRule, talusSignal)).toBeGreaterThan(0);
+
+    // On outer lod = 1 (+0.07 margin), 0.80 allows alpine_rock (>= 0.79) while excluding pines (< 0.85)
+    const outerSlopeSignal: SceneryEnvSignal = {
+      ...talusSignal,
+      minNormalY: 0.81,
+      lod: 1,
+    };
+    expect(evaluateSceneryRuleFitness(pineRule, outerSlopeSignal)).toBe(0);
+    expect(evaluateSceneryRuleFitness(rockRule, outerSlopeSignal)).toBeGreaterThan(0);
+
+    // Canopy blocking forces ground-layer understory selection
+    const flatForestSignal: SceneryEnvSignal = {
+      minNormalY: 0.94,
+      distFromTrail: 14,
+      relElevation: 2,
+      worldNoise01: 0.65,
+      lod: 0,
+      scenery: STAGE_POWDER_BOWL.layout.scenery,
+    };
+    for (const roll of [0.05, 0.35, 0.75, 0.95]) {
+      const winner = selectWinningSceneryRule(
+        DEFAULT_SCENERY_TIER_RULES,
+        flatForestSignal,
+        true,
+        roll,
+      );
+      expect(winner).not.toBeNull();
+      expect(winner!.layer).toBe('ground');
+    }
+  });
+
+  it('supports cross-fork biome fidelity, exact spatial thinning, dual-radius spacing, granite rocks, and blizzard/green badges', () => {
+    // 1. Single straddling tile with opposing left/right stages verifies local biome fidelity & exact thinning
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const mats = createSharedToonMaterials(gfx);
+    const streamer = new TerrainStreamer(gfx, mats);
+
+    const mockSeg = createMockSegment(1, 'curr', 'powder-bowl', 0, 140, 35);
+    const mockWindow: TrailWindowView = {
+      prev: null,
+      curr: mockSeg,
+      nextLeft: null,
+      nextRight: null,
+    };
+    const splitField: MountainFieldView = {
+      worldSeed: 901,
+      originOffsetX: 0,
+      originOffsetZ: 0,
+      collectSpinesInBounds(_minX, _maxX, _minZ, _maxZ, _padM, outSpines) {
+        outSpines.length = 0;
+      },
+      evaluateHeight(wx, wz) {
+        return wz * 0.1 + wx * 0.02;
+      },
+      evaluateColumn(wx, wz, out) {
+        const base = createMountainColumnOut();
+        Object.assign(out, base);
+        out.heightY = wz * 0.1 + wx * 0.02;
+        out.macroY = out.heightY;
+        out.onPiste = false;
+        out.pisteWeight = 0;
+        out.nearestSignedX = wx < 16 ? -24 : 24;
+        out.nearestHalfWidth = 10;
+        out.nearestStageId = wx < 16 ? 'powder-bowl' : 'blizzard-ridge';
+        return out;
+      },
+      evaluate(wx, wz, out) {
+        const base = createMountainSampleOut();
+        Object.assign(out, base);
+        out.heightY = wz * 0.1 + wx * 0.02;
+        out.macroY = out.heightY;
+        out.nearestStageId = wx < 16 ? 'powder-bowl' : 'blizzard-ridge';
+        return out;
+      },
+    };
+
+    for (let f = 0; f < 30; f++) {
+      streamer.step(mockWindow, splitField, 16, 16, 0, -1, 50);
+      if (streamer.queuedTileCount === 0) break;
+    }
+    expect(streamer.queuedTileCount).toBe(0);
+
+    // Inspect straddling inner tile at absTileX=0, absTileZ=0 (world X in [0, 32))
+    let leftGreenCount = 0;
+    let leftRockOrFrostedCount = 0;
+    let rightRockOrFrostedCount = 0;
+    let rightCount = 0;
+    let leftCount = 0;
+    streamer.forEachActiveScenery((ox, _oy, oz, item) => {
+      const wx = ox + item.localX;
+      const wz = oz + item.localZ;
+      if (wx < 0 || wx >= 32 || wz < 0 || wz >= 32) return;
+      if (wx < 15.5) {
+        leftCount++;
+        if (item.frame === 'pine_green' || item.frame === 'snow_shrub') leftGreenCount++;
+        if (
+          item.frame === 'alpine_rock' ||
+          item.frame === 'rock_crag' ||
+          item.frame === 'pine_frosted'
+        ) {
+          leftRockOrFrostedCount++;
+        }
+      } else if (wx > 16.5) {
+        rightCount++;
+        if (
+          item.frame === 'alpine_rock' ||
+          item.frame === 'rock_crag' ||
+          item.frame === 'pine_frosted'
+        ) {
+          rightRockOrFrostedCount++;
+        }
+      }
+    });
+    expect(leftCount).toBeGreaterThan(2);
+    expect(rightCount).toBeGreaterThan(0);
+    expect(leftGreenCount).toBeGreaterThan(leftRockOrFrostedCount);
+    expect(rightRockOrFrostedCount).toBeGreaterThanOrEqual(1);
+
+    // Also verify tilePool.getSlotStageIds reports both stages on the straddling tile
+    let straddleSlot = null;
+    for (let i = 0; i < streamer.tilePool.innerCapacity; i++) {
+      const s = streamer.tilePool.getSlot(0, i)!;
+      if (s.inUse && s.absTileX === 0 && s.absTileZ === 0) {
+        straddleSlot = s;
+        break;
+      }
+    }
+    expect(straddleSlot).not.toBeNull();
+    const slotStages: string[] = [];
+    streamer.tilePool.getSlotStageIds(straddleSlot!, slotStages);
+    expect(slotStages).toContain('powder-bowl');
+    expect(slotStages).toContain('blizzard-ridge');
+
+    streamer.clearAll();
+
+    // 2. Real SkiSimulation for powder-bowl (circle badge + dual-radius canopy/ground tucking)
+    const simPowder = new SkiSimulation({ seed: 505, startStageId: 'powder-bowl' });
+    const powderState = simPowder.getState();
+    const rendererPowder = new ThreeRenderer(null, simPowder.eventBus, undefined, { headless: true });
+    for (let f = 0; f < 30; f++) {
+      rendererPowder.sync(powderState, 0.5, 1 / 60, 50);
+      if (rendererPowder.terrainStreamer.queuedTileCount === 0) break;
+    }
+    expect(rendererPowder.terrainStreamer.queuedTileCount).toBe(0);
+
+    // Check dual-radius spacing and understory placement per tile across visible powder-bowl tiles
+    const itemsByTile = new Map<
+      string,
+      Array<{ wx: number; wz: number; item: TileSceneryItem }>
+    >();
+    let totalPowderItems = 0;
+    rendererPowder.terrainStreamer.forEachActiveScenery((ox, _oy, oz, item) => {
+      totalPowderItems++;
+      const key = `${Math.round(ox)},${Math.round(oz)}`;
+      let list = itemsByTile.get(key);
+      if (!list) {
+        list = [];
+        itemsByTile.set(key, list);
+      }
+      list.push({ wx: ox + item.localX, wz: oz + item.localZ, item: { ...item } });
+    });
+    expect(totalPowderItems).toBeGreaterThan(20);
+
+    const isCanopy = (f: string): boolean => f === 'pine_green' || f === 'pine_frosted';
+    let minTreeDist = Infinity;
+    let minItemDist = Infinity;
+    let totalTrees = 0;
+    let totalGroundProps = 0;
+    let sawUnderstoryTucked = false;
+
+    for (const tileItems of itemsByTile.values()) {
+      const trees = tileItems.filter((e) => isCanopy(e.item.frame));
+      const groundProps = tileItems.filter((e) => !isCanopy(e.item.frame));
+      totalTrees += trees.length;
+      totalGroundProps += groundProps.length;
+
+      for (let i = 0; i < tileItems.length; i++) {
+        for (let j = i + 1; j < tileItems.length; j++) {
+          const d = Math.hypot(
+            tileItems[i]!.wx - tileItems[j]!.wx,
+            tileItems[i]!.wz - tileItems[j]!.wz,
+          );
+          if (d < minItemDist) minItemDist = d;
+        }
+      }
+
+      for (let i = 0; i < trees.length; i++) {
+        for (let j = i + 1; j < trees.length; j++) {
+          const d = Math.hypot(trees[i]!.wx - trees[j]!.wx, trees[i]!.wz - trees[j]!.wz);
+          if (d < minTreeDist) minTreeDist = d;
+        }
+        for (let g = 0; g < groundProps.length; g++) {
+          const d = Math.hypot(trees[i]!.wx - groundProps[g]!.wx, trees[i]!.wz - groundProps[g]!.wz);
+          if (
+            d >= STAGE_POWDER_BOWL.layout.scenery.groundMinRadius - 1e-3 &&
+            d < STAGE_POWDER_BOWL.layout.scenery.canopyMinRadius
+          ) {
+            sawUnderstoryTucked = true;
+          }
+        }
+      }
+    }
+    expect(minItemDist).toBeGreaterThanOrEqual(STAGE_ICY_BLACK.layout.scenery.groundMinRadius - 1e-3);
+    expect(minTreeDist).toBeGreaterThanOrEqual(4.19);
+    expect(totalTrees).toBeGreaterThan(10);
+    expect(totalGroundProps).toBeGreaterThan(3);
+    expect(sawUnderstoryTucked).toBe(true);
+
+    expect(rendererPowder.runLeakCheck(0, true).totalLeaks).toBe(0);
+    rendererPowder.dispose();
+
+    // Verify 'blizzard-ridge' weather fog clamp (>= 65m), #152033 chasm floor, and rocky scenery
+    const archCheckSim = new SkiSimulation({ seed: 101, startStageId: 'blizzard-ridge' });
+    const archState = archCheckSim.getState();
+    const rendererBliz = new ThreeRenderer(null, archCheckSim.eventBus, undefined, {
+      headless: true,
+    });
+    for (let f = 0; f < 30; f++) {
+      rendererBliz.sync(archState, 0.5, 0.1, 50);
+    }
+    expect(rendererBliz.terrainStreamer.queuedTileCount).toBe(0);
+
+    const fogBliz = rendererBliz.scene.fog as THREE.FogExp2;
+    expect(fogBliz.density).toBeCloseTo(1.6 / STAGE_BLIZZARD_RIDGE.weather.fogMinDist, 2);
+
+    const sampleOut = createMountainSampleOut();
+    let sawRockScenery = false;
+    rendererBliz.terrainStreamer.forEachActiveScenery((ox, _oy, oz, item) => {
+      if (item.frame === 'alpine_rock' || item.frame === 'rock_crag') {
+        sawRockScenery = true;
+      }
+      archState.mountainField.evaluate(ox + item.localX, oz + item.localZ, sampleOut);
+      expect(sampleOut.normalY).toBeGreaterThanOrEqual(0.5);
+    });
+    expect(sawRockScenery).toBe(true);
+
+    // Verify chasmFloorColor #152033 rendered in blizzard-ridge tiles
+    const blizChasmColor = new THREE.Color(STAGE_BLIZZARD_RIDGE.palette.chasmFloorColor!);
+    const vCol = new THREE.Color();
+    let sawBlizChasm = false;
+    for (let i = 0; i < rendererBliz.terrainStreamer.tilePool.innerCapacity; i++) {
+      const slot = rendererBliz.terrainStreamer.tilePool.getSlot(0, i)!;
+      if (!slot.inUse || !slot.ready) continue;
+      for (let v = 0; v < slot.spec.topVertexCount; v++) {
+        const v3 = v * 3;
+        vCol.setRGB(slot.colors[v3]!, slot.colors[v3 + 1]!, slot.colors[v3 + 2]!);
+        const distC = Math.hypot(
+          vCol.r - blizChasmColor.r,
+          vCol.g - blizChasmColor.g,
+          vCol.b - blizChasmColor.b,
+        );
+        if (distC < 0.35 && slot.originY + slot.positions[v3 + 1]! < archState.currSkier.posY - 18) {
+          sawBlizChasm = true;
+          break;
+        }
+      }
+      if (sawBlizChasm) break;
+    }
+    expect(sawBlizChasm).toBe(true);
+
+    expect(rendererBliz.runLeakCheck(0, true).totalLeaks).toBe(0);
+
+    // Explicitly verify green circle badge on 'powder-bowl' fork arch
+    const powderAssets = createProceduralMeshAssets(gfx);
+    const powderArch = createForkArchObject(
+      gfx,
+      powderAssets,
+      mats.propToonMaterial,
+      mats.propToonMaterial,
+      'powder-bowl',
+    );
+    expect(powderArch.group.getObjectByName('ForkBadgeCircle')?.visible).toBe(true);
+    expect(powderArch.group.getObjectByName('ForkBadgeSquare')?.visible).toBe(false);
+    expect(powderArch.group.getObjectByName('ForkBadgeDiamond')?.visible).toBe(false);
+    expect(powderArch.group.getObjectByName('ForkGateTrimCircle')?.visible).toBe(true);
+    gfx.disposeObject(powderArch.group);
+
+    // Also verify 'granite-gorge' canyon walls emit rock/crag scenery safely on both LOD tiers
+    const simGorge = new SkiSimulation({ seed: 606, startStageId: 'granite-gorge' });
+    const gorgeState = simGorge.getState();
+    rendererBliz.sync(gorgeState, 0.5, 1 / 60, 50);
+    for (let f = 0; f < 30; f++) {
+      rendererBliz.sync(gorgeState, 0.5, 1 / 60, 50);
+      if (rendererBliz.terrainStreamer.queuedTileCount === 0) break;
+    }
+    expect(rendererBliz.terrainStreamer.queuedTileCount).toBe(0);
+    let sawGorgeRock = false;
+    rendererBliz.terrainStreamer.forEachActiveScenery((ox, _oy, oz, item) => {
+      if (item.frame === 'alpine_rock' || item.frame === 'rock_crag') {
+        sawGorgeRock = true;
+      }
+      gorgeState.mountainField.evaluate(ox + item.localX, oz + item.localZ, sampleOut);
+      expect(sampleOut.normalY).toBeGreaterThanOrEqual(0.5);
+    });
+    expect(sawGorgeRock).toBe(true);
+
+    expect(rendererBliz.runLeakCheck(0, true).totalLeaks).toBe(0);
+    rendererBliz.dispose();
+    tracker.disposeAll();
   });
 });

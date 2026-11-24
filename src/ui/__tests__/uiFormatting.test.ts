@@ -78,15 +78,31 @@ describe('UI formatting & architectural isolation', () => {
   });
 
   it('maps stage badges, skier cards, and simulation events cleanly', () => {
+    const powder = formatStageDisplay('powder-bowl');
+    expect(powder.name).toBe('Powder Bowl Meadow');
+    expect(powder.badgeSymbol).toBe('●');
+    expect(powder.badgeColor).toBe('#16a34a');
+    expect(powder.multiplier).toBe(1);
+
     const blue = formatStageDisplay('sunny-blue');
     expect(blue.name).toBe('Sunny Blue Run');
     expect(blue.badgeSymbol).toBe('■');
     expect(blue.multiplier).toBe(1);
 
+    const gorge = formatStageDisplay('granite-gorge');
+    expect(gorge.name).toBe('Granite Gorge');
+    expect(gorge.badgeSymbol).toBe('■');
+    expect(gorge.multiplierLabel).toBe('1.5x');
+
     const black = formatStageDisplay('icy-black');
     expect(black.name).toBe('Icy Black Diamond');
     expect(black.badgeSymbol).toBe('◆');
     expect(black.multiplierLabel).toBe('2x');
+
+    const blizzard = formatStageDisplay('blizzard-ridge');
+    expect(blizzard.name).toBe('Blizzard Ridge');
+    expect(blizzard.badgeSymbol).toBe('◆');
+    expect(blizzard.multiplierLabel).toBe('2.5x');
 
     const alpineCard = formatSkierCardInfo(SKIER_ALPINE);
     expect(alpineCard.perkLabel).toContain('Gift Magnet');

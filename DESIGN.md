@@ -40,9 +40,9 @@ skigame/
     │                      # camera rig, pooled entity state, PCG layout & pacing,
     │                      # dual-radius Poisson scenery, creature AI, DebugDrawBuffer
     ├── render/three/      # SOLE layer allowed to import 'three': GraphicsTracker/Utils,
-    │                      # chunked ribbon pool, instanced 3D & 2.5D billboard pools,
-    │                      # smooth-normal outlines, contact shadows, backpack stack,
-    │                      # snow VFX, stack animation player, time-budgeted chunk streamer
+    │                      # 2-tier world-space TerrainTilePool, TerrainStreamer, LandmarkStreamer,
+    │                      # instanced 3D & 2.5D billboard pools, smooth-normal outlines, contact shadows,
+    │                      # backpack stack, snow VFX, stack animation player
     ├── content/           # Pure declarative data & typed registries (characters, stages,
     │                      # hazards, creatures, presents, delivery zones, patterns, chunks)
     ├── ui/                # HTML/CSS overlay (HUD, menus, safe-area insets, touch drag,
@@ -192,10 +192,10 @@ The simulation loop drives a 4-phase frame pipeline tuned for both 120/144 Hz de
 3. **Interpolated Visual Sync Phase (`render(alpha, dt)`):**
    - Interpolates dynamic entity and camera poses using `alpha` for stutter-free 120/144 Hz rendering.
    - Updates contact shadows, backpack stack, snow VFX, animations, and HUD.
-4. **Time-Budgeted Chunk Streaming Phase:**
-   - Remaining frame budget: `budgetMs = Math.max(14 - frameElapsedMs, 1)`.
-   - Terrain chunk mesh generation, Poisson scenery placement, and entity spawning execute inside resumable ES generators (`Generator<void | Promise<void>>`) that `yield` every few rows/items.
-   - **Async Asset Gatekeeper:** When a chunk needs a lazy-loaded `.glb` or sprite atlas not yet cached, its generator yields the asset load `Promise`, pausing *only that chunk* until resolved without dropping a frame.
+4. **Time-Budgeted Terrain & Landmark Streaming Phase:**
+   - Default frame streaming budget: `budgetMs = Math.max(5 - frameElapsedMs, 1)` (`DEFAULT_TERRAIN_STREAM_BUDGET_MS = 5`).
+   - Halo-padded tile height/color generation executes inside resumable ES generators (`Generator<void, void, unknown>`) yielding every 4 rows (`ROWS_PER_YIELD = 4`), while `LandmarkStreamer` attaches fork arches and delivery landmarks cleanly outside tile lifecycles.
+   - **Async Asset Gatekeeper:** When a landmark needs a lazy-loaded `.glb` or texture not yet cached, its waiter `Promise` pauses *only that landmark* until resolved without dropping a frame.
 
 ---
 
@@ -331,10 +331,10 @@ At any world coordinate `(wx, wz)` with absolute noise coordinates `absX = wx + 
 4. **Automatic Cliff & Surface Shading:** Steep slopes (`normalY < 0.72`) automatically classify as `rock` and tint to exposed granite/slate `cliffColor` via vertex colors—zero extra shaders or materials.
 
 #### 2-Tier World-Space `TerrainTilePool`
-- **Inner High-LOD Ring:** `32m × 32m` tiles at `1.5–2m` vertex spacing covering `~80–100m` around the skier (biased forward down the camera frustum) for crisp moguls, banked pistes, and cliff lips.
-- **Outer Far-LOD Ring:** `64m × 64m` tiles at `8m` vertex spacing extending out to `~280m` past fog distance so the mountain vanishes naturally into atmospheric fog in every direction.
-- **LOD Seam Skirts & Fast Normals:** Each tile drops a `~2m` vertical perimeter skirt to hide T-junction cracks between `2m` and `8m` LOD rings. Tile builders pre-filter segments by 2D AABB per tile, evaluate height **once per vertex** (plus a 1-vertex border), and compute normals from neighboring grid vertices (~5× faster than per-vertex central differences).
-- **Zero-Upload Rebasing:** Vertices are stored relative to each tile's local `container.position`, so `WORLD_REBASED` shifts only tile container transforms with zero vertex buffer re-uploads.
+- **Inner High-LOD Ring:** `6 × 6` grid of `32m × 32m` tiles (`2m` vertex spacing, `4m` perimeter skirt) centered with `0.2`-cell hysteresis and biased forward down the camera frustum for crisp moguls, banked pistes, and cliff lips.
+- **Outer Far-LOD Ring:** `7 × 7` grid of `64m × 64m` tiles (`8m` vertex spacing, `12m` perimeter skirt) extending smoothly past fog distance so the mountain vanishes naturally into atmospheric fog in every direction; each `2 × 2` inner block swaps atomically against its `64m` parent cell.
+- **LOD Seam Skirts, Fast Normals & Vertex-Cached Biome Signals:** Tile builders pre-filter segments by 2D AABB per tile, evaluate `MountainField` once per vertex (caching per-vertex `stageIndexGrid`, `offPisteDistGrid`, and `relElevationGrid` for zero-extra-query off-piste scenery scatter), and compute normals from halo-padded grid neighbors.
+- **Zero-Upload Rebasing:** Vertices are stored relative to each tile's local `container.position`, so `WORLD_REBASED` shifts only tile container transforms with **zero vertex buffer re-uploads**.
 
 ```typescript
 export interface BaseSideLandscapeSpec {
@@ -379,11 +379,13 @@ export interface StagePalette {
 }
 
 export interface StageSceneryConfig {
-  readonly pineDensity: number;
+  readonly offPisteTreeDensity: number;
   readonly rockDensity: number;
+  readonly shrubDensity: number;
+  readonly frostedPineChance: number;
   readonly groundMinRadius: number;
   readonly canopyMinRadius: number;
-  readonly offPisteTreeDensity: number;
+  readonly tierRules?: readonly SceneryTierRule[];
 }
 
 export interface StageTerrainProfile {
@@ -510,13 +512,14 @@ Each `StageDef` defines independent parallel **Tracks** (`obstacles`, `presents`
 
 ---
 
-## 10. Procedural Off-Trail Scenery (Dual-Radius Poisson Disk Sampling)
+## 10. Procedural Off-Trail Scenery (Dual-Radius Sampling & `SceneryTierRule`)
 
-Off-piste mountain terrain (beyond `halfWidth + 2m` out across the surrounding hills and ridges) is populated deterministically **per world-space terrain tile** using **dual-radius Bridson Poisson disk sampling**:
+Off-piste mountain terrain (beyond `halfWidth`, `pisteWeight <= 0.15`, and outside chasm zones) is populated deterministically **per world-space terrain tile** using vertex-cached surface samples (`sampleTileSurface`) with zero extra `MountainField` queries:
 
-- **Separate `groundRadius` & `canopyRadius`:** Every scenery rule defines both a trunk/ground footprint and an overhead canopy radius. Small rocks, snowdrifts, and shrubs check only `groundRadius` (so they tuck naturally beneath pine boughs), while large pines check `canopyRadius` against neighboring trees to prevent overlapping crowns.
-- **Environmental Signals & `TierRule` Competition:** Placement fitness is driven by pure functions of `(elevation, slopeDeg, distFromTrail, worldNoise)`. Steep cliff/rock slopes (`normalY < 0.78`), groomed pistes, and landmark clearance zones are automatically excluded; grouping species inside a `TierRule` selects a single local winner by highest fitness score.
-- **LOD Density Tapering & Visibility Thinning:** Outer far-LOD terrain tiles taper scenery density sharply so `InstancePools` billboard capacities and mobile GPU draw calls stay bounded across the full `±280m` mountain horizon.
+- **Dual-Radius Spacing (`groundGrid` & `canopyGrid`):** Pre-allocated per-streamer spatial hashes enforce separate `groundMinRadius` (shrubs, alpine rocks, tree trunks, landmark exclusion zones) and `canopyMinRadius` (tree crowns) footprints—so shrubs and boulders tuck naturally beneath pine boughs while tree canopies never overlap.
+- **Environmental Signals & `SceneryTierRule` Competition:** Renderer-side selection scores declarative rules (`pine_green`, `pine_frosted`, `snow_shrub`, `alpine_rock`, `rock_crag`) against `(minNormalY, distFromTrail, relElevation, worldNoise01, lod, StageSceneryConfig)`. Steep talus/scree slopes (`0.72 <= minNormalY < 0.78` on inner LOD, with `+0.07` margin on coarse outer LOD) exclude trees/shrubs cleanly in favor of boulders and crags (`normalY >= 0.72`), sinking rock billboard bases proportionally to slope steepness.
+- **Cross-Fork Biome Fidelity & Exact Spatial Thinning:** Because `TerrainTilePool` caches per-vertex `stageId`, straddling tiles resolve the true local `StageDef` at every candidate and count thinning rejections (`localDensity / maxDensity`) against the candidate budget so biome transitions remain seamless without square borders.
+- **LOD Density Tapering:** Outer `64m` tiles taper scenery density sharply so `InstancePools` billboard capacities and mobile GPU draw calls stay bounded across the full mountain horizon.
 
 ---
 

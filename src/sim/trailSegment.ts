@@ -249,7 +249,6 @@ export class TrailSegment implements TerrainSegmentView, SpineView {
     if (spineFork.hasFork && spineFork.leftStageId && spineFork.rightStageId) {
       this.spine.sampleSpineFrame(this.length, this.scratchFrameA);
       const branchHalfWidth = 0.5 * this.spine.getEndPose().halfWidth;
-      const seamChunkIndex = this.chunkCount - 1;
       const branchDefs: ReadonlyArray<{ side: 'left' | 'right'; sign: -1 | 1; stageId: string }> = [
         { side: 'left', sign: -1, stageId: spineFork.leftStageId },
         { side: 'right', sign: 1, stageId: spineFork.rightStageId },
@@ -261,7 +260,6 @@ export class TrailSegment implements TerrainSegmentView, SpineView {
           id: `fork_arch_${this.id}_${branch.side}`,
           kind: 'forkArch',
           segmentId: this.id,
-          chunkIndex: seamChunkIndex,
           s: this.length,
           x: lateralX,
           worldX: this.scratchFrameA.posX + lateralX * this.scratchFrameA.rightX,

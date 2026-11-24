@@ -1,14 +1,22 @@
+import { DEFAULT_SCENERY_TIER_RULES } from '../../content/sceneryRules';
 import { getStageDef, STAGE_SUNNY_BLUE } from '../../content/stages';
+import { clamp, lerp } from '../../core/math';
+import { fbm2D } from '../../core/noise';
 import { hashCoords2DU32, SeededRng } from '../../core/rng';
 import { SpatialGrid } from '../../core/spatialGrid';
-import {
-  createMountainColumnOut,
-  type MountainColumnOut,
-  type MountainFieldView,
-  type TerrainSegmentView,
-  type TrailWindowView,
+import type {
+  MountainFieldView,
+  TerrainSegmentView,
+  TrailWindowView,
 } from '../../sim/contracts';
 import type { GraphicsUtils } from './graphicsUtils';
+import {
+  computeScenerySlopeSinkY,
+  computeStageSceneryDensity,
+  selectWinningSceneryRule,
+  speciesToBillboardFrame,
+  type SceneryEnvSignal,
+} from './scenerySelector';
 import type { BillboardFrameName } from './spriteAtlas';
 import {
   OUTER_TILE_SIZE_M,
@@ -78,8 +86,6 @@ interface TileRecord {
   slot: TerrainTileSlot | null;
   readonly scenery: TileSceneryItem[];
   sceneryCount: number;
-  readonly sceneryGrid: SpatialGrid<number>;
-  readonly rng: SeededRng;
   gen: Generator<void, void, unknown> | null;
   waitingForSlot: boolean;
   completed: boolean;
@@ -87,7 +93,6 @@ interface TileRecord {
   priority: number;
 }
 
-const _colScratch: MountainColumnOut = createMountainColumnOut();
 const _surfaceScratch: TileSurfaceSampleOut = createTileSurfaceSampleOut();
 const compareJobPriority = (a: TileRecord, b: TileRecord): number => a.priority - b.priority;
 
@@ -106,6 +111,18 @@ export class TerrainStreamer implements SceneryProvider {
   private readonly staleKeysScratch: number[] = [];
   private readonly orderedJobsScratch: TileRecord[] = [];
   private readonly activeSegmentsScratch: TerrainSegmentView[] = [];
+  private readonly groundGridScratch = new SpatialGrid<number>(8);
+  private readonly canopyGridScratch = new SpatialGrid<number>(8);
+  private readonly sceneryRngScratch = new SeededRng(1);
+  private readonly tileStageIdsScratch: string[] = [];
+  private readonly envSignalScratch: SceneryEnvSignal = {
+    minNormalY: 1,
+    distFromTrail: 0,
+    relElevation: 0,
+    worldNoise01: 0.5,
+    lod: 0,
+    scenery: STAGE_SUNNY_BLUE.layout.scenery,
+  };
 
   private readonly innerCell: number[] = [NaN, NaN];
   private readonly outerCell: number[] = [NaN, NaN];
@@ -449,11 +466,19 @@ export class TerrainStreamer implements SceneryProvider {
     const centerX = slot.originX + tileSize * 0.5;
     const centerZ = slot.originZ + tileSize * 0.5;
 
-    mountainField.evaluateColumn(centerX, centerZ, _colScratch, slot.candidateSpines);
-    const centerStage = getStageDef(_colScratch.nearestStageId) ?? STAGE_SUNNY_BLUE;
-    const density = centerStage.layout.scenery.offPisteTreeDensity;
+    const stageCount = this.tilePool.getSlotStageIds(slot, this.tileStageIdsScratch);
+    let maxDensity = 0;
+    if (stageCount === 0) {
+      maxDensity = computeStageSceneryDensity(STAGE_SUNNY_BLUE.layout.scenery);
+    } else {
+      for (let i = 0; i < stageCount; i++) {
+        const st = getStageDef(this.tileStageIdsScratch[i]!) ?? STAGE_SUNNY_BLUE;
+        const d = computeStageSceneryDensity(st.layout.scenery);
+        if (d > maxDensity) maxDensity = d;
+      }
+    }
 
-    const baseTarget = Math.round(density * 26);
+    const baseTarget = Math.round(maxDensity * 22);
     const targetCount =
       rec.lod === 0
         ? Math.min(MAX_SCENERY_PER_TILE, baseTarget)
@@ -464,8 +489,9 @@ export class TerrainStreamer implements SceneryProvider {
       return;
     }
 
-    rec.sceneryGrid.clear();
-    this.insertActiveLandmarks(rec, slot, trailWindow, centerX, centerZ, tileSize);
+    this.groundGridScratch.clear();
+    this.canopyGridScratch.clear();
+    this.insertActiveLandmarks(slot, trailWindow, centerX, centerZ, tileSize);
 
     const tileSeed =
       (hashCoords2DU32(
@@ -475,59 +501,94 @@ export class TerrainStreamer implements SceneryProvider {
       ) >>>
         0) ||
       1;
-    rec.rng.setState(tileSeed);
+    this.sceneryRngScratch.setState(tileSeed);
 
-    // Coarse 8m LOD normals smooth over cliff lips, so gate outer tiles more strictly.
-    const minNormalY = rec.lod === 0 ? 0.78 : 0.85;
-    const maxAttempts = targetCount * 3;
+    // Coarse 8m LOD normals smooth over cliff lips, so keep a stricter outer floor.
+    const absoluteMinNormalY = rec.lod === 0 ? 0.72 : 0.79;
+    const noiseSeed = (mountainField.worldSeed ^ 0x51a7) >>> 0;
+    const maxAttempts = targetCount * 4;
+    let effectiveSlotsUsed = 0;
     let attempts = 0;
-    while (rec.sceneryCount < targetCount && attempts < maxAttempts) {
+
+    while (
+      effectiveSlotsUsed < targetCount &&
+      rec.sceneryCount < MAX_SCENERY_PER_TILE &&
+      attempts < maxAttempts
+    ) {
       attempts++;
-      const localX = rec.rng.nextRange(0, tileSize);
-      const localZ = rec.rng.nextRange(0, tileSize);
+      const localX = this.sceneryRngScratch.nextRange(0, tileSize);
+      const localZ = this.sceneryRngScratch.nextRange(0, tileSize);
       this.tilePool.sampleTileSurface(slot, localX, localZ, _surfaceScratch);
-      if (_surfaceScratch.blocked || _surfaceScratch.minNormalY < minNormalY) {
-        continue;
-      }
-      const relY = _surfaceScratch.relY;
-
-      const localStage = centerStage;
-      const isShrub = rec.rng.nextBool(0.22);
-      const minRadius = isShrub
-        ? localStage.layout.scenery.groundMinRadius
-        : localStage.layout.scenery.canopyMinRadius;
-      const radiusCheck = minRadius * 0.5;
-
-      if (rec.sceneryGrid.hasOverlap(localX, localZ, radiusCheck)) {
+      if (_surfaceScratch.blocked || _surfaceScratch.minNormalY < absoluteMinNormalY) {
         continue;
       }
 
-      rec.sceneryGrid.insert(1000 + rec.sceneryCount, localX, localZ, radiusCheck);
+      const localStage = getStageDef(_surfaceScratch.stageId) ?? STAGE_SUNNY_BLUE;
+      const sceneryCfg = localStage.layout.scenery;
+      const groundR = sceneryCfg.groundMinRadius * 0.5;
+      const canopyR = sceneryCfg.canopyMinRadius * 0.5;
+
+      if (this.groundGridScratch.hasOverlap(localX, localZ, groundR)) {
+        continue;
+      }
+
+      const canopyBlocked = this.canopyGridScratch.hasOverlap(localX, localZ, canopyR);
+      const absWx = rec.absTileX * tileSize + localX;
+      const absWz = rec.absTileZ * tileSize + localZ;
+      const noise01 = clamp(fbm2D(absWx * 0.028, absWz * 0.028, noiseSeed, 2, 2.0, 0.5) * 0.5 + 0.5, 0, 1);
+
+      this.envSignalScratch.minNormalY = _surfaceScratch.minNormalY;
+      this.envSignalScratch.distFromTrail = _surfaceScratch.distFromTrail;
+      this.envSignalScratch.relElevation = _surfaceScratch.relElevation;
+      this.envSignalScratch.worldNoise01 = noise01;
+      this.envSignalScratch.lod = rec.lod;
+      this.envSignalScratch.scenery = sceneryCfg;
+
+      const rules = sceneryCfg.tierRules ?? DEFAULT_SCENERY_TIER_RULES;
+      const winner = selectWinningSceneryRule(
+        rules,
+        this.envSignalScratch,
+        canopyBlocked,
+        this.sceneryRngScratch.next(),
+      );
+      if (!winner) {
+        continue;
+      }
+
+      // Count slot before spatial thinning so sparse halves stay proportional instead of refilling to maxDensity.
+      effectiveSlotsUsed++;
+      const localDensity = computeStageSceneryDensity(sceneryCfg);
+      if (
+        maxDensity > 1e-6 &&
+        localDensity < maxDensity &&
+        !this.sceneryRngScratch.nextBool(localDensity / maxDensity)
+      ) {
+        continue;
+      }
+
+      const entryId = 1000 + rec.sceneryCount;
+      this.groundGridScratch.insert(entryId, localX, localZ, groundR);
+      if (winner.layer === 'canopy') {
+        this.canopyGridScratch.insert(entryId, localX, localZ, canopyR);
+      }
+
+      const scaleT = this.sceneryRngScratch.next();
+      const width = lerp(winner.widthRange[0], winner.widthRange[1], scaleT);
+      const height = lerp(winner.heightRange[0], winner.heightRange[1], scaleT);
+      const sinkY = computeScenerySlopeSinkY(winner.species, _surfaceScratch.minNormalY, width);
 
       const item = rec.scenery[rec.sceneryCount++]!;
       item.localX = localX;
-      item.localY = relY;
+      item.localY = _surfaceScratch.relY - sinkY;
       item.localZ = localZ;
-      item.flipX = rec.rng.nextBool(0.5);
-
-      if (isShrub) {
-        item.frame = 'snow_shrub';
-        const sScale = rec.rng.nextRange(0.85, 1.35);
-        item.width = 2.0 * sScale;
-        item.height = 1.6 * sScale;
-      } else {
-        item.frame = rec.rng.nextBool(localStage.layout.scenery.frostedPineChance)
-          ? 'pine_frosted'
-          : 'pine_green';
-        const tScale = rec.rng.nextRange(0.85, 1.4);
-        item.width = 4.6 * tScale;
-        item.height = 6.8 * tScale;
-      }
+      item.width = width;
+      item.height = height;
+      item.frame = speciesToBillboardFrame(winner.species);
+      item.flipX = this.sceneryRngScratch.nextBool(0.5);
     }
   }
 
   private insertActiveLandmarks(
-    rec: TileRecord,
     slot: TerrainTileSlot,
     trailWindow: TrailWindowView,
     tileCenterX: number,
@@ -552,7 +613,7 @@ export class TerrainStreamer implements SceneryProvider {
         if (Math.abs(dx) > maxReach + clearR || Math.abs(dz) > maxReach + clearR) {
           continue;
         }
-        rec.sceneryGrid.insert(
+        this.groundGridScratch.insert(
           i,
           lm.worldX - slot.originX,
           lm.worldZ - slot.originZ,
@@ -627,8 +688,6 @@ export class TerrainStreamer implements SceneryProvider {
       slot: null,
       scenery,
       sceneryCount: 0,
-      sceneryGrid: new SpatialGrid<number>(8),
-      rng: new SeededRng(1),
       gen: null,
       waitingForSlot: false,
       completed: false,
@@ -651,7 +710,6 @@ export class TerrainStreamer implements SceneryProvider {
     rec.absTileZ = absTileZ;
     rec.slot = null;
     rec.sceneryCount = 0;
-    rec.sceneryGrid.clear();
     rec.gen = null;
     rec.waitingForSlot = false;
     rec.completed = false;
@@ -673,7 +731,6 @@ export class TerrainStreamer implements SceneryProvider {
     rec.completed = false;
     rec.visible = false;
     rec.sceneryCount = 0;
-    rec.sceneryGrid.clear();
     rec.key = -1;
     rec.absTileX = 0;
     rec.absTileZ = 0;

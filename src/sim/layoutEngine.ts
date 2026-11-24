@@ -417,14 +417,13 @@ export class LayoutEngine {
       def.deliveryRadius + 2.5,
     );
 
-    // Emit SegmentLandmarkRequirement for ChunkStreamer (cabin/lantern/arch beside children)
+    // Emit SegmentLandmarkRequirement for LandmarkStreamer (cabin/lantern/arch beside children)
     const landmarkX = clamp(zoneX + side * 3.0, -(hw + 2.0), hw + 2.0);
     segment.evaluateSurfaceAtX(s, landmarkX, this.scratchRibbon);
     const landmarkReq: SegmentLandmarkRequirement = {
       id: `deliv_lm_${segment.id}_${Math.round(s)}_${rng.nextInt(100, 999)}`,
       kind: 'deliveryLandmark',
       segmentId: segment.id,
-      chunkIndex: Math.floor(s / segment.chunkLength),
       s,
       x: landmarkX,
       worldX: this.scratchRibbon.posX,

@@ -1,4 +1,5 @@
 export * from './types';
+export * from './sceneryRules';
 export * from './stages';
 export * from './hazards';
 export * from './creatures';

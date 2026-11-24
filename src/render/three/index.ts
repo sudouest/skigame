@@ -65,6 +65,14 @@ export {
   type TerrainTileSlot,
 } from './terrainTilePool';
 export {
+  computeScenerySlopeSinkY,
+  computeStageSceneryDensity,
+  evaluateSceneryRuleFitness,
+  selectWinningSceneryRule,
+  speciesToBillboardFrame,
+  type SceneryEnvSignal,
+} from './scenerySelector';
+export {
   TerrainStreamer,
   packTileKey,
   type SceneryProvider,

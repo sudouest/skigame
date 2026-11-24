@@ -76,6 +76,8 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
   private readonly frameScratch: SpineFrameOut = createSpineFrameOut();
   private readonly spineProjScratch: SpineProjectionOut = createSpineProjectionOut();
   private readonly validForkTargetsScratch: string[] = [];
+  private readonly breatherTargetsScratch: string[] = [];
+  private readonly intenseTargetsScratch: string[] = [];
   private readonly forkPairScratch: { left: string; right: string } = { left: '', right: '' };
   private readonly prunedIdScratch: number[] = [];
   private readonly spawnedSegScratch: TrailSegment[] = [];
@@ -899,12 +901,31 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
         out.left = swapSides ? valid[1]! : valid[0]!;
         out.right = swapSides ? valid[0]! : valid[1]!;
       } else {
-        const idxA = rng.nextInt(0, valid.length);
-        const offset = rng.nextInt(1, valid.length);
-        const idxB = (idxA + offset) % valid.length;
-        const swapSides = rng.nextBool(0.5);
-        out.left = swapSides ? valid[idxB]! : valid[idxA]!;
-        out.right = swapSides ? valid[idxA]! : valid[idxB]!;
+        const breathers = this.breatherTargetsScratch;
+        const intense = this.intenseTargetsScratch;
+        breathers.length = 0;
+        intense.length = 0;
+        for (let i = 0; i < valid.length; i++) {
+          const id = valid[i]!;
+          const role = this.lookupStage(id)?.pacingRole;
+          if (role === 'breather') breathers.push(id);
+          else if (role === 'intense') intense.push(id);
+        }
+
+        if (breathers.length > 0 && intense.length > 0) {
+          const targetA = breathers[rng.nextInt(0, breathers.length)]!;
+          const targetB = intense[rng.nextInt(0, intense.length)]!;
+          const swapSides = rng.nextBool(0.5);
+          out.left = swapSides ? targetB : targetA;
+          out.right = swapSides ? targetA : targetB;
+        } else {
+          const idxA = rng.nextInt(0, valid.length);
+          const offset = rng.nextInt(1, valid.length);
+          const idxB = (idxA + offset) % valid.length;
+          const swapSides = rng.nextBool(0.5);
+          out.left = swapSides ? valid[idxB]! : valid[idxA]!;
+          out.right = swapSides ? valid[idxA]! : valid[idxB]!;
+        }
       }
       return;
     }

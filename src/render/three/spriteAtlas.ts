@@ -2,9 +2,9 @@ import * as THREE from 'three';
 import type { GraphicsUtils } from './graphicsUtils';
 
 export const ATLAS_WIDTH = 1024;
-export const ATLAS_HEIGHT = 512;
+export const ATLAS_HEIGHT = 1024;
 export const ATLAS_COLS = 4;
-export const ATLAS_ROWS = 2;
+export const ATLAS_ROWS = 4;
 const CELL_SIZE = 256;
 const CELL_PAD_PX = 8;
 
@@ -16,7 +16,9 @@ export type BillboardFrameName =
   | 'bear_walk'
   | 'bear_telegraph'
   | 'child_blue'
-  | 'snow_shrub';
+  | 'snow_shrub'
+  | 'alpine_rock'
+  | 'rock_crag';
 
 export interface AtlasFrameRect {
   readonly col: number;
@@ -49,6 +51,8 @@ export const ATLAS_FRAMES: Readonly<Record<BillboardFrameName, AtlasFrameRect>> 
   bear_telegraph: makeFrameRect(1, 1),
   child_blue: makeFrameRect(2, 1),
   snow_shrub: makeFrameRect(3, 1),
+  alpine_rock: makeFrameRect(0, 2),
+  rock_crag: makeFrameRect(1, 2),
 };
 
 /**
@@ -453,6 +457,121 @@ function drawSnowShrubSprite(ctx: CanvasRenderingContext2D, ox: number, oy: numb
   ctx.restore();
 }
 
+function drawAlpineRockSprite(ctx: CanvasRenderingContext2D, ox: number, oy: number): void {
+  const cx = ox + CELL_SIZE * 0.5;
+  const bottom = oy + CELL_SIZE - 14;
+
+  ctx.save();
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#1e293b';
+  ctx.lineWidth = 6;
+
+  // Main low granite boulder silhouette
+  ctx.fillStyle = '#475569';
+  ctx.beginPath();
+  ctx.moveTo(cx - 88, bottom - 6);
+  ctx.lineTo(cx - 72, bottom - 76);
+  ctx.lineTo(cx - 18, bottom - 112);
+  ctx.lineTo(cx + 48, bottom - 96);
+  ctx.lineTo(cx + 88, bottom - 44);
+  ctx.lineTo(cx + 76, bottom);
+  ctx.lineTo(cx - 78, bottom);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // Sunlit left facet
+  ctx.fillStyle = '#7c8ea3';
+  ctx.beginPath();
+  ctx.moveTo(cx - 84, bottom - 8);
+  ctx.lineTo(cx - 68, bottom - 74);
+  ctx.lineTo(cx - 18, bottom - 108);
+  ctx.lineTo(cx - 4, bottom - 40);
+  ctx.lineTo(cx - 30, bottom - 4);
+  ctx.closePath();
+  ctx.fill();
+
+  // Companion small scree stone on right
+  ctx.fillStyle = '#5b6c80';
+  ctx.beginPath();
+  ctx.moveTo(cx + 12, bottom);
+  ctx.lineTo(cx + 28, bottom - 46);
+  ctx.lineTo(cx + 74, bottom - 40);
+  ctx.lineTo(cx + 94, bottom);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // Snow cap atop boulder crown
+  ctx.fillStyle = '#f0f9ff';
+  ctx.beginPath();
+  ctx.moveTo(cx - 56, bottom - 72);
+  ctx.lineTo(cx - 18, bottom - 106);
+  ctx.lineTo(cx + 38, bottom - 92);
+  ctx.lineTo(cx + 22, bottom - 66);
+  ctx.lineTo(cx - 14, bottom - 78);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawRockCragSprite(ctx: CanvasRenderingContext2D, ox: number, oy: number): void {
+  const cx = ox + CELL_SIZE * 0.5;
+  const bottom = oy + CELL_SIZE - 14;
+
+  ctx.save();
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#1e293b';
+  ctx.lineWidth = 6;
+
+  // Tall twin-spire alpine crag
+  ctx.fillStyle = '#3b4a5e';
+  ctx.beginPath();
+  ctx.moveTo(cx - 76, bottom);
+  ctx.lineTo(cx - 54, bottom - 118);
+  ctx.lineTo(cx - 12, bottom - 196);
+  ctx.lineTo(cx + 28, bottom - 142);
+  ctx.lineTo(cx + 56, bottom - 164);
+  ctx.lineTo(cx + 78, bottom);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // Sunlit ridge face
+  ctx.fillStyle = '#64748b';
+  ctx.beginPath();
+  ctx.moveTo(cx - 70, bottom - 4);
+  ctx.lineTo(cx - 50, bottom - 114);
+  ctx.lineTo(cx - 12, bottom - 190);
+  ctx.lineTo(cx + 6, bottom - 116);
+  ctx.lineTo(cx - 18, bottom - 4);
+  ctx.closePath();
+  ctx.fill();
+
+  // Highlight snow streak along upper ridge
+  ctx.fillStyle = '#e2f1ff';
+  ctx.beginPath();
+  ctx.moveTo(cx - 46, bottom - 114);
+  ctx.lineTo(cx - 12, bottom - 188);
+  ctx.lineTo(cx + 8, bottom - 148);
+  ctx.lineTo(cx - 16, bottom - 134);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(cx + 28, bottom - 136);
+  ctx.lineTo(cx + 54, bottom - 158);
+  ctx.lineTo(cx + 62, bottom - 120);
+  ctx.lineTo(cx + 38, bottom - 118);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+}
+
 /**
  * Generates the cartoon 2.5D sprite atlas texture via offscreen canvas with RGB edge dilation,
  * or falls back safely to a tiny headless DataTexture when `document` is absent (Node Vitest).
@@ -460,7 +579,7 @@ function drawSnowShrubSprite(ctx: CanvasRenderingContext2D, ox: number, oy: numb
 export function createCartoonSpriteAtlasTexture(gfx: GraphicsUtils): THREE.Texture {
   if (typeof document === 'undefined') {
     const w = 8;
-    const h = 4;
+    const h = 8;
     const data = new Uint8Array(w * h * 4);
     for (let i = 0; i < w * h; i++) {
       data[i * 4] = 220;
@@ -497,6 +616,8 @@ export function createCartoonSpriteAtlasTexture(gfx: GraphicsUtils): THREE.Textu
   drawBearSprite(ctx, 1 * CELL_SIZE, 1 * CELL_SIZE, true);
   drawChildSprite(ctx, 2 * CELL_SIZE, 1 * CELL_SIZE, '#06d6a0', '#ffbe0b', false);
   drawSnowShrubSprite(ctx, 3 * CELL_SIZE, 1 * CELL_SIZE);
+  drawAlpineRockSprite(ctx, 0 * CELL_SIZE, 2 * CELL_SIZE);
+  drawRockCragSprite(ctx, 1 * CELL_SIZE, 2 * CELL_SIZE);
 
   const imgData = ctx.getImageData(0, 0, ATLAS_WIDTH, ATLAS_HEIGHT);
   dilateAtlasEdges(imgData.data, ATLAS_WIDTH, ATLAS_HEIGHT, 6);

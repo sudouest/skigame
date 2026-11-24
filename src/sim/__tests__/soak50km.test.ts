@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { getAllStages } from '../../content/stages';
 import { FIXED_DT } from '../../core/fixedLoop';
 import { angleDelta, clamp } from '../../core/math';
 import { createMutablePlayerIntent, createSurfaceSample } from '../contracts';
@@ -11,6 +12,7 @@ describe('50 km Headless PCG & Simulation Soak Test', () => {
 
     let forkCount = 0;
     const seenSegmentIds = new Set<number>();
+    const seenStageIds = new Set<string>();
     const checkedHazardSegments = new Set<number>();
     const deliveryCadences: number[] = [];
 
@@ -50,6 +52,7 @@ describe('50 km Headless PCG & Simulation Soak Test', () => {
           const seg = windowSegs[w];
           if (!seg) continue;
           seenSegmentIds.add(seg.id);
+          seenStageIds.add(seg.stageId);
           segLengthMap.set(seg.id, seg.length);
 
           if (!checkedHazardSegments.has(seg.id)) {
@@ -221,6 +224,9 @@ describe('50 km Headless PCG & Simulation Soak Test', () => {
     expect(forkCount).toBeGreaterThanOrEqual(100);
     expect(finalState.rebase.rebaseCount).toBeGreaterThan(200);
     expect(seenSegmentIds.size).toBeGreaterThan(150);
+    for (const stage of getAllStages()) {
+      expect(seenStageIds.has(stage.id)).toBe(true);
+    }
 
     // O(1) bounded active pool counts despite 50+ km traveled
     expect(maxActiveHazards).toBeLessThan(finalState.entities.hazards.capacity);

@@ -93,8 +93,6 @@ describe('TrailSegment & TrailWindow invariants', () => {
     expect(rightArch).toBeDefined();
     expect(leftArch!.s).toBe(curr.length);
     expect(rightArch!.s).toBe(curr.length);
-    expect(leftArch!.chunkIndex).toBe(curr.chunkCount - 1);
-    expect(rightArch!.chunkIndex).toBe(curr.chunkCount - 1);
     expect(leftArch!.badgeStageId).toBe(curr.fork.leftStageId);
     expect(rightArch!.badgeStageId).toBe(curr.fork.rightStageId);
     expect(leftArch!.worldX).toBeCloseTo(leftStart.posX, 4);
@@ -104,7 +102,7 @@ describe('TrailSegment & TrailWindow invariants', () => {
     expect(rightArch!.worldY).toBeCloseTo(rightStart.posY, 4);
     expect(rightArch!.worldZ).toBeCloseTo(rightStart.posZ, 4);
 
-    // Verify seam chunkIndex stays in bounds when length is an exact multiple of 35m (280m)
+    // Verify fork arches emit accurately when length is an exact multiple of 35m (280m)
     const exactMultSeg = new TrailSegment({
       id: 99,
       slot: 'curr',
@@ -131,8 +129,7 @@ describe('TrailSegment & TrailWindow invariants', () => {
     });
     const exactArches = exactMultSeg.landmarks.filter((l) => l.kind === 'forkArch');
     expect(exactArches).toHaveLength(2);
-    expect(exactArches[0]!.chunkIndex).toBeLessThan(exactMultSeg.chunkCount);
-    expect(exactArches[0]!.chunkIndex).toBe(exactMultSeg.chunkCount - 1);
+    expect(exactArches[0]!.s).toBe(280);
 
     expect(Math.abs(endFrame.curvature)).toBeLessThan(1e-6);
     expect(Math.abs(endFrame.bankRad)).toBeLessThan(1e-6);
