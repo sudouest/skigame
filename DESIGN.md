@@ -142,24 +142,24 @@ $$
 
 This guarantees \(1 - \kappa x \ge 0.6 > 0\) everywhere on the mesh, preventing inner-turn triangle foldover, flipped normals, and Z-fighting.
 
-### 4.3 Warm-Started \(O(1)\) Surface Query (`sampleSurface`)
+### 4.3 Unified Mountain Surface Query (`sampleSurface` / `MountainField`)
 
-Once per physics tick per grounded actor, `sampleSurface(posX, posZ, hintSegmentId, hintS)` maps world position onto the active trail:
+Once per physics tick per grounded actor, `sampleSurface(posX, posZ, hintSegmentId, hintS)` evaluates the unified **`MountainField`** at `(posX, posZ)`:
 
-1. Each active segment caches a lightweight centerline polyline sampled every ~2–4m.
-2. Starting from `(hintSegmentId, hintS)`, `sampleSurface` inspects only ~3–5 adjacent polyline segments (plus connected child segments `nextLeft` / `nextRight` when near `s ≈ length`) with **zero heap allocations**.
-3. **Unambiguous Fork Resolution:** Once past a fork's seam plane, `sampleSurface` evaluates both branches and picks the branch with smaller lateral distance `|x|`. Because both branches start flush with identical elevation and \(\kappa = 0, \beta = 0\) at the seam, `groundY` and `surfaceNormal` remain completely continuous.
+1. `MountainField` combines the smooth macro mountain sheet `Y_macro(X, Z)`, procedural off-piste landscape relief `dH_landscape(absX, absZ)`, and any overlapping groomed piste stamps from active segments into a single continuous heightfield `H(X, Z)` defined everywhere—on-piste, off-piste, across forks, and on steep cliffs.
+2. Warm-starting from `(hintSegmentId, hintS)` accelerates local projection onto the nearest active trail segment polyline (to resolve `s`, `x`, groomed piste height, and surface patches) with **zero heap allocations**.
+3. **Unambiguous Fork Resolution:** Because both branches attach flush at the fork seam (`κ = 0, β = 0`, identical elevation) and blend smoothly into `Y_macro`, `groundY` and `surfaceNormal` remain completely continuous across forks and across the V-wedge hillside between branches.
 4. Returns `{ segmentId, s, x, groundY, surfaceNormal, downhillTangent, halfWidth, surfaceType }` and updates the actor's `(hintSegmentId, hintS)` cache.
 
 ### 4.4 World-Space Arcade Ski Physics & Collisions
 
 Running at a fixed `60 Hz` step (`FIXED_DT = 1/60`):
 - **True 3D Slope & Airborne Ballistics:**
-  - World gravity `(0, -g, 0)` projected onto `surfaceNormal` naturally accelerates the skier down steep Black Diamond runs and nudges gently inward on banked turns.
-  - **Grounded (`posY <= groundY + ε` and vertical speed tracks slope):** The skier follows `groundY`. When cresting a steep roller or launching off a ski ramp lip, downward terrain drop exceeds gravity and `posY > groundY` decouples seamlessly into **true 3D ballistic airtime** (`velY -= g * dt; posY += velY * dt`).
-- **Carving & Surface Traction:** Horizontal velocity decomposes into forward-along-skis (low drag) and lateral-across-skis (carve edge-grip force opposing sideslip, scaled by `packed = 1.0`, `powder = 0.72` with extra drag, `ice = 0.25`, plus character perks). Holding brake applies progressive snowplow drag.
-- **Downhill Heading Clamp:** To prevent skiing uphill back into pruned chunks, steering `heading` clamps smoothly within `±80°` of the local `downhillTangent` (allowing sharp cross-slope carving to scrub speed without reversing uphill).
-- **Soft Snowbank Containment:** Beyond `|x| > halfWidth`, raised snowbank normals and progressive deep-powder drag naturally steer the skier back onto the trail instead of bouncing off invisible walls.
+  - World gravity `(0, -g, 0)` projected onto `surfaceNormal` naturally accelerates the skier down steep Black Diamond runs, nudges gently inward on banked turns, and pulls naturally down off-piste hillsides.
+  - **Grounded (`posY <= groundY + ε` and vertical speed tracks slope):** The skier follows `groundY`. When cresting a steep roller, ridge, or ski ramp lip, downward terrain drop exceeds gravity and `posY > groundY` decouples seamlessly into **true 3D ballistic airtime** (`velY -= g * dt; posY += velY * dt`).
+- **Carving & Surface Traction:** Horizontal velocity decomposes into forward-along-skis (low drag) and lateral-across-skis (carve edge-grip force opposing sideslip, scaled by `packed = 1.0`, `powder = 0.72` with extra drag, `ice = 0.25`, `rock = 0.15` on steep cliffs where `normalY < 0.72`, plus character perks). Holding brake applies progressive snowplow drag.
+- **Open-Mountain Carving (No Invisible Corridor Walls):** Rather than clamping the skier at a narrow ribbon edge or locking heading to a rigid corridor, the skier can freely carve off-piste onto surrounding hills, bowls, and between fork branches. Natural gravity slows uphill travel, deeper off-piste powder slows speed relative to fast groomed snow, and beyond `~100–140m` outside the active stage envelope the mountain rises naturally into steep outer valley walls/dense timber that gently funnel the skier back toward upcoming runs.
+- **Chasm & Off-Piste Recovery:** Dropping into an impassable chasm (`posY < nearestSpineY - chasmWipeoutDepth`) triggers the cartoon wipeout-and-recover back onto the nearest `safeX` on the trail; normal obstacle wipeouts off-piste recover locally in place.
 - **Plain Euclidean Collisions:** Obstacles, presents, Delivery Zones, creatures, and projectiles collide directly in a world `(X, Z)` spatial hash:
   $$
   (X_a - X_b)^2 + (Z_a - Z_b)^2 \le (r_a + r_b)^2 \quad\text{and}\quad (\text{posY} - \text{groundY}) \le \text{collider.height}
@@ -170,8 +170,8 @@ Running at a fixed `60 Hz` step (`FIXED_DT = 1/60`):
 
 To ski infinitely without floating-point vertex jitter:
 - **Do NOT** subtract `player.s` to pin the skier at `Z = 0`, and **do NOT** rotate the world around turns (which spins directional sun shadows, sky gradients, and wind-blown snow unnaturally).
-- **Instead**, maintain a **translation-only `worldOriginOffset`** `(Ox, Oy, Oz)`. Whenever rendered world coordinates exceed `256m` from `(0, 0, 0)`, subtract `delta` from active entity `(pos, prevPos)` arrays, active segment polyline anchors, camera state, particle buffers, and chunk container `position`s, adding `delta` to `worldOriginOffset`.
-- **Zero Mesh Re-Uploads:** Static ribbon chunk meshes and chunk-local instanced scenery matrices are generated relative to their chunk root's local origin, so rebasing translates only chunk container transforms—requiring **zero vertex buffer or static instance matrix re-uploads**.
+- **Instead**, maintain a **translation-only `worldOriginOffset`** `(Ox, Oy, Oz)`. Whenever rendered world coordinates exceed `128m` from `(0, 0, 0)`, subtract `delta` from active entity `(pos, prevPos)` arrays, active/ghost segment spine anchors, camera state, particle buffers, and terrain tile container `position`s, adding `delta` to `worldOriginOffset`.
+- **Zero Mesh Re-Uploads & Noise Invariance:** World-space terrain tiles and tile-local instanced scenery matrices are generated relative to their tile root's local origin, while `MountainField` evaluates procedural noise in **absolute world coordinates** `(wx + Ox, wz + Oz)`—so rebasing translates only tile container transforms with **zero vertex buffer re-uploads** and zero noise seams.
 
 ---
 
@@ -266,18 +266,20 @@ Instead, 2.5D cartoon elements use **GPU-instanced Y-axis cylindrical billboard 
 
 ## 7. Endless Mountain Terrain & Trail Splitting
 
-### 7.1 Four-Slot Sliding Segment Window (`Trail Window`)
+### 7.1 Four-Slot Gameplay Window, Horizon Lookahead & Ghost Elevation Buffer (`Trail Window`)
 
-World topology is managed as a strictly bounded **4-slot sliding window**:
+World topology is managed as a strictly bounded **4-slot gameplay window** paired with lightweight elevation lookahead/history buffers:
 
 ```text
-[ prev ] ──► [ curr ] ──┬──► [ nextLeft ]   (e.g., Blue Pine Run)
-                        └──► [ nextRight ]  (e.g., Black Diamond Chute)
+[ ghostSpines ] ──► [ prev ] ──► [ curr ] ──┬──► [ nextLeft ]  ──► [ horizonLL, horizonLR ]
+(math-only, <350m)                          └──► [ nextRight ] ──► [ horizonRL, horizonRR ]
 ```
 
-- When linear (`curr` does not fork), `nextRight` is `null`.
-- All entities live in World Space `(X, Y, Z)`—so the sliding window is needed **only** for ribbon streaming, warm-started `sampleSurface` lookups near seams, and \(O(1)\) cleanup.
-- **\(O(1)\) Memory Guarantee:** Once the skier advances ~40m past a fork onto the chosen branch, the unchosen branch and old `prev` segment are pruned and their pooled ribbon chunks / static entity slots are reclaimed.
+- **4 Active Gameplay Slots (`prev`, `curr`, `nextLeft`, `nextRight`):** Own baked hazards, presents, Delivery Zones, creatures, ramps, and landmarks. When linear (`curr` does not fork), `nextRight` is `null`.
+- **Horizon Spine Lookahead (1 Level Deeper):** Stores *only* lightweight spline math and `LandscapeProfile` (no entities or landmarks) one stage beyond `nextLeft` / `nextRight` (~500–600m ahead of the skier)—well past the `~280m` fog limit so distant terrain tiles already know upcoming forks, slopes, and chasms before they are meshed.
+- **Ghost Spine Elevation Buffer:** When `prev` or an unchosen fork branch is pruned from the active gameplay window (entities & landmarks reclaimed in \(O(1)\)), its lightweight spine anchors (~12 points, pure math) remain in a bounded ring buffer until `> 350m` behind the skier. This guarantees `MountainField` elevation `Y_macro` never pops or tears tile seams inside the visible fog radius.
+- **Broad Downhill Fall-Line Invariant:** While the *skier* can carve freely in any direction, the *stage spine generator* constrains cumulative spine heading within a broad downhill cone (`±60°` of `-Z`) so consecutive stages never spiral `180°–360°` back underneath an earlier stage's `(X, Z)` footprint on the 2D heightfield.
+- **Off-Piste Advancement:** `TrailWindow.updateProgression()` projects the skier's position across the fork seam plane so advancing onto the next stage works seamlessly even when carving off-piste alongside a branch.
 
 ### 7.2 Model A: Major Stage / Biome Forks
 
@@ -305,25 +307,93 @@ For tactical 100–250m splits inside a single stage (e.g., *narrow icy high-rew
 - Smoothly widens `halfWidth(s)` and raises an interior `dividerSpan(s)` (`[-d(s), +d(s)]`) populated with snowbanks and trees down the center.
 - Left and right lanes can carry independent surface modifiers (`packed` vs. `ice`) and reward lines, then smoothly merge back as `d(s) \to 0`.
 
-### 7.4 Chunked Ribbon Mesh Pool & Terrain Definition
+### 7.4 Unified `MountainField` & 2-Tier World-Space `TerrainTilePool`
 
-The **Ribbon Pool** pre-allocates **~16 reusable fixed-length (25–50m) ribbon chunk meshes** sharing a single vertex-colored `MeshToonMaterial` (positioned at each chunk's local origin for zero-upload floating-origin rebasing and native per-chunk frustum culling).
+Instead of rendering isolated trail ribbons floating in an empty void, the entire mountain is evaluated by a single headless **`MountainField`** (`src/sim/mountainField.ts`) and meshed onto a pre-allocated **2-Tier World-Space `TerrainTilePool`** (`src/render/three/`) sharing one vertex-colored `MeshToonMaterial`.
 
-- **Non-Linear Cross-Trail Vertex Distribution:** Normalized transverse coordinate \(u \in [-1, 1]\) maps to lateral distance via:
-  $$
-  x(u) = \frac{W_{\text{total}}}{4}\, u\,(1 + u^2)
-  $$
-  This concentrates triangles densely across the skiable corridor and bank transitions (crisp rollers, jump lips, moguls) while keeping outer scenic mountain skirts coarse and mobile-GPU friendly.
-- **Additive Micro-Terrain `surfaceHeight(s, x)`:** Combines stage rollers/moguls, explicit authored **ski ramps**, soft side snowbanks outside `±halfWidth`, and elliptical **surface patches** (`packed | powder | ice`).
+#### Continuous Terrain Evaluation (`MountainField.evaluate(wx, wz)`)
+At any world coordinate `(wx, wz)` with absolute noise coordinates `absX = wx + Ox`, `absZ = wz + Oz`:
+
+1. **Rubber-Sheet Macro Elevation `Y_macro(wx, wz)`:** Computes a smooth inverse-distance / Gaussian weighted average of each active, horizon, and ghost segment's **single closest spine projection** (normalized per segment so forks never double-weight downstream elevation, and smoothed over `~100–130m` so there are zero Voronoi step cliffs and zero elevation-drift trenches after consecutive steep runs).
+2. **Procedural Off-Piste Landscape `dH_landscape(absX, absZ)`:** Evaluates deterministic 2D noise and the stage's per-side (`left` / `right`) `LandscapeProfile` archetypes relative to `Y_macro`:
+   - **`rollingHills`:** Multi-octave undulating snowy hills and shallow valleys.
+   - **`alpineBowl`:** Wide upward-curving powder valley walls.
+   - **`canyonWalls`:** Steep rocky/snowy walls rising sharply outside `halfWidth`.
+   - **`chasm`:** Steep drop-off into a deep foggy gorge (with optional opposite far cliff wall).
+   - **Outer Valley Funneling:** Beyond `~100–140m` outside the active stage envelope, `dH_landscape` gently rises into steep outer alpine ridges so off-piste skiers stay naturally funneled toward the valley's stage network without invisible walls.
+3. **Groomed Piste Stamp & Surface Blending:** Within `halfWidth + blendWidth` of any active segment, smoothly blends `Y_macro + dH_landscape` into the segment's authored piste height `H_piste(s, x)` (spine elevation, turn banking, rollers, moguls, and island dividers):
+   $$
+   w_{\text{piste}} = 1 - \text{smoothstep}(W_{\text{half}},\; W_{\text{half}} + W_{\text{blend}},\; |x|)
+   $$
+   $$
+   H(wx, wz) = (1 - w_{\text{piste}})\cdot(Y_{\text{macro}} + dH_{\text{landscape}}) + w_{\text{piste}}\cdot H_{\text{piste}}
+   $$
+4. **Automatic Cliff & Surface Shading:** Steep slopes (`normalY < 0.72`) automatically classify as `rock` and tint to exposed granite/slate `cliffColor` via vertex colors—zero extra shaders or materials.
+
+#### 2-Tier World-Space `TerrainTilePool`
+- **Inner High-LOD Ring:** `32m × 32m` tiles at `1.5–2m` vertex spacing covering `~80–100m` around the skier (biased forward down the camera frustum) for crisp moguls, banked pistes, and cliff lips.
+- **Outer Far-LOD Ring:** `64m × 64m` tiles at `8m` vertex spacing extending out to `~280m` past fog distance so the mountain vanishes naturally into atmospheric fog in every direction.
+- **LOD Seam Skirts & Fast Normals:** Each tile drops a `~2m` vertical perimeter skirt to hide T-junction cracks between `2m` and `8m` LOD rings. Tile builders pre-filter segments by 2D AABB per tile, evaluate height **once per vertex** (plus a 1-vertex border), and compute normals from neighboring grid vertices (~5× faster than per-vertex central differences).
+- **Zero-Upload Rebasing:** Vertices are stored relative to each tile's local `container.position`, so `WORLD_REBASED` shifts only tile container transforms with zero vertex buffer re-uploads.
 
 ```typescript
+export interface BaseSideLandscapeSpec {
+  readonly reliefScale: number;     // Hill height, wall height, or chasm depth (m)
+  readonly transitionWidth: number; // Distance over which piste blends into landscape (m)
+  readonly noiseFrequency: number;
+}
+
+export type NonChasmLandscapeArchetype = 'rollingHills' | 'alpineBowl' | 'canyonWalls';
+
+export type SideLandscapeSpec =
+  | (BaseSideLandscapeSpec & {
+      readonly archetype: NonChasmLandscapeArchetype;
+    })
+  | (BaseSideLandscapeSpec & {
+      readonly archetype: 'chasm';
+      readonly chasmWipeoutDepth: number; // Drop below nearest spine elevation triggering recovery (m)
+      readonly farWallOffsetM?: number;   // Optional distance past piste edge where opposite rim rises (m)
+    });
+
+export type LandscapeArchetype = SideLandscapeSpec['archetype'];
+
+export interface LandscapeProfile {
+  readonly left: SideLandscapeSpec;
+  readonly right: SideLandscapeSpec;
+}
+
+export interface StagePalette {
+  readonly skyTop: string;
+  readonly skyBottom: string;
+  readonly fogColor: string;
+  readonly snowColor: string;
+  readonly shadowSnowTint: string;
+  readonly bankTint: string;
+  readonly iceTint: string;
+  readonly powderTint: string;
+  readonly cliffColor: string;
+  readonly chasmFloorColor?: string;
+  readonly sunColor: string;
+  readonly ambientColor: string;
+  readonly biomeTint: string;
+}
+
+export interface StageSceneryConfig {
+  readonly pineDensity: number;
+  readonly rockDensity: number;
+  readonly groundMinRadius: number;
+  readonly canopyMinRadius: number;
+  readonly offPisteTreeDensity: number;
+}
+
 export interface StageTerrainProfile {
-  pitchDeg: [min: number, max: number];      // e.g., Meadow [8, 12], Black Diamond [24, 34]
-  curveStrength: [min: number, max: number]; // Clamped by ribbon curvature invariant <= 0.4
-  halfWidth: [min: number, max: number];     // Playable corridor half-width (meters)
-  bankingFactor: number;                     // Subtle terrain lean into turns
-  mogulDensity: number;                      // 0..1 bumpiness amplitude
-  icePatchChance: number;                    // Probability of low-grip ice overlays
+  pitchDeg: readonly [min: number, max: number];      // e.g., Meadow [8, 12], Black Diamond [24, 34]
+  curveStrength: readonly [min: number, max: number]; // Clamped by spine curvature invariant
+  halfWidth: readonly [min: number, max: number];     // Playable groomed corridor half-width (meters)
+  bankingFactor: number;                              // Subtle terrain lean into turns
+  mogulDensity: number;                               // 0..1 bumpiness amplitude
+  icePatchChance: number;                             // Probability of low-grip ice overlays
+  powderPatchChance: number;                          // Probability of deep-powder surface patches
 }
 ```
 
@@ -331,7 +401,7 @@ export interface StageTerrainProfile {
 
 Computed headlessly in `src/sim/` in World Space `(X, Y, Z)`:
 - **Base Pose:** Spring-damped trailing distance (`~9–12m`), elevated `~3.2–4.0m`, looking ~18m ahead of the skier so the skier's torso never hides obstacles directly in front. Dynamic subtle **carve roll** and **speed FOV widening** reinforce downhill velocity.
-- **25m Look-Ahead Crest Probe:** Queries terrain height ~25m ahead along the active trail polyline / heading. When approaching a steep convex crest (e.g., Black Diamond drop-off), the camera smoothly **rises higher and pitches down** ahead of the brow to preserve sightlines into the landing pocket (paired with a PCG rule forbidding lethal static obstacles in the immediate post-brow blind zone).
+- **25m Look-Ahead Crest Probe:** Queries `MountainField` ~25m ahead along the skier's actual heading/velocity vector (working identically on-piste and off-piste). When approaching a steep convex crest (e.g., Black Diamond drop-off or off-piste ridge), the camera smoothly **rises higher and pitches down** ahead of the brow to preserve sightlines into the landing pocket (paired with a PCG rule forbidding lethal static obstacles in the immediate post-brow blind zone).
 - **Horizontal-Preserving Responsive FOV:** Three.js locks *vertical* FOV by default, cropping trail edges and forks on 9:16 portrait phones. The camera rig computes vertical FOV dynamically from a target minimum horizontal FOV so mobile portrait and desktop widescreen show the full trail width.
 
 ---
@@ -442,11 +512,11 @@ Each `StageDef` defines independent parallel **Tracks** (`obstacles`, `presents`
 
 ## 10. Procedural Off-Trail Scenery (Dual-Radius Poisson Disk Sampling)
 
-Off-trail mountain flanks (`halfWidth` out to visual horizon skirts) are populated per chunk using **dual-radius Bridson Poisson disk sampling**:
+Off-piste mountain terrain (beyond `halfWidth + 2m` out across the surrounding hills and ridges) is populated deterministically **per world-space terrain tile** using **dual-radius Bridson Poisson disk sampling**:
 
 - **Separate `groundRadius` & `canopyRadius`:** Every scenery rule defines both a trunk/ground footprint and an overhead canopy radius. Small rocks, snowdrifts, and shrubs check only `groundRadius` (so they tuck naturally beneath pine boughs), while large pines check `canopyRadius` against neighboring trees to prevent overlapping crowns.
-- **Environmental Signals & `TierRule` Competition:** Placement fitness is driven by pure functions of `(elevation, slopeDeg, distFromTrail, worldNoise)`. Grouping species inside a `TierRule` selects a single local winner by highest fitness score.
-- **Ridge Visibility Thinning:** A lightweight ray check from the trail centerline out toward candidate off-trail props skips instantiating scenery occluded behind raised mountain ridges, saving mobile GPU triangles and draw calls.
+- **Environmental Signals & `TierRule` Competition:** Placement fitness is driven by pure functions of `(elevation, slopeDeg, distFromTrail, worldNoise)`. Steep cliff/rock slopes (`normalY < 0.78`), groomed pistes, and landmark clearance zones are automatically excluded; grouping species inside a `TierRule` selects a single local winner by highest fitness score.
+- **LOD Density Tapering & Visibility Thinning:** Outer far-LOD terrain tiles taper scenery density sharply so `InstancePools` billboard capacities and mobile GPU draw calls stay bounded across the full `±280m` mountain horizon.
 
 ---
 
@@ -514,11 +584,11 @@ export interface CreatureDef extends HazardDef {
 
 ### 12.2 Adding a New Stage / Biome
 
-1. **Define `StageDef` in `src/content/stages/`:** Specify `id`, badge icon (for fork arches), `StageTerrainProfile` (pitch, curve strength clamped \(\le 0.4\), width, banking, moguls, ice ratio), `WeatherProfile`, sky/snow/fog palette, and surface patch weights.
+1. **Define `StageDef` in `src/content/stages/`:** Specify `id`, badge icon (for fork arches), `StageTerrainProfile` (pitch, curve strength, width, banking, moguls, `icePatchChance`, and `powderPatchChance`), **`LandscapeProfile`** (independent `left`/`right` archetypes such as `rollingHills`, `alpineBowl`, `canyonWalls`, or `chasm`), `StagePalette` (sky/snow/fog/ice/powder tints plus `cliffColor` and optional `chasmFloorColor`), `StageSceneryConfig` (including `offPisteTreeDensity`), `WeatherProfile`, and `forkTargets`.
 2. **Configure Layout Tracks:** Define `TrackConfig[]` combining `Patterns` (`scatter`, `sequence`, `staggered`, `gate`, `cluster`), `Placements` (`onPath`, `slalom`, `nearEdge`, `middle`), `explicitPlacements`, and any `ChunkTemplate` set-pieces.
 3. **Configure Off-Trail Scenery:** Add `TierRule` / `DecorationRule` entries using environmental signals (`elevation`, `slope`, `distFromTrail`) and dual `groundRadius`/`canopyRadius`.
-4. **Register in Pacing Director:** Add the stage ID to the stage registry and shuffled deck weights (`breather` vs. `intense`).
-5. **Verify:** Inspect lighting, fog, density, and `safeX(s)` clearance in `stage-designer.html`, then run the 50 km headless PCG soak test.
+4. **Register in Pacing Director:** Add the stage ID to the stage registry and `forkTargets` / shuffled deck weights (`breather` vs. `intense`).
+5. **Verify:** Inspect lighting, fog, landscape transitions, and `safeX(s)` clearance in `stage-designer.html`, then run the 50 km headless PCG soak test.
 
 ### 12.3 Adding a New Hazard or Creature
 
@@ -550,9 +620,9 @@ Dev overlay displays real-time `dt`, simulation step time, `DrawCalls`, `Triangl
 Before considering any feature complete:
 1. **Type Check:** `npx tsc --noEmit` must pass with zero errors.
 2. **Headless Simulation Unit & Soak Tests (`npm run test:run` via Vitest):**
-   - *Spline & Curvature Tests:* Verify up-locked frames, ribbon curvature invariant \(|\kappa|(W_{\text{half}} + W_{\text{skirt}}) \le 0.4\), and fork seam continuity (`κ=0, β=0`, continuous `sampleSurface` elevation/normal across splits).
-   - *World-Space Ski Physics & Floating-Origin Tests:* Verify slope acceleration, carving friction, ice drift, 3D ballistic crest launches, jump height clearance, wipeout recovery, and zero-artifact 256m floating-origin rebasing.
-   - *50 km PCG Soak Tests:* Simulate **50 km+** of procedural generation across all stages and fork combinations in milliseconds, asserting zero lethal obstacles inside `safeX(s)`, zero post-brow blind traps, guaranteed Delivery Zone cadence (150–250m), and zero NaN/out-of-bounds entities.
+   - *Spline, `MountainField` & Fork Tests:* Verify up-locked frames, broad downhill fall-line bounds, fork seam continuity (`κ=0, β=0`, continuous `sampleSurface` elevation/normal across splits and V-wedge hillsides), ghost-spine prune invariance (no elevation popping within fog radius), and floating-origin absolute-coordinate noise invariance.
+   - *World-Space Ski Physics & Floating-Origin Tests:* Verify slope acceleration, carving friction, ice/powder/rock traction, 3D ballistic crest launches, jump height clearance, off-piste local recovery vs. chasm-fall `safeX` recovery, and zero-artifact 128m floating-origin rebasing.
+   - *50 km PCG Soak Tests:* Simulate **50 km+** of procedural generation across all stages and fork combinations in milliseconds, asserting zero lethal obstacles inside `safeX(s)`, zero post-brow blind traps, zero macro elevation-drift trenches, guaranteed Delivery Zone cadence (150–250m), and zero NaN/out-of-bounds entities.
 
 ---
 

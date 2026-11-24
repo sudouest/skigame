@@ -2,16 +2,17 @@ import * as THREE from 'three';
 import { getCreatureDef } from '../../content/creatures';
 import { getDeliveryZoneDef } from '../../content/deliveryZones';
 import { getHazardDef, getRampDef } from '../../content/hazards';
+import { getStageDef } from '../../content/stages';
 import { clamp, lerp, lerpAngle } from '../../core/math';
 import {
   CREATURE_PHASE_ATTACK,
   CREATURE_PHASE_TELEGRAPH,
   type ReadonlySimState,
 } from '../../sim/contracts';
-import type { ChunkStreamer } from './chunkStreamer';
 import type { GraphicsUtils } from './graphicsUtils';
 import type { ProceduralMeshAssets } from './meshFactory';
 import { ATLAS_FRAMES, type BillboardFrameName } from './spriteAtlas';
+import type { SceneryProvider } from './terrainStreamer';
 import type { SharedToonMaterials } from './toonMaterials';
 
 const MAX_BOULDERS_SMALL = 128;
@@ -20,7 +21,7 @@ const MAX_PRESENTS_STD = 192;
 const MAX_PRESENTS_GOLD = 96;
 const MAX_RAMPS = 48;
 const MAX_DYNAMIC_BILLBOARDS = 256;
-const MAX_STATIC_BILLBOARDS = 1536;
+export const MAX_STATIC_BILLBOARDS = 4096;
 
 const _mat4 = new THREE.Matrix4();
 const _pos = new THREE.Vector3();
@@ -105,6 +106,7 @@ export class InstancePools {
   private readonly dynamicBillboards: BillboardMeshWrapper;
   private readonly staticBillboards: BillboardMeshWrapper;
   private staticPackCount = 0;
+  private lastSceneryRevision = -1;
 
   private readonly packStaticSceneryVisitor = (
     ox: number,
@@ -193,9 +195,13 @@ export class InstancePools {
     this.rootGroup.add(this.dynamicBillboards.mesh, this.staticBillboards.mesh);
   }
 
-  sync(simState: ReadonlySimState, alpha: number, chunkStreamer: ChunkStreamer): void {
+  sync(simState: ReadonlySimState, alpha: number, sceneryProvider: SceneryProvider): void {
     const t = clamp(alpha, 0, 1);
     const elapsed = simState.elapsedSec;
+    const frostedChance =
+      getStageDef(simState.activeStageId)?.layout.scenery.frostedPineChance ?? 0.2;
+    const pineHazardFrame: BillboardFrameName =
+      frostedChance >= 0.5 ? 'pine_frosted' : 'pine_green';
 
     let bSmallCount = 0;
     let bLargeCount = 0;
@@ -224,7 +230,7 @@ export class InstancePools {
         writeUvRect(
           this.dynamicBillboards.uvRectArray,
           dynBbCount,
-          simState.activeStageId === 'icy-black' ? 'pine_frosted' : 'pine_green',
+          pineHazardFrame,
           (i & 1) === 1,
         );
         dynBbCount++;
@@ -413,11 +419,11 @@ export class InstancePools {
       this.dynamicBillboards.uvRectAttr.needsUpdate = true;
     }
 
-    // 6. Static Off-Trail Chunk Scenery (repacked ONLY when chunks stream/prune/rebase!)
-    if (chunkStreamer.sceneryDirty) {
-      chunkStreamer.sceneryDirty = false;
+    // 6. Static Off-Trail Scenery (repacked ONLY when sceneryRevision changes!)
+    if (sceneryProvider.sceneryRevision !== this.lastSceneryRevision) {
+      this.lastSceneryRevision = sceneryProvider.sceneryRevision;
       this.staticPackCount = 0;
-      chunkStreamer.forEachActiveScenery(this.packStaticSceneryVisitor);
+      sceneryProvider.forEachActiveScenery(this.packStaticSceneryVisitor);
 
       this.staticBillboards.mesh.count = this.staticPackCount;
       if (this.staticPackCount > 0) {

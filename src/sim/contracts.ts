@@ -1,6 +1,11 @@
-import type { SurfaceType, VisualSpec } from '../content/types';
+import type {
+  LandscapeProfile,
+  PisteSurfaceType,
+  SurfaceType,
+  VisualSpec,
+} from '../content/types';
 
-export type { SurfaceType };
+export type { PisteSurfaceType, SurfaceType };
 
 /**
  * Coordinate & Angle Conventions (Right-handed +Y up):
@@ -205,11 +210,61 @@ export function createRibbonPointOut(): RibbonPointOut {
   };
 }
 
-export interface SegmentForkMeta {
+export interface SpineProjectionOut {
+  s: number;
+  signedX: number;
+  longExt: number;
+  distSq: number;
+  spineX: number;
+  spineY: number;
+  spineZ: number;
+  forwardX: number;
+  forwardY: number;
+  forwardZ: number;
+  rightX: number;
+  rightZ: number;
+  pitchRad: number;
+  halfWidth: number;
+  dividerHalfWidth: number;
+}
+
+export function createSpineProjectionOut(): SpineProjectionOut {
+  return {
+    s: 0,
+    signedX: 0,
+    longExt: 0,
+    distSq: 0,
+    spineX: 0,
+    spineY: 0,
+    spineZ: 0,
+    forwardX: 0,
+    forwardY: 0,
+    forwardZ: -1,
+    rightX: 1,
+    rightZ: 0,
+    pitchRad: 0,
+    halfWidth: 14,
+    dividerHalfWidth: 0,
+  };
+}
+
+export interface PisteHeightOut {
+  heightY: number;
+  dividerHalfWidth: number;
+  inDivider: boolean;
+}
+
+export function createPisteHeightOut(): PisteHeightOut {
+  return {
+    heightY: 0,
+    dividerHalfWidth: 0,
+    inDivider: false,
+  };
+}
+
+export interface SpineForkMeta {
   /** True when this segment splits at s = length into nextLeft & nextRight. */
   readonly hasFork: boolean;
-  /** Arc length after which static obstacles are forbidden ahead of the fork seam. */
-  readonly obstacleFreeStartS: number;
   readonly leftStageId: string | null;
   readonly rightStageId: string | null;
   /** True when this segment starts immediately downstream of a fork seam (s = 0). */
@@ -224,6 +279,138 @@ export interface SegmentForkMeta {
   readonly seamWorldY: number;
   readonly seamWorldZ: number;
   readonly seamYawRad: number;
+}
+
+export interface SegmentForkMeta extends SpineForkMeta {
+  /** Arc length after which static obstacles are forbidden ahead of the fork seam. */
+  readonly obstacleFreeStartS: number;
+}
+
+export interface SpineView {
+  readonly id: number;
+  readonly stageId: string;
+  readonly seed: number;
+  readonly length: number;
+  readonly skirtWidth: number;
+  readonly fork: SpineForkMeta;
+  readonly landscape?: LandscapeProfile;
+  readonly boundsMinX: number;
+  readonly boundsMaxX: number;
+  readonly boundsMinZ: number;
+  readonly boundsMaxZ: number;
+  readonly macroAnchorCount?: number;
+  readonly macroAnchorX?: Float64Array;
+  readonly macroAnchorY?: Float64Array;
+  readonly macroAnchorZ?: Float64Array;
+
+  sampleSpineFrame(s: number, out: SpineFrameOut): void;
+  projectXZ(wx: number, wz: number, out: SpineProjectionOut): void;
+  evaluatePisteHeight(s: number, x: number, out: PisteHeightOut): void;
+  evaluatePisteSurface(s: number, x: number): PisteSurfaceType;
+}
+
+export interface MountainSpineSource {
+  readonly elevationSpines: readonly SpineView[];
+  collectSpinesInBounds(
+    minX: number,
+    maxX: number,
+    minZ: number,
+    maxZ: number,
+    padM: number,
+    outSpines: SpineView[],
+  ): void;
+}
+
+export interface MountainColumnOut {
+  heightY: number;
+  macroY: number;
+  pisteWeight: number;
+  onPiste: boolean;
+  pisteSurfaceType: PisteSurfaceType;
+  inDivider: boolean;
+  inChasmZone: boolean;
+  chasmWipeoutDepth: number;
+  chasmDepthBelowSpine: number;
+  nearestSpineY: number;
+  nearestSegmentId: number;
+  nearestStageId: string;
+  secondaryStageId: string | null;
+  secondaryStageWeight: number;
+  nearestS: number;
+  nearestSignedX: number;
+  nearestHalfWidth: number;
+  downhillX: number;
+  downhillY: number;
+  downhillZ: number;
+}
+
+export function createMountainColumnOut(): MountainColumnOut {
+  return {
+    heightY: 0,
+    macroY: 0,
+    pisteWeight: 0,
+    onPiste: false,
+    pisteSurfaceType: 'packed',
+    inDivider: false,
+    inChasmZone: false,
+    chasmWipeoutDepth: 0,
+    chasmDepthBelowSpine: 0,
+    nearestSpineY: 0,
+    nearestSegmentId: -1,
+    nearestStageId: 'sunny-blue',
+    secondaryStageId: null,
+    secondaryStageWeight: 0,
+    nearestS: 0,
+    nearestSignedX: 0,
+    nearestHalfWidth: 14,
+    downhillX: 0,
+    downhillY: 0,
+    downhillZ: -1,
+  };
+}
+
+export interface MountainSampleOut extends MountainColumnOut {
+  normalX: number;
+  normalY: number;
+  normalZ: number;
+  surfaceType: SurfaceType;
+}
+
+export function createMountainSampleOut(): MountainSampleOut {
+  return {
+    ...createMountainColumnOut(),
+    normalX: 0,
+    normalY: 1,
+    normalZ: 0,
+    surfaceType: 'packed',
+  };
+}
+
+export interface MountainFieldView {
+  readonly worldSeed: number;
+  readonly originOffsetX: number;
+  readonly originOffsetZ: number;
+  collectSpinesInBounds(
+    minX: number,
+    maxX: number,
+    minZ: number,
+    maxZ: number,
+    padM: number,
+    outSpines: SpineView[],
+  ): void;
+  evaluateHeight(wx: number, wz: number, candidateSpines?: readonly SpineView[]): number;
+  evaluateColumn(
+    wx: number,
+    wz: number,
+    out: MountainColumnOut,
+    candidateSpines?: readonly SpineView[],
+  ): MountainColumnOut;
+  evaluate(
+    wx: number,
+    wz: number,
+    out: MountainSampleOut,
+    candidateSpines?: readonly SpineView[],
+  ): MountainSampleOut;
 }
 
 /**
@@ -552,6 +739,7 @@ export interface ReadonlySimState {
   readonly activeWeather: ActiveWeatherState;
 
   readonly trailWindow: TrailWindowView;
+  readonly mountainField: MountainFieldView;
   readonly rebase: RebaseInfo;
   readonly entities: EntityPoolViews;
   readonly debugDraw: DebugDrawView;

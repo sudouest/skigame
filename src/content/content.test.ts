@@ -35,6 +35,51 @@ describe('content registries & invariants', () => {
     expect(icy!.scoreMultiplier).toBeGreaterThan(sunny!.scoreMultiplier);
     expect(sunny!.forkTargets).toContain('icy-black');
     expect(icy!.forkTargets).toContain('sunny-blue');
+
+    // Contrasting off-piste landscape profiles
+    expect(sunny!.landscape.left.archetype).toBe('rollingHills');
+    expect(sunny!.landscape.right.archetype).toBe('rollingHills');
+    expect(icy!.landscape.left.archetype).toBe('canyonWalls');
+    expect(icy!.landscape.right.archetype).toBe('chasm');
+  });
+
+  it('satisfies terrain patch probabilities, landscape profiles, palette hex colors, and off-piste tree density invariants', () => {
+    const hexColorRegex = /^#[0-9a-fA-F]{6}$/;
+    const validArchetypes = new Set(['rollingHills', 'alpineBowl', 'canyonWalls', 'chasm']);
+
+    for (const stage of getAllStages()) {
+      expect(stage.terrain.icePatchChance).toBeGreaterThanOrEqual(0);
+      expect(stage.terrain.powderPatchChance).toBeGreaterThanOrEqual(0);
+      expect(
+        stage.terrain.icePatchChance + stage.terrain.powderPatchChance,
+      ).toBeLessThanOrEqual(1);
+
+      expect(stage.palette.cliffColor).toMatch(hexColorRegex);
+      if (stage.palette.chasmFloorColor !== undefined) {
+        expect(stage.palette.chasmFloorColor).toMatch(hexColorRegex);
+      }
+
+      expect(stage.layout.scenery.offPisteTreeDensity).toBeGreaterThanOrEqual(0);
+      expect(stage.layout.scenery.offPisteTreeDensity).toBeLessThanOrEqual(1);
+      expect(stage.layout.scenery.frostedPineChance).toBeGreaterThanOrEqual(0);
+      expect(stage.layout.scenery.frostedPineChance).toBeLessThanOrEqual(1);
+
+      for (const side of [stage.landscape.left, stage.landscape.right]) {
+        expect(validArchetypes.has(side.archetype)).toBe(true);
+        expect(side.reliefScale).toBeGreaterThan(0);
+        expect(side.transitionWidth).toBeGreaterThan(0);
+        expect(side.noiseFrequency).toBeGreaterThan(0);
+
+        if (side.archetype === 'chasm') {
+          expect(side.chasmWipeoutDepth).toBeGreaterThan(0);
+          expect(side.chasmWipeoutDepth).toBeLessThan(side.reliefScale);
+          if (side.farWallOffsetM !== undefined) {
+            expect(side.farWallOffsetM).toBeGreaterThan(side.transitionWidth);
+          }
+          expect(stage.palette.chasmFloorColor).toBeDefined();
+        }
+      }
+    }
   });
 
   it('satisfies ribbon curvature safety |k| * (halfWidth + skirtWidth) <= 0.4 and fog floor >= 65m', () => {

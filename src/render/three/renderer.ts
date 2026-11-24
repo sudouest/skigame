@@ -5,7 +5,6 @@ import type { ReadonlySimState, SimEvents } from '../../sim/contracts';
 import { BackpackStack } from './backpackStack';
 import { createBillboardQuadGeometry, createCylindricalBillboardMaterial } from './billboardMaterial';
 import { computeVerticalFovDeg, syncPerspectiveCamera } from './cameraSync';
-import { ChunkStreamer } from './chunkStreamer';
 import { ContactShadows } from './contactShadows';
 import { DebugOverlay3D } from './debugOverlay';
 import {
@@ -15,12 +14,14 @@ import {
 } from './graphicsTracker';
 import { GraphicsUtils } from './graphicsUtils';
 import { InstancePools } from './instancePools';
+import { LandmarkStreamer } from './landmarkStreamer';
 import { createProceduralMeshAssets } from './meshFactory';
 import { createSmoothOutlineMaterial } from './outlineShader';
 import { SkierRig } from './skierRig';
 import { SkiTracks } from './skiTracks';
 import { SnowVfx } from './snowVfx';
 import { createCartoonSpriteAtlasTexture } from './spriteAtlas';
+import { TerrainStreamer } from './terrainStreamer';
 import { createSharedToonMaterials, type SharedToonMaterials } from './toonMaterials';
 import { TossedPresents } from './tossedPresents';
 
@@ -31,6 +32,7 @@ export interface ThreeRendererOptions {
   readonly headless?: boolean;
   readonly nowSec?: () => number;
   readonly nowMs?: () => number;
+  readonly assetWaiter?: (modelId: string) => Promise<void> | null;
 }
 
 export interface ThreeRendererStats {
@@ -53,7 +55,8 @@ export class ThreeRenderer {
   readonly camera: THREE.PerspectiveCamera;
   readonly tracker: GraphicsTracker;
   readonly gfx: GraphicsUtils;
-  readonly chunkStreamer: ChunkStreamer;
+  readonly terrainStreamer: TerrainStreamer;
+  readonly landmarkStreamer: LandmarkStreamer;
 
   private readonly nowMs: () => number;
   private readonly container: HTMLElement | null;
@@ -84,6 +87,9 @@ export class ThreeRenderer {
   private lastMinHFovDeg = 66;
   private lastSpeedFovBoostDeg = 0;
   private lastRebaseCount = 0;
+  private lastOriginOffsetX = 0;
+  private lastOriginOffsetY = 0;
+  private lastOriginOffsetZ = 0;
   private lastTickCount = -1;
   private contextLost = false;
   private disposed = false;
@@ -170,10 +176,15 @@ export class ThreeRenderer {
     const billboardQuadGeo = createBillboardQuadGeometry(this.gfx);
 
     // Subsystems
-    this.chunkStreamer = new ChunkStreamer(this.gfx, this.sharedMaterials, meshAssets, {
+    this.terrainStreamer = new TerrainStreamer(this.gfx, this.sharedMaterials, {
       nowMs: options.nowMs,
     });
-    this.scene.add(this.chunkStreamer.ribbonPool.rootGroup);
+    this.scene.add(this.terrainStreamer.tilePool.rootGroup);
+
+    this.landmarkStreamer = new LandmarkStreamer(this.gfx, this.sharedMaterials, meshAssets, {
+      assetWaiter: options.assetWaiter,
+    });
+    this.scene.add(this.landmarkStreamer.rootGroup);
 
     this.instancePools = new InstancePools(
       this.gfx,
@@ -219,9 +230,16 @@ export class ThreeRenderer {
     this.unsubscribers.push(
       eventBus.on('WORLD_REBASED', (ev) => {
         if (ev.rebaseCount > this.lastRebaseCount) {
+          const dx = ev.totalOffsetX - this.lastOriginOffsetX;
+          const dy = ev.totalOffsetY - this.lastOriginOffsetY;
+          const dz = ev.totalOffsetZ - this.lastOriginOffsetZ;
           this.lastRebaseCount = ev.rebaseCount;
-          this.chunkStreamer.handleWorldRebased(ev.deltaX, ev.deltaY, ev.deltaZ);
-          this.snowVfx.handleWorldRebased(ev.deltaX, ev.deltaY, ev.deltaZ);
+          this.lastOriginOffsetX = ev.totalOffsetX;
+          this.lastOriginOffsetY = ev.totalOffsetY;
+          this.lastOriginOffsetZ = ev.totalOffsetZ;
+          this.terrainStreamer.handleWorldRebased(dx, dy, dz);
+          this.landmarkStreamer.handleWorldRebased(dx, dy, dz);
+          this.snowVfx.handleWorldRebased(dx, dy, dz);
         }
       }),
       eventBus.on('PRESENT_PICKED_UP', (ev) => {
@@ -275,19 +293,22 @@ export class ThreeRenderer {
     // Safeguard in case state reset or rebased before event listener attachment
     if (simState.tickCount < this.lastTickCount || simState.rebase.rebaseCount < this.lastRebaseCount) {
       this.lastRebaseCount = simState.rebase.rebaseCount;
-      this.chunkStreamer.clearAll();
+      this.lastOriginOffsetX = simState.rebase.offsetX;
+      this.lastOriginOffsetY = simState.rebase.offsetY;
+      this.lastOriginOffsetZ = simState.rebase.offsetZ;
+      this.terrainStreamer.clearAll();
+      this.landmarkStreamer.clearAll();
     } else if (simState.rebase.rebaseCount > this.lastRebaseCount) {
+      const dx = simState.rebase.offsetX - this.lastOriginOffsetX;
+      const dy = simState.rebase.offsetY - this.lastOriginOffsetY;
+      const dz = simState.rebase.offsetZ - this.lastOriginOffsetZ;
       this.lastRebaseCount = simState.rebase.rebaseCount;
-      this.chunkStreamer.handleWorldRebased(
-        simState.rebase.lastDeltaX,
-        simState.rebase.lastDeltaY,
-        simState.rebase.lastDeltaZ,
-      );
-      this.snowVfx.handleWorldRebased(
-        simState.rebase.lastDeltaX,
-        simState.rebase.lastDeltaY,
-        simState.rebase.lastDeltaZ,
-      );
+      this.lastOriginOffsetX = simState.rebase.offsetX;
+      this.lastOriginOffsetY = simState.rebase.offsetY;
+      this.lastOriginOffsetZ = simState.rebase.offsetZ;
+      this.terrainStreamer.handleWorldRebased(dx, dy, dz);
+      this.landmarkStreamer.handleWorldRebased(dx, dy, dz);
+      this.snowVfx.handleWorldRebased(dx, dy, dz);
     }
     this.lastTickCount = simState.tickCount;
 
@@ -314,9 +335,25 @@ export class ThreeRenderer {
     const effectiveBudgetMs =
       budgetMs !== undefined
         ? Math.max(1, budgetMs)
-        : Math.max(14 - Math.max(0, this.nowMs() - syncStartMs), 1);
-    this.chunkStreamer.step(simState.trailWindow, effectiveBudgetMs);
-    this.instancePools.sync(simState, alpha, this.chunkStreamer);
+        : Math.max(5 - Math.max(0, this.nowMs() - syncStartMs), 1);
+
+    const camDx = simState.currCamera.lookAtX - simState.currCamera.posX;
+    const camDz = simState.currCamera.lookAtZ - simState.currCamera.posZ;
+    const camLen = Math.hypot(camDx, camDz);
+    const camFwdX = camLen > 1e-4 ? camDx / camLen : -Math.sin(simState.currSkier.headingRad);
+    const camFwdZ = camLen > 1e-4 ? camDz / camLen : -Math.cos(simState.currSkier.headingRad);
+
+    this.landmarkStreamer.sync(simState.trailWindow);
+    this.terrainStreamer.step(
+      simState.trailWindow,
+      simState.mountainField,
+      simState.currSkier.posX,
+      simState.currSkier.posZ,
+      camFwdX,
+      camFwdZ,
+      effectiveBudgetMs,
+    );
+    this.instancePools.sync(simState, alpha, this.terrainStreamer);
 
     if (this.renderer && !this.contextLost) {
       this.renderer.render(this.scene, this.camera);
@@ -325,7 +362,7 @@ export class ThreeRenderer {
     if (this.profiler) {
       this.profiler.setCounter('drawCalls', this.renderer?.info.render.calls ?? 0);
       this.profiler.setCounter('triangles', this.renderer?.info.render.triangles ?? 0);
-      this.profiler.setCounter('activeChunks', this.chunkStreamer.activeChunkCount);
+      this.profiler.setCounter('activeChunks', this.terrainStreamer.activeTileCount);
       this.profiler.setCounter('trackedObjects', this.tracker.getStats().activeObjects);
     }
   }
@@ -341,8 +378,8 @@ export class ThreeRenderer {
       triangles: this.renderer?.info.render.triangles ?? 0,
       geometries: this.renderer?.info.memory.geometries ?? 0,
       textures: this.renderer?.info.memory.textures ?? 0,
-      activeChunks: this.chunkStreamer.activeChunkCount,
-      queuedChunks: this.chunkStreamer.queuedChunkCount,
+      activeChunks: this.terrainStreamer.activeTileCount,
+      queuedChunks: this.terrainStreamer.queuedTileCount,
       contextLost: this.contextLost,
     };
   }
@@ -366,7 +403,8 @@ export class ThreeRenderer {
       this.renderer.dispose();
     }
 
-    this.chunkStreamer.clearAll();
+    this.terrainStreamer.clearAll();
+    this.landmarkStreamer.clearAll();
     this.skierRig.dispose();
     this.tracker.disposeAll();
   }

@@ -1,5 +1,6 @@
 export * from './math';
 export * from './rng';
+export * from './noise';
 export * from './pool';
 export * from './eventBus';
 export * from './spatialGrid';

@@ -1,6 +1,6 @@
 import { EventBus } from '../core/eventBus';
 import { clamp, damp, lerp } from '../core/math';
-import { SeededRng } from '../core/rng';
+import { normalizeSeedUint, SeededRng } from '../core/rng';
 import { SpatialGrid } from '../core/spatialGrid';
 import { getSkierDef } from '../content/characters';
 import { getCreatureDef } from '../content/creatures';
@@ -17,6 +17,7 @@ import {
   type CameraPose,
   type DebugDrawView,
   type EntityPoolViews,
+  type MountainFieldView,
   type PlayerIntent,
   type ReadonlySimState,
   type RebaseInfo,
@@ -30,6 +31,7 @@ import { CreatureSystem } from './creatureSystem';
 import { DebugDrawBuffer } from './debugDrawBuffer';
 import { EntityPools } from './entityPools';
 import { LayoutEngine, PacingDirector } from './layoutEngine';
+import { MountainField } from './mountainField';
 import {
   copySkierPose,
   createMutableSkierPose,
@@ -37,7 +39,7 @@ import {
   type MutableSkierPose,
 } from './skiPhysics';
 import type { TrailSegment } from './trailSegment';
-import { TrailWindow } from './trailWindow';
+import { DEFAULT_FORK_PRUNE_DISTANCE_M, TrailWindow } from './trailWindow';
 
 export const WORLD_REBASE_THRESHOLD_M = 128;
 const MAX_CARRY_CAPACITY = 16;
@@ -98,6 +100,7 @@ interface MutableSimState {
   };
 
   readonly trailWindow: TrailWindowView;
+  readonly mountainField: MountainFieldView;
   readonly rebase: {
     rebaseCount: number;
     offsetX: number;
@@ -123,6 +126,7 @@ export class SkiSimulation {
   private readonly pacingDirector: PacingDirector;
   private readonly layoutEngine: LayoutEngine;
   private readonly trailWindow: TrailWindow;
+  private readonly mountainField: MountainField;
   private readonly pools: EntityPools;
   private readonly physics: SkiPhysics;
   private readonly creatureSystem: CreatureSystem;
@@ -285,6 +289,7 @@ export class SkiSimulation {
     this.trailWindow = new TrailWindow(this.seed, this.startStageId, (segment) => {
       this.onSegmentCreated(segment);
     });
+    this.mountainField = new MountainField(this.trailWindow);
 
     this.state = {
       tickCount: 0,
@@ -331,6 +336,7 @@ export class SkiSimulation {
       },
 
       trailWindow: this.trailWindow,
+      mountainField: this.mountainField,
       rebase: {
         rebaseCount: 0,
         offsetX: 0,
@@ -441,6 +447,8 @@ export class SkiSimulation {
     this.state.rebase.lastDeltaX = 0;
     this.state.rebase.lastDeltaY = 0;
     this.state.rebase.lastDeltaZ = 0;
+    this.mountainField.setWorldSeed(normalizeSeedUint(this.seed));
+    this.mountainField.setOriginOffset(0, 0);
 
     // Reset trail window after clearing pools so segment creation bakes cleanly into empty pools
     this.trailWindow.reset(seed, this.startStageId);
@@ -568,6 +576,9 @@ export class SkiSimulation {
     const windowResult = this.trailWindow.updateProgression(
       this.state.surfaceSample.segmentId,
       this.state.surfaceSample.s,
+      DEFAULT_FORK_PRUNE_DISTANCE_M,
+      curr.posX,
+      curr.posZ,
     );
     if (windowResult.forkEntered) {
       this.state.activeStageId = windowResult.forkEntered.newSegment.stageId;
@@ -1007,6 +1018,7 @@ export class SkiSimulation {
     this.state.rebase.offsetX += dx;
     this.state.rebase.offsetY += dy;
     this.state.rebase.offsetZ += dz;
+    this.mountainField.setOriginOffset(this.state.rebase.offsetX, this.state.rebase.offsetZ);
     this.state.rebase.lastDeltaX = dx;
     this.state.rebase.lastDeltaY = dy;
     this.state.rebase.lastDeltaZ = dz;

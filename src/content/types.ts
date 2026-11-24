@@ -3,7 +3,8 @@
  * Zero Three.js imports, zero DOM imports, zero simulation imports.
  */
 
-export type SurfaceType = 'packed' | 'powder' | 'ice';
+export type PisteSurfaceType = 'packed' | 'powder' | 'ice';
+export type SurfaceType = PisteSurfaceType | 'rock';
 
 export type ProceduralVisualPreset =
   | 'pine'
@@ -49,7 +50,10 @@ export interface StageTerrainProfile {
   readonly curveStrength: readonly [min: number, max: number];
   /** Playable corridor half-width range in meters. */
   readonly halfWidth: readonly [min: number, max: number];
-  /** Outer scenic snowbank & flank skirt width beyond halfWidth in meters. */
+  /**
+   * Outer scenic snowbank & flank skirt width beyond halfWidth in meters.
+   * Governs the legacy `RibbonPool` mesh skirt until Milestone 3 retires `RibbonPool` in favor of `TerrainTilePool` + `transitionWidth`.
+   */
   readonly skirtWidth: number;
   /** Subtle terrain bank angle factor into turns. */
   readonly bankingFactor: number;
@@ -116,6 +120,8 @@ export interface StageSceneryConfig {
   readonly rockDensity: number;
   readonly groundMinRadius: number;
   readonly canopyMinRadius: number;
+  readonly offPisteTreeDensity: number;
+  readonly frostedPineChance: number;
 }
 
 export interface StagePalette {
@@ -127,9 +133,38 @@ export interface StagePalette {
   readonly bankTint: string;
   readonly iceTint: string;
   readonly powderTint: string;
+  readonly cliffColor: string;
+  readonly chasmFloorColor?: string;
   readonly sunColor: string;
   readonly ambientColor: string;
   readonly biomeTint: string;
+}
+
+export interface BaseSideLandscapeSpec {
+  readonly reliefScale: number;
+  readonly transitionWidth: number;
+  readonly noiseFrequency: number;
+}
+
+export type NonChasmLandscapeArchetype = 'rollingHills' | 'alpineBowl' | 'canyonWalls';
+
+export type SideLandscapeSpec =
+  | (BaseSideLandscapeSpec & {
+      readonly archetype: NonChasmLandscapeArchetype;
+    })
+  | (BaseSideLandscapeSpec & {
+      readonly archetype: 'chasm';
+      /** Vertical drop below nearest spine elevation triggering chasm wipeout recovery (m). */
+      readonly chasmWipeoutDepth: number;
+      /** Optional distance past piste edge where opposite chasm rim rises (m). */
+      readonly farWallOffsetM?: number;
+    });
+
+export type LandscapeArchetype = SideLandscapeSpec['archetype'];
+
+export interface LandscapeProfile {
+  readonly left: SideLandscapeSpec;
+  readonly right: SideLandscapeSpec;
 }
 
 export interface StageBadge {
@@ -159,9 +194,9 @@ export interface StageDef {
   readonly scoreMultiplier: number;
   readonly badge: StageBadge;
   readonly terrain: StageTerrainProfile;
+  readonly landscape: LandscapeProfile;
   readonly weather: WeatherProfile;
   readonly palette: StagePalette;
-  readonly surfaceWeights: Readonly<Record<SurfaceType, number>>;
   readonly layout: StageLayoutConfig;
   readonly forkTargets: readonly string[];
 }

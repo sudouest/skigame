@@ -180,14 +180,29 @@ export class SkiPhysics {
       vFwd = Math.max(0, vFwd + Math.abs(carvedTransfer) * 0.25);
 
       // Surface drag (powder & snowbanks add extra drag; braking applies snowplow deceleration)
-      let quadDrag = 0.0064;
-      let linearDrag = 0.035;
-      if (surface.surfaceType === 'powder') {
-        quadDrag = 0.0095;
-        linearDrag = 0.16;
-      } else if (surface.surfaceType === 'ice') {
-        quadDrag = 0.0052;
-        linearDrag = 0.015;
+      let quadDrag: number;
+      let linearDrag: number;
+      switch (surface.surfaceType) {
+        case 'packed':
+          quadDrag = 0.0064;
+          linearDrag = 0.035;
+          break;
+        case 'powder':
+          quadDrag = 0.0095;
+          linearDrag = 0.16;
+          break;
+        case 'ice':
+          quadDrag = 0.0052;
+          linearDrag = 0.015;
+          break;
+        case 'rock':
+          quadDrag = 0.0048;
+          linearDrag = 0.01;
+          break;
+        default: {
+          const _exhaustive: never = surface.surfaceType;
+          throw new Error(`Unhandled surface type: ${String(_exhaustive)}`);
+        }
       }
       if (surface.inBank) {
         linearDrag += 0.45;
@@ -349,13 +364,23 @@ export class SkiPhysics {
   }
 
   private computeSurfaceGrip(surfaceType: SurfaceType, skierDef: SkierDef): number {
-    let base = 1.0;
-    if (surfaceType === 'powder') {
-      base = 0.72;
-    } else if (surfaceType === 'ice') {
-      base = 0.25;
-      if (skierDef.perk?.type === 'iceGrip') {
-        base *= skierDef.perk.value;
+    let base: number;
+    switch (surfaceType) {
+      case 'packed':
+        base = 1.0;
+        break;
+      case 'powder':
+        base = 0.72;
+        break;
+      case 'ice':
+        base = 0.25 * (skierDef.perk?.type === 'iceGrip' ? skierDef.perk.value : 1);
+        break;
+      case 'rock':
+        base = 0.15;
+        break;
+      default: {
+        const _exhaustive: never = surfaceType;
+        throw new Error(`Unhandled surface type: ${String(_exhaustive)}`);
       }
     }
     return base * skierDef.stats.carveGrip;

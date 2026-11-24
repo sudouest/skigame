@@ -45,20 +45,37 @@ export {
 } from './meshFactory';
 export { SkierRig } from './skierRig';
 export {
-  RIBBON_COLS,
-  RIBBON_POOL_CAPACITY,
-  RIBBON_ROWS,
-  RIBBON_VERT_COLS,
-  RIBBON_VERT_ROWS,
-  RibbonPool,
-  type RibbonChunkSlot,
-} from './ribbonPool';
+  INNER_TILE_POOL_CAPACITY,
+  INNER_TILE_QUADS,
+  INNER_TILE_SIZE_M,
+  INNER_TILE_SKIRT_DEPTH_M,
+  INNER_TILE_SPACING_M,
+  INNER_TILE_VERT_SPAN,
+  OUTER_TILE_POOL_CAPACITY,
+  OUTER_TILE_QUADS,
+  OUTER_TILE_SIZE_M,
+  OUTER_TILE_SKIRT_DEPTH_M,
+  OUTER_TILE_SPACING_M,
+  OUTER_TILE_VERT_SPAN,
+  TERRAIN_LOD_SPECS,
+  TerrainTilePool,
+  type TerrainLodSpec,
+  type TerrainLodTier,
+  type TerrainTilePoolOptions,
+  type TerrainTileSlot,
+} from './terrainTilePool';
 export {
-  ChunkStreamer,
-  type ChunkSceneryItem,
-  type ChunkStreamerOptions,
-} from './chunkStreamer';
-export { InstancePools } from './instancePools';
+  TerrainStreamer,
+  packTileKey,
+  type SceneryProvider,
+  type TerrainStreamerOptions,
+  type TileSceneryItem,
+} from './terrainStreamer';
+export {
+  LandmarkStreamer,
+  type LandmarkStreamerOptions,
+} from './landmarkStreamer';
+export { InstancePools, MAX_STATIC_BILLBOARDS } from './instancePools';
 export { ContactShadows } from './contactShadows';
 export { BackpackStack } from './backpackStack';
 export { TossedPresents } from './tossedPresents';

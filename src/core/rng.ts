@@ -11,16 +11,22 @@ export function hashString(input: string): number {
 }
 
 /**
+ * Stateless deterministic 2D integer hash returning an unsigned 32-bit integer.
+ */
+export function hashCoords2DU32(ix: number, iz: number, seed = 0): number {
+  let h = (seed ^ Math.imul(ix | 0, 374761393) ^ Math.imul(iz | 0, 668265263)) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+/**
  * Stateless deterministic 2D integer hash returning a float in [0, 1).
  */
 export function hashCoords2D(ix: number, iz: number, seed = 0): number {
-  let h = (seed ^ Math.imul(ix | 0, 374761393) ^ Math.imul(iz | 0, 668265263)) >>> 0;
-  h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
-  h = (h ^ (h >>> 16)) >>> 0;
-  return h / 4294967296;
+  return hashCoords2DU32(ix, iz, seed) / 4294967296;
 }
 
-function normalizeSeed(seed: number | string): number {
+export function normalizeSeedUint(seed: number | string): number {
   if (typeof seed === 'string') {
     return hashString(seed);
   }
@@ -34,7 +40,7 @@ export class SeededRng {
   private state: number;
 
   constructor(seed: number | string = 1) {
-    this.state = normalizeSeed(seed);
+    this.state = normalizeSeedUint(seed);
   }
 
   getState(): number {
