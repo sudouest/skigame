@@ -307,8 +307,8 @@ export function formatTiltStatusText(enabled: boolean, status: TiltControlStatus
       return 'Motion access denied — allow in browser settings';
     case 'requesting':
       return 'Waiting for motion sensor permission…';
-    case 'calibrating':
-      return enabled ? 'Hold steady — calibrating tilt…' : '';
+    case 'waiting':
+      return enabled ? 'Waiting for motion sensors…' : '';
     case 'active':
       return 'Tilt device left/right to carve · Tap to jump';
     case 'no-sensor':

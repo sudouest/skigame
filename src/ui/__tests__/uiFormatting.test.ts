@@ -303,7 +303,10 @@ describe('UI formatting & architectural isolation', () => {
     expect(formatTiltStatusText(false, 'inactive')).toBe('');
     expect(formatTiltStatusText(false, 'insecure')).toContain('HTTPS');
     expect(formatTiltStatusText(false, 'denied')).toContain('denied');
-    expect(formatTiltStatusText(true, 'calibrating')).toContain('calibrating');
+    expect(formatTiltStatusText(false, 'requesting')).toContain('permission');
+    expect(formatTiltStatusText(false, 'unsupported')).toContain('unavailable');
+    expect(formatTiltStatusText(false, 'waiting')).toBe('');
+    expect(formatTiltStatusText(true, 'waiting')).toContain('Waiting');
     expect(formatTiltStatusText(true, 'active')).toContain('Tilt device');
     expect(formatTiltStatusText(true, 'no-sensor')).toContain('touch drag');
     expect(formatControlsHint(false)).toContain('Drag');

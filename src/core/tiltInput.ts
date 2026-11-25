@@ -5,7 +5,7 @@ export type TiltControlStatus =
   | 'insecure'
   | 'inactive'
   | 'requesting'
-  | 'calibrating'
+  | 'waiting'
   | 'active'
   | 'denied'
   | 'no-sensor';
@@ -60,7 +60,6 @@ export interface TiltPermissionHost {
 export interface TiltInputOptions {
   readonly deadzoneDeg?: number;
   readonly maxTiltDeg?: number;
-  readonly maxCalibrationDeg?: number;
   readonly curveExponent?: number;
   readonly orientationSmoothTauSec?: number;
   readonly motionSmoothTauSec?: number;
@@ -242,36 +241,33 @@ export function computeTiltFromAcceleration(
 }
 
 /**
- * Maps a signed lateral tilt angle relative to `neutralRad` into normalized steering `[-1, 1]`
- * with deadzone rejection and gentle non-linear response curve.
+ * Maps a signed lateral tilt angle (relative to level horizon 0 rad) into normalized
+ * steering `[-1, 1]` with deadzone rejection and a gentle non-linear response curve.
  */
 export function mapTiltRadToSteer(
   tiltRad: number,
-  neutralRad: number,
   deadzoneRad: number,
   maxTiltRad: number,
   curveExponent: number,
 ): number {
-  const delta = tiltRad - neutralRad;
-  const absDelta = Math.abs(delta);
-  if (absDelta <= deadzoneRad) {
+  const absTilt = Math.abs(tiltRad);
+  if (absTilt <= deadzoneRad) {
     return 0;
   }
   const span = Math.max(1e-4, maxTiltRad - deadzoneRad);
-  const norm = clamp((absDelta - deadzoneRad) / span, 0, 1);
+  const norm = clamp((absTilt - deadzoneRad) / span, 0, 1);
   const curved = Math.pow(norm, curveExponent);
-  return delta >= 0 ? curved : -curved;
+  return tiltRad >= 0 ? curved : -curved;
 }
 
 /**
  * Cross-platform mobile accelerometer & tilt steering controller.
  * Supports iOS/iPadOS 13+ permission flow, Android/W3C sign normalization,
- * automatic screen-orientation axis remapping, calibration, and zero-allocation sampling.
+ * automatic screen-orientation axis remapping, level-horizon neutral, and zero-allocation sampling.
  */
 export class TiltInputController {
   private readonly deadzoneRad: number;
   private readonly maxTiltRad: number;
-  private readonly maxCalibrationRad: number;
   private readonly curveExponent: number;
   private readonly orientationSmoothTauSec: number;
   private readonly motionSmoothTauSec: number;
@@ -294,8 +290,6 @@ export class TiltInputController {
 
   private hasFilteredTilt = false;
   private filteredTiltRad = 0;
-  private neutralTiltRad = 0;
-  private pendingCalibration = true;
   private steerValue = 0;
 
   private readonly onDeviceOrientationListener = (ev: unknown): void => {
@@ -311,7 +305,6 @@ export class TiltInputController {
   constructor(options: TiltInputOptions = {}) {
     this.deadzoneRad = (options.deadzoneDeg ?? 3.0) * DEG_TO_RAD;
     this.maxTiltRad = (options.maxTiltDeg ?? 26.0) * DEG_TO_RAD;
-    this.maxCalibrationRad = (options.maxCalibrationDeg ?? 18.0) * DEG_TO_RAD;
     this.curveExponent = options.curveExponent ?? 1.35;
     this.orientationSmoothTauSec = options.orientationSmoothTauSec ?? 0.045;
     this.motionSmoothTauSec = options.motionSmoothTauSec ?? 0.085;
@@ -407,6 +400,7 @@ export class TiltInputController {
             (res) => res.status === 'fulfilled' && res.value === 'granted',
           );
           if (!anyGranted) {
+            this.detachSensorListeners();
             this._enabled = false;
             this._status = 'denied';
             return 'denied';
@@ -427,14 +421,12 @@ export class TiltInputController {
 
   private activateListeners(host: TiltPermissionHost): TiltControlStatus {
     this._enabled = true;
-    this._status = 'calibrating';
+    this._status = 'waiting';
     this.enabledAtMs = this.nowMs();
     this.lastOrientationEventMs = -Infinity;
     this.lastSampleMs = -Infinity;
     this.hasFilteredTilt = false;
     this.filteredTiltRad = 0;
-    this.neutralTiltRad = 0;
-    this.pendingCalibration = true;
     this.steerValue = 0;
 
     this.attachSensorListeners(host);
@@ -448,70 +440,38 @@ export class TiltInputController {
     this._enabled = false;
     this.hasFilteredTilt = false;
     this.filteredTiltRad = 0;
-    this.neutralTiltRad = 0;
-    this.pendingCalibration = true;
     this.lastOrientationEventMs = -Infinity;
     this.lastSampleMs = -Infinity;
     this.steerValue = 0;
     this._status = this.computeBaseStatus();
   }
 
-  recenter(): void {
-    if (!this._enabled) return;
-    if (this.hasFilteredTilt) {
-      this.neutralTiltRad = clamp(
-        this.filteredTiltRad,
-        -this.maxCalibrationRad,
-        this.maxCalibrationRad,
-      );
-      this.pendingCalibration = false;
-      this._status = 'active';
-      this.steerValue = mapTiltRadToSteer(
-        this.filteredTiltRad,
-        this.neutralTiltRad,
-        this.deadzoneRad,
-        this.maxTiltRad,
-        this.curveExponent,
-      );
-    } else {
-      this.pendingCalibration = true;
-      this.steerValue = 0;
-      if (this.listenersAttached && this._status === 'active') {
-        this._status = 'calibrating';
-        this.enabledAtMs = this.nowMs();
-      }
-    }
-  }
-
   /**
    * Zeroes transient steering across start/pause/restart transitions while keeping
-   * tilt mode enabled and preserving an already-established neutral hold calibration.
+   * tilt mode enabled.
    */
   resetForTransition(): void {
     this.steerValue = 0;
     this.lastSampleMs = -Infinity;
     if (!this._enabled) return;
 
-    if (this.listenersAttached && this._status === 'active' && this.hasFilteredTilt && !this.pendingCalibration) {
+    if (this.listenersAttached && this._status === 'active' && this.hasFilteredTilt) {
       return;
     }
 
     this.hasFilteredTilt = false;
-    this.pendingCalibration = true;
     if (this.listenersAttached && this._status !== 'no-sensor') {
-      this._status = 'calibrating';
+      this._status = 'waiting';
       this.enabledAtMs = this.nowMs();
     }
   }
 
   handleOrientationChange(): void {
     this.hasFilteredTilt = false;
-    this.neutralTiltRad = 0;
-    this.pendingCalibration = true;
     this.lastSampleMs = -Infinity;
     this.steerValue = 0;
     if (this._enabled && this.listenersAttached && this._status !== 'no-sensor') {
-      this._status = 'calibrating';
+      this._status = 'waiting';
       this.enabledAtMs = this.nowMs();
     }
   }
@@ -568,7 +528,7 @@ export class TiltInputController {
 
   sampleSteer(): number {
     if (!this._enabled) return 0;
-    if (this._status === 'calibrating') {
+    if (this._status === 'waiting') {
       if (this.nowMs() - this.enabledAtMs >= this.noSensorTimeoutMs) {
         this._status = 'no-sensor';
       }
@@ -591,19 +551,9 @@ export class TiltInputController {
     }
     this.lastSampleMs = nowMs;
 
-    if (this.pendingCalibration) {
-      this.neutralTiltRad = clamp(
-        this.filteredTiltRad,
-        -this.maxCalibrationRad,
-        this.maxCalibrationRad,
-      );
-      this.pendingCalibration = false;
-    }
-
     this._status = 'active';
     this.steerValue = mapTiltRadToSteer(
       this.filteredTiltRad,
-      this.neutralTiltRad,
       this.deadzoneRad,
       this.maxTiltRad,
       this.curveExponent,

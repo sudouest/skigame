@@ -187,9 +187,9 @@ describe('InputManager', () => {
 
     await input.enableTilt();
     expect(input.tiltEnabled).toBe(true);
-    expect(input.tiltStatus).toBe('calibrating');
+    expect(input.tiltStatus).toBe('waiting');
 
-    // While calibrating (not yet active), horizontal touch drag still works as fallback
+    // While waiting (not yet active), horizontal touch drag still works as fallback
     pointerTarget.dispatch('pointerdown', { pointerId: 1, clientX: 400, clientY: 500, isPrimary: true });
     pointerTarget.dispatch('pointermove', { pointerId: 1, clientX: 450, clientY: 500 });
     input.sampleFrameInto(state);
@@ -227,9 +227,8 @@ describe('InputManager', () => {
     expect(state.steer).toBe(-1);
     input.handleKeyUp({ code: 'KeyA' });
 
-    // DeviceMotion fallback & explicit recenter survive resetAll(), and menu sampling does not latch hasSteered
+    // DeviceMotion fallback & resetAll() keep tilt enabled, and menu sampling does not latch hasSteered
     input.handleDeviceMotion({ accelerationIncludingGravity: { x: 0, y: 0, z: 9.81 } });
-    input.recenterTilt();
     input.resetAll();
     expect(input.tiltEnabled).toBe(true);
     input.sampleFrameInto(state);

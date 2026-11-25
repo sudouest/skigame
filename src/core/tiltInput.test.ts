@@ -196,13 +196,13 @@ describe('tiltInput pure math & platform normalization', () => {
     expect(computeTiltFromAcceleration(18, 18, 0, 0, -1)).toBeNull();
   });
 
-  it('maps tilt angles with deadzone and response curve cleanly', () => {
+  it('maps tilt angles with deadzone and response curve cleanly around level 0 deg', () => {
     const d2r = Math.PI / 180;
-    expect(mapTiltRadToSteer(2 * d2r, 0, 3 * d2r, 26 * d2r, 1.35)).toBe(0);
-    expect(mapTiltRadToSteer(-2.5 * d2r, 0, 3 * d2r, 26 * d2r, 1.35)).toBe(0);
-    expect(mapTiltRadToSteer(26 * d2r, 0, 3 * d2r, 26 * d2r, 1.35)).toBeCloseTo(1, 6);
-    expect(mapTiltRadToSteer(-35 * d2r, 0, 3 * d2r, 26 * d2r, 1.35)).toBeCloseTo(-1, 6);
-    const mid = mapTiltRadToSteer(14.5 * d2r, 0, 3 * d2r, 26 * d2r, 1.35);
+    expect(mapTiltRadToSteer(2 * d2r, 3 * d2r, 26 * d2r, 1.35)).toBe(0);
+    expect(mapTiltRadToSteer(-2.5 * d2r, 3 * d2r, 26 * d2r, 1.35)).toBe(0);
+    expect(mapTiltRadToSteer(26 * d2r, 3 * d2r, 26 * d2r, 1.35)).toBeCloseTo(1, 6);
+    expect(mapTiltRadToSteer(-35 * d2r, 3 * d2r, 26 * d2r, 1.35)).toBeCloseTo(-1, 6);
+    const mid = mapTiltRadToSteer(14.5 * d2r, 3 * d2r, 26 * d2r, 1.35);
     expect(mid).toBeGreaterThan(0.3);
     expect(mid).toBeLessThan(0.5);
   });
@@ -251,11 +251,11 @@ describe('TiltInputController lifecycle, permissions, and fallback', () => {
     expect(deniedStatus).toBe('denied');
     expect(ctrl.enabled).toBe(false);
 
-    // Granted test -> calibrating -> active on first finite sensor sample
+    // Granted test -> waiting -> active on first finite sensor sample
     host.DeviceOrientationEvent.requestPermission = async () => 'granted';
     host.DeviceMotionEvent.requestPermission = async () => 'granted';
     const okStatus = await ctrl.enable();
-    expect(okStatus).toBe('calibrating');
+    expect(okStatus).toBe('waiting');
     expect(ctrl.enabled).toBe(true);
     expect(host.listenerCount('deviceorientation')).toBe(1);
     expect(host.listenerCount('devicemotion')).toBe(1);
@@ -263,33 +263,22 @@ describe('TiltInputController lifecycle, permissions, and fallback', () => {
 
     // Null readings (e.g. desktop Chrome without sensors) must be ignored
     host.dispatch('deviceorientation', { alpha: null, beta: null, gamma: null });
-    expect(ctrl.status).toBe('calibrating');
+    expect(ctrl.status).toBe('waiting');
 
-    // Valid reading calibrates neutral pose (beta=35, gamma=5 -> steer=0)
-    host.dispatch('deviceorientation', { alpha: 0, beta: 35, gamma: 5 });
-    expect(ctrl.status).toBe('active');
-    expect(ctrl.sampleSteer()).toBeCloseTo(0, 6);
-
-    // Tilt right within calibration limit -> smooth positive steer
-    now += 200;
+    // Non-zero initial tilt immediately steers relative to fixed 0 deg level horizon (no auto-calibration)
     host.dispatch('deviceorientation', { alpha: 0, beta: 35, gamma: 20 });
-    const preRecenterSteer = ctrl.sampleSteer();
-    expect(preRecenterSteer).toBeGreaterThan(0.25);
+    expect(ctrl.status).toBe('active');
+    expect(ctrl.sampleSteer()).toBeGreaterThan(0.4);
 
-    // Recenter adopts current filtered tilt (within maxCalibrationDeg) -> steer resets to 0
-    ctrl.recenter();
+    // Returning to level horizon (0 deg) returns steer to 0 cleanly
+    now += 400;
+    host.dispatch('deviceorientation', { alpha: 0, beta: 35, gamma: 0 });
     expect(ctrl.sampleSteer()).toBeCloseTo(0, 5);
 
-    // Extreme tilt beyond maxCalibrationDeg clamps neutral offset instead of saturating range
-    now += 400;
-    host.dispatch('deviceorientation', { alpha: 0, beta: 0, gamma: 40 });
-    ctrl.recenter();
-    expect(ctrl.sampleSteer()).toBeGreaterThan(0.5);
-
-    // Screen orientation change resets calibration and enters calibrating
+    // Screen orientation change resets filter and enters waiting
     host.orientation = 90;
     host.dispatchScreenChange();
-    expect(ctrl.status).toBe('calibrating');
+    expect(ctrl.status).toBe('waiting');
     expect(ctrl.sampleSteer()).toBe(0);
 
     ctrl.detach();
@@ -323,28 +312,23 @@ describe('TiltInputController lifecycle, permissions, and fallback', () => {
     expect(p1).toBe(p2);
     expect(permCalls).toBe(1);
     resolvePerm('granted');
-    expect(await p1).toBe('calibrating');
+    expect(await p1).toBe('waiting');
 
-    // recenter() before first sample keeps calibrating safely
-    ctrl.recenter();
-    expect(ctrl.status).toBe('calibrating');
-
-    // First valid sample establishes neutral 0 deg; same-ms spike (dtSec === 0) must be smoothed away (alpha=0)
+    // First valid sample establishes active level 0 deg; same-ms spike (dtSec === 0) must be smoothed away (alpha=0)
     host.dispatch('deviceorientation', { alpha: 0, beta: 20, gamma: 0 });
     expect(ctrl.status).toBe('active');
     host.dispatch('deviceorientation', { alpha: 0, beta: 20, gamma: 30 });
     expect(ctrl.sampleSteer()).toBe(0);
 
-    // Tilt right, recenter at 12 deg, then resetForTransition() preserves explicit calibration
+    // Tilt right, then resetForTransition() zeroes transient steer while keeping level 0 deg neutral
     now += 300;
-    host.dispatch('deviceorientation', { alpha: 0, beta: 0, gamma: 12 });
-    ctrl.recenter();
-    expect(ctrl.sampleSteer()).toBeCloseTo(0, 5);
+    host.dispatch('deviceorientation', { alpha: 0, beta: 0, gamma: 15 });
+    expect(ctrl.sampleSteer()).toBeGreaterThan(0.3);
     ctrl.resetForTransition();
     expect(ctrl.status).toBe('active');
     expect(ctrl.sampleSteer()).toBe(0);
     now += 20;
-    host.dispatch('deviceorientation', { alpha: 0, beta: 0, gamma: 12 });
+    host.dispatch('deviceorientation', { alpha: 0, beta: 0, gamma: 0 });
     expect(ctrl.sampleSteer()).toBeCloseTo(0, 5);
 
     // Synchronous throw + async rejection + partial grant behavior
@@ -362,7 +346,7 @@ describe('TiltInputController lifecycle, permissions, and fallback', () => {
     host.DeviceMotionEvent = {
       requestPermission: async () => 'granted',
     };
-    expect(await ctrl.enable()).toBe('calibrating');
+    expect(await ctrl.enable()).toBe('waiting');
   });
 
   it('falls back to devicemotion when deviceorientation is absent and detects insecure/no-sensor states', async () => {
@@ -377,14 +361,23 @@ describe('TiltInputController lifecycle, permissions, and fallback', () => {
     // Secure context without sensors delivering events transitions to 'no-sensor'
     host.isSecureContext = true;
     ctrl.attach(host);
-    expect(await ctrl.enable()).toBe('calibrating');
+    expect(await ctrl.enable()).toBe('waiting');
     expect(ctrl.sampleSteer()).toBe(0);
     now += 1100;
     expect(ctrl.sampleSteer()).toBe(0);
     expect(ctrl.status).toBe('no-sensor');
 
-    // Re-enable and drive solely via devicemotion (Android reaction force)
-    expect(await ctrl.enable()).toBe('calibrating');
+    // Retrying enable() from 'no-sensor' when permission is denied detaches sensor listeners cleanly
+    host.DeviceOrientationEvent = { requestPermission: async () => 'denied' };
+    host.DeviceMotionEvent = { requestPermission: async () => 'denied' };
+    expect(await ctrl.enable()).toBe('denied');
+    expect(host.listenerCount('deviceorientation')).toBe(0);
+    expect(host.listenerCount('devicemotion')).toBe(0);
+
+    // Re-enable (no permission prompt) and drive solely via devicemotion (Android reaction force)
+    host.DeviceOrientationEvent = {};
+    host.DeviceMotionEvent = {};
+    expect(await ctrl.enable()).toBe('waiting');
     host.dispatch('devicemotion', {
       accelerationIncludingGravity: { x: 0, y: 0, z: 9.81 },
     });

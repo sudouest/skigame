@@ -150,7 +150,6 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
     let blizzardCalls = 0;
     let selectedSkier = '';
     const tiltCalls: boolean[] = [];
-    let recenterCalls = 0;
     const callbacks: GameUICallbacks = {
       onStart: () => {
         startCalls++;
@@ -168,9 +167,6 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
       onToggleTelemetry: () => {},
       onSetTiltEnabled: (enabled) => {
         tiltCalls.push(enabled);
-      },
-      onRecenterTilt: () => {
-        recenterCalls++;
       },
     };
 
@@ -214,14 +210,11 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
     mountEl.findByClass('sg-btn-snow')[0]!.click();
     mountEl.findByClass('sg-btn-steer-tilt')[0]!.click();
     mountEl.findByClass('sg-btn-steer-drag')[0]!.click();
-    mountEl.findByClass('sg-btn-steer-recenter')[0]!.click();
-    mountEl.findByClass('sg-btn-hud-recenter')[0]!.click();
     mountEl.findByClass('sg-btn-tilt')[0]!.click();
     expect(startCalls).toBe(1);
     expect(selectedSkier).toBe('skier_carver');
     expect(blizzardCalls).toBe(1);
     expect(tiltCalls).toEqual([true, false, true]);
-    expect(recenterCalls).toBe(2);
 
     // Emit multiple events to saturate & recycle the 5-slot popup pool
     for (let i = 0; i < 8; i++) {
@@ -272,12 +265,8 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
     expect(mountEl.findByClass('sg-hint-pill')[0]!.textContent).toContain('Tilt Device');
     expect(mountEl.findByClass('sg-steer-status')[0]!.textContent).toContain('Tilt device');
     expect(mountEl.findByClass('sg-steer-status')[0]!.dataset.tone).toBe('ok');
-    expect(mountEl.findByClass('sg-btn-steer-recenter')[0]!.classList.contains('sg-hidden')).toBe(
-      false,
-    );
-    expect(mountEl.findByClass('sg-btn-hud-recenter')[0]!.classList.contains('sg-hidden')).toBe(
-      false,
-    );
+    expect(mountEl.findByClass('sg-btn-steer-recenter')).toHaveLength(0);
+    expect(mountEl.findByClass('sg-btn-hud-recenter')).toHaveLength(0);
     expect(mountEl.findByClass('sg-btn-tilt')[0]!.attributes['aria-pressed']).toBe('true');
     expect(mountEl.findByClass('sg-telemetry')[0]!.classList.contains('sg-hidden')).toBe(false);
     expect(mountEl.findByClass('sg-overlay')[0]!.classList.contains('sg-hidden')).toBe(true);
@@ -358,7 +347,6 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
       onToggleDebugDraw: () => {},
       onToggleTelemetry: () => {},
       onSetTiltEnabled: () => {},
-      onRecenterTilt: () => {},
     };
     const ui = new GameUI(mountEl as unknown as HTMLElement, eventBus, callbacks);
     const createdAtInit = doc.createdCount;

@@ -541,41 +541,9 @@ export const HUD_STYLES = `
   background: rgba(14, 116, 144, 0.72);
 }
 
-.sg-hud-recenter-btn {
-  pointer-events: auto;
-  cursor: pointer;
-  touch-action: manipulation;
-  appearance: none;
-  border: 1px solid rgba(52, 211, 153, 0.55);
-  border-radius: 999px;
-  background: var(--sg-frost);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  box-shadow: 0 3px 10px rgba(5, 14, 30, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.16);
-  padding: 4px 10px;
-  font-family: var(--sg-font-ui);
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: #6ee7b7;
-  transition: transform 0.08s ease, background-color 0.14s ease, border-color 0.14s ease;
-}
-
-.sg-hud-recenter-btn:hover {
-  background: rgba(5, 150, 105, 0.44);
-  border-color: rgba(52, 211, 153, 0.8);
-  color: var(--sg-text-snow);
-}
-
-.sg-hud-recenter-btn:active {
-  transform: scale(0.95);
-}
-
 .sg-icon-btn:focus-visible,
 .sg-toggle-btn:focus-visible,
-.sg-hud-recenter-btn:focus-visible,
 .sg-steer-btn:focus-visible,
-.sg-steer-recenter-btn:focus-visible,
 .sg-skier-card:focus-visible,
 .sg-modal-toggle-btn:focus-visible,
 .sg-cta-btn:focus-visible {
@@ -1226,30 +1194,6 @@ export const HUD_STYLES = `
 
 .sg-steer-btn[data-disabled='true'] {
   opacity: 0.55;
-}
-
-.sg-steer-recenter-btn {
-  cursor: pointer;
-  appearance: none;
-  font-family: var(--sg-font-ui);
-  font-size: 11px;
-  font-weight: 700;
-  padding: 9px 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(52, 211, 153, 0.45);
-  background: rgba(5, 150, 105, 0.34);
-  color: var(--sg-text-snow);
-  white-space: nowrap;
-  transition: background-color 0.14s ease, border-color 0.14s ease, transform 0.08s ease;
-}
-
-.sg-steer-recenter-btn:hover {
-  background: rgba(5, 150, 105, 0.52);
-  border-color: rgba(52, 211, 153, 0.72);
-}
-
-.sg-steer-recenter-btn:active {
-  transform: scale(0.96);
 }
 
 .sg-steer-status {

@@ -474,7 +474,7 @@ export interface WeatherProfile {
 ### 8.4 Controls & Non-Intrusive Onboarding
 
 - **Desktop:** `A`/`D` or `Left`/`Right` to carve, `Space` or `Up`/`W` to jump, `S`/`Down` to snowplow brake, `P`/`Esc` to pause.
-- **Mobile Touch & Accelerometer Tilt:** **Relative horizontal thumb-drag anywhere on screen** (zero-friction default—no tiny on-screen buttons), tap or quick swipe-up to jump, hold second finger to brake. **Tilt Steering** (`src/core/tiltInput.ts`) is selectable from the Start/Pause modal (or HUD toggle) with automatic iOS/iPadOS 13+ gesture-bound `requestPermission()`, cross-platform W3C/iOS `accelerationIncludingGravity` sign normalization, screen-orientation axis remapping (`0°/90°/180°/270°`), neutral-hold auto-calibration + Recenter, and automatic HTTPS local serving (`scripts/httpsCert.ts`) for mobile sensor access.
+- **Mobile Touch & Accelerometer Tilt:** **Relative horizontal thumb-drag anywhere on screen** (zero-friction default—no tiny on-screen buttons), tap or quick swipe-up to jump, hold second finger to brake. **Tilt Steering** (`src/core/tiltInput.ts`) is selectable from the Start/Pause modal (or HUD toggle) with automatic iOS/iPadOS 13+ gesture-bound `requestPermission()`, cross-platform W3C/iOS `accelerationIncludingGravity` sign normalization, screen-orientation axis remapping (`0°/90°/180°/270°`), level-horizon (`0°`) neutral with `±3°` deadzone, and automatic HTTPS local serving (`scripts/httpsCert.ts`) for mobile sensor access.
 - **Lazy Onboarding Hints:** Avoid upfront text walls. Only display a compact control overlay if the player hasn't steered after ~8 seconds of play, and briefly trigger a gentle `timeScale` slow-down card the very first time a new stage biome or fork mechanic is encountered.
 
 ---

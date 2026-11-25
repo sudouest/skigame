@@ -216,7 +216,7 @@ export function mountSkiGame(
     if (enabled) {
       // Invoke enableTilt() synchronously inside the UI click handler for iOS gesture activation
       void input.enableTilt().then((status) => {
-        if (status === 'calibrating' || status === 'active') {
+        if (status === 'waiting' || status === 'active') {
           writeSavedTiltPref(true);
         } else if (status === 'denied' || status === 'insecure' || status === 'unsupported') {
           writeSavedTiltPref(false);
@@ -226,10 +226,6 @@ export function mountSkiGame(
       input.disableTilt();
       writeSavedTiltPref(false);
     }
-  };
-
-  const recenterTilt = (): void => {
-    input.recenterTilt();
   };
 
   const uiCallbacks: GameUICallbacks = {
@@ -244,7 +240,6 @@ export function mountSkiGame(
     onToggleDebugDraw: toggleDebugDraw,
     onToggleTelemetry: toggleTelemetry,
     onSetTiltEnabled: setTiltEnabled,
-    onRecenterTilt: recenterTilt,
   };
 
   const ui = new GameUI(hudRootEl, eventBus, uiCallbacks);

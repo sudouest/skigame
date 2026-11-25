@@ -109,12 +109,11 @@ export class GameUI {
   private readonly pauseBtn: HTMLButtonElement;
   private stageAnnounceTimerSec = 0;
 
-  // Desktop Toggle Buttons + Mobile In-Game Tilt Recenter
+  // Desktop Toggle Buttons
   private readonly tiltBtn: HTMLButtonElement;
   private readonly snowBtn: HTMLButtonElement;
   private readonly debugBtn: HTMLButtonElement;
   private readonly statsBtn: HTMLButtonElement;
-  private readonly hudRecenterBtn: HTMLButtonElement;
 
   // Top Broadcast Rail (Single-Slot Ribbon)
   private readonly ribbonEl: HTMLDivElement;
@@ -168,7 +167,6 @@ export class GameUI {
   private readonly skierButtons = new Map<string, HTMLButtonElement>();
   private readonly dragModeBtn: HTMLButtonElement;
   private readonly tiltModeBtn: HTMLButtonElement;
-  private readonly recenterBtn: HTMLButtonElement;
   private readonly tiltStatusEl: HTMLDivElement;
   private readonly modalTogglesEl: HTMLDivElement;
   private readonly modalSnowBtn: HTMLButtonElement;
@@ -208,7 +206,7 @@ export class GameUI {
   private readonly onTiltToggleClick = (): void => {
     const currentlyActive =
       this.lastTiltEnabled &&
-      (this.lastTiltStatus === 'active' || this.lastTiltStatus === 'calibrating');
+      (this.lastTiltStatus === 'active' || this.lastTiltStatus === 'waiting');
     const shouldEnable = !currentlyActive;
     if (shouldEnable) {
       this.tiltFeedbackPending = true;
@@ -227,11 +225,6 @@ export class GameUI {
     this.tiltFeedbackPending = false;
     this.callbacks.onSetTiltEnabled(true);
     this.tiltModeBtn.blur();
-  };
-  private readonly onRecenterClick = (): void => {
-    this.callbacks.onRecenterTilt();
-    this.recenterBtn.blur();
-    this.hudRecenterBtn.blur();
   };
   private readonly onSnowClick = (): void => {
     this.snowBtn.blur();
@@ -414,14 +407,7 @@ export class GameUI {
     this.statsBtn = this.makeToggleButton(doc, 'Stats [P]', 'sg-toggle-btn sg-btn-stats', this.onStatsClick);
     togglesRow.append(this.tiltBtn, this.snowBtn, this.debugBtn, this.statsBtn);
 
-    this.hudRecenterBtn = doc.createElement('button');
-    this.hudRecenterBtn.type = 'button';
-    this.hudRecenterBtn.className = 'sg-hud-recenter-btn sg-btn-hud-recenter sg-hidden';
-    this.hudRecenterBtn.textContent = 'Recenter Tilt';
-    this.setAttr(this.hudRecenterBtn, 'title', 'Recenter neutral tilt angle');
-    this.hudRecenterBtn.addEventListener('click', this.onRecenterClick);
-
-    topRight.append(trailCapsule, togglesRow, this.hudRecenterBtn);
+    topRight.append(trailCapsule, togglesRow);
     topBar.append(topLeft, topRight);
 
     // 2. Single-Slot Top Broadcast Rail (Strictly Above Horizon)
@@ -622,14 +608,7 @@ export class GameUI {
     this.tiltModeBtn.addEventListener('click', this.onTiltModeClick);
 
     steerSeg.append(this.dragModeBtn, this.tiltModeBtn);
-
-    this.recenterBtn = doc.createElement('button');
-    this.recenterBtn.type = 'button';
-    this.recenterBtn.className = 'sg-steer-recenter-btn sg-btn-steer-recenter sg-hidden';
-    this.recenterBtn.textContent = 'Recenter';
-    this.recenterBtn.addEventListener('click', this.onRecenterClick);
-
-    steerRow.append(steerSeg, this.recenterBtn);
+    steerRow.appendChild(steerSeg);
 
     this.tiltStatusEl = doc.createElement('div');
     this.tiltStatusEl.className = 'sg-steer-status sg-hidden';
@@ -869,15 +848,15 @@ export class GameUI {
     if (tiltEnabled !== this.lastTiltEnabled || tiltStatus !== this.lastTiltStatus || overlayChanged) {
       this.lastTiltEnabled = tiltEnabled;
       this.lastTiltStatus = tiltStatus;
-      const tiltActiveOrCalibrating =
-        tiltEnabled && (tiltStatus === 'active' || tiltStatus === 'calibrating');
+      const tiltActiveOrWaiting =
+        tiltEnabled && (tiltStatus === 'active' || tiltStatus === 'waiting');
       const tiltSelected =
-        tiltActiveOrCalibrating || tiltStatus === 'requesting';
+        tiltActiveOrWaiting || tiltStatus === 'requesting';
       const tiltSupported = tiltStatus !== 'unsupported';
       const tiltUnavailable = !tiltSupported || tiltStatus === 'insecure';
 
       this.tiltBtn.classList.toggle('sg-hidden', !tiltSupported);
-      const tiltBtnActiveStr = String(tiltActiveOrCalibrating);
+      const tiltBtnActiveStr = String(tiltActiveOrWaiting);
       this.tiltBtn.dataset.active = tiltBtnActiveStr;
       this.setAttr(this.tiltBtn, 'aria-pressed', tiltBtnActiveStr);
 
@@ -890,12 +869,6 @@ export class GameUI {
       this.tiltModeBtn.dataset.disabled = String(tiltUnavailable);
       this.setAttr(this.tiltModeBtn, 'aria-disabled', String(tiltUnavailable));
 
-      this.recenterBtn.classList.toggle('sg-hidden', !tiltActiveOrCalibrating);
-      this.hudRecenterBtn.classList.toggle(
-        'sg-hidden',
-        !(tiltActiveOrCalibrating && overlayMode === 'playing'),
-      );
-
       const statusText = formatTiltStatusText(tiltEnabled, tiltStatus);
       this.tiltStatusEl.textContent = statusText;
       this.tiltStatusEl.classList.toggle('sg-hidden', statusText.length === 0);
@@ -906,15 +879,21 @@ export class GameUI {
         tiltStatus === 'unsupported';
       const tone = tiltStatus === 'active' ? 'ok' : isWarn ? 'warn' : '';
       this.tiltStatusEl.dataset.tone = tone;
+    }
 
-      if (this.tiltFeedbackPending) {
-        if (tiltStatus === 'active') {
-          this.tiltFeedbackPending = false;
-        } else if (isWarn) {
-          this.tiltFeedbackPending = false;
-          if (overlayMode === 'playing' && statusText.length > 0) {
-            this.showTiltWarningRibbon(statusText);
-          }
+    if (this.tiltFeedbackPending) {
+      if (tiltStatus === 'active') {
+        this.tiltFeedbackPending = false;
+      } else if (
+        tiltStatus === 'denied' ||
+        tiltStatus === 'insecure' ||
+        tiltStatus === 'no-sensor' ||
+        tiltStatus === 'unsupported'
+      ) {
+        this.tiltFeedbackPending = false;
+        const msg = formatTiltStatusText(tiltEnabled, tiltStatus);
+        if (overlayMode === 'playing' && msg.length > 0) {
+          this.showTiltWarningRibbon(msg);
         }
       }
     }
@@ -986,10 +965,8 @@ export class GameUI {
     this.skierClickHandlers.length = 0;
 
     this.tiltBtn.removeEventListener('click', this.onTiltToggleClick);
-    this.hudRecenterBtn.removeEventListener('click', this.onRecenterClick);
     this.dragModeBtn.removeEventListener('click', this.onDragModeClick);
     this.tiltModeBtn.removeEventListener('click', this.onTiltModeClick);
-    this.recenterBtn.removeEventListener('click', this.onRecenterClick);
     this.snowBtn.removeEventListener('click', this.onSnowClick);
     this.debugBtn.removeEventListener('click', this.onDebugClick);
     this.statsBtn.removeEventListener('click', this.onStatsClick);

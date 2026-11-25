@@ -233,10 +233,6 @@ export class InputManager {
     this.tilt.disable();
   }
 
-  recenterTilt(): void {
-    this.tilt.recenter();
-  }
-
   resetHasSteered(): void {
     this._hasSteered = false;
   }

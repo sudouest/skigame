@@ -90,7 +90,6 @@ export interface GameUICallbacks {
   onToggleDebugDraw(): void;
   onToggleTelemetry(): void;
   onSetTiltEnabled(enabled: boolean): void;
-  onRecenterTilt(): void;
 }
 
 export interface GameUIUpdateData {
