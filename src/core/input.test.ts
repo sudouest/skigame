@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { InputManager, createInputFrameState, type InputEventTarget } from './input';
+import type { TiltPermissionHost } from './tiltInput';
 
 class MockDomTarget implements InputEventTarget {
   readonly clientWidth = 1000;
@@ -27,6 +28,14 @@ class MockDomTarget implements InputEventTarget {
   listenerCount(type: string): number {
     return this.listeners.get(type)?.size ?? 0;
   }
+}
+
+class MockSensorWindow extends MockDomTarget implements TiltPermissionHost {
+  isSecureContext = true;
+  orientation = 0;
+  navigator = { userAgent: 'Mozilla/5.0 (Linux; Android 15; Pixel 9)' };
+  DeviceOrientationEvent = {};
+  DeviceMotionEvent = {};
 }
 
 describe('InputManager', () => {
@@ -160,5 +169,92 @@ describe('InputManager', () => {
     expect(input.isAttached).toBe(false);
     expect(keyboardTarget.listenerCount('keydown')).toBe(0);
     expect(pointerTarget.listenerCount('pointerdown')).toBe(0);
+  });
+
+  it('integrates tilt steering with keyboard override, drag suppression during active tilt, and tap/brake retention', async () => {
+    let now = 2000;
+    const sensorWindow = new MockSensorWindow();
+    const pointerTarget = new MockDomTarget();
+    const input = new InputManager({
+      dragSensitivity: 1.0,
+      nowMs: () => now,
+      tilt: { noSensorTimeoutMs: 1200 },
+    });
+    const state = createInputFrameState();
+
+    input.attach(sensorWindow, pointerTarget);
+    expect(input.tiltStatus).toBe('inactive');
+
+    await input.enableTilt();
+    expect(input.tiltEnabled).toBe(true);
+    expect(input.tiltStatus).toBe('calibrating');
+
+    // While calibrating (not yet active), horizontal touch drag still works as fallback
+    pointerTarget.dispatch('pointerdown', { pointerId: 1, clientX: 400, clientY: 500, isPrimary: true });
+    pointerTarget.dispatch('pointermove', { pointerId: 1, clientX: 450, clientY: 500 });
+    input.sampleFrameInto(state);
+    expect(state.dragDeltaPx).toBe(50);
+    pointerTarget.dispatch('pointerup', { pointerId: 1, clientX: 450, clientY: 500 });
+
+    // Deliver initial neutral sample -> active, then tilt right
+    sensorWindow.dispatch('deviceorientation', { alpha: 0, beta: 30, gamma: 0 });
+    now += 200;
+    sensorWindow.dispatch('deviceorientation', { alpha: 0, beta: 30, gamma: 24 });
+
+    // Accidental drag is suppressed while tilt is active, but tap-jump & 2-finger brake still work
+    pointerTarget.dispatch('pointerdown', { pointerId: 2, clientX: 300, clientY: 300, isPrimary: true });
+    pointerTarget.dispatch('pointermove', { pointerId: 2, clientX: 380, clientY: 300 });
+    pointerTarget.dispatch('pointerdown', { pointerId: 3, clientX: 200, clientY: 300 });
+    input.sampleFrameInto(state);
+    expect(input.tiltStatus).toBe('active');
+    expect(state.steer).toBeGreaterThan(0.5);
+    expect(state.hasSteered).toBe(true);
+    expect(state.dragDeltaPx).toBe(0);
+    expect(state.brakeHeld).toBe(true);
+    pointerTarget.dispatch('pointerup', { pointerId: 3, clientX: 200, clientY: 300 });
+    pointerTarget.dispatch('pointerup', { pointerId: 2, clientX: 380, clientY: 300 });
+
+    // Quick tap still triggers jump while tilt is active
+    pointerTarget.dispatch('pointerdown', { pointerId: 4, clientX: 300, clientY: 300, isPrimary: true });
+    now += 60;
+    pointerTarget.dispatch('pointerup', { pointerId: 4, clientX: 301, clientY: 300 });
+    input.sampleFrameInto(state);
+    expect(state.jumpPressed).toBe(true);
+
+    // Keyboard input overrides tilt cleanly
+    input.handleKeyDown({ code: 'KeyA' });
+    input.sampleFrameInto(state);
+    expect(state.steer).toBe(-1);
+    input.handleKeyUp({ code: 'KeyA' });
+
+    // DeviceMotion fallback & explicit recenter survive resetAll(), and menu sampling does not latch hasSteered
+    input.handleDeviceMotion({ accelerationIncludingGravity: { x: 0, y: 0, z: 9.81 } });
+    input.recenterTilt();
+    input.resetAll();
+    expect(input.tiltEnabled).toBe(true);
+    input.sampleFrameInto(state);
+    expect(state.steer).toBe(0);
+
+    input.resetHasSteered();
+    now += 200;
+    sensorWindow.dispatch('deviceorientation', { alpha: 0, beta: 0, gamma: 24 });
+    input.sampleFrameInto(state, false);
+    expect(state.hasSteered).toBe(false);
+
+    // Timeout to no-sensor restores touch drag fallback
+    input.disableTilt();
+    await input.enableTilt();
+    now += 1500;
+    input.sampleFrameInto(state);
+    expect(input.tiltStatus).toBe('no-sensor');
+    pointerTarget.dispatch('pointerdown', { pointerId: 5, clientX: 300, clientY: 500, isPrimary: true });
+    pointerTarget.dispatch('pointermove', { pointerId: 5, clientX: 345, clientY: 500 });
+    input.sampleFrameInto(state);
+    expect(state.dragDeltaPx).toBe(45);
+    pointerTarget.dispatch('pointerup', { pointerId: 5, clientX: 345, clientY: 500 });
+
+    input.detach();
+    expect(input.tiltEnabled).toBe(false);
+    expect(sensorWindow.listenerCount('deviceorientation')).toBe(0);
   });
 });

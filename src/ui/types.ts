@@ -1,3 +1,4 @@
+import type { TiltControlStatus } from '../core/input';
 import type { ProfilerSnapshot } from '../core/profiler';
 import type { ReadonlySimState } from '../sim/contracts';
 
@@ -88,6 +89,8 @@ export interface GameUICallbacks {
   onToggleBlizzard(): void;
   onToggleDebugDraw(): void;
   onToggleTelemetry(): void;
+  onSetTiltEnabled(enabled: boolean): void;
+  onRecenterTilt(): void;
 }
 
 export interface GameUIUpdateData {
@@ -98,5 +101,7 @@ export interface GameUIUpdateData {
   readonly hasSteered: boolean;
   readonly debugDrawEnabled: boolean;
   readonly telemetryVisible: boolean;
+  readonly tiltEnabled: boolean;
+  readonly tiltStatus: TiltControlStatus;
   readonly overlayMode: OverlayMode;
 }

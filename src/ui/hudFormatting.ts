@@ -2,6 +2,7 @@ import { getCreatureDef } from '../content/creatures';
 import { getPresentDef } from '../content/presents';
 import { getStageDef } from '../content/stages';
 import type { SkierDef, StageBadge } from '../content/types';
+import type { TiltControlStatus } from '../core/input';
 import { clamp } from '../core/math';
 import type { SimEventMap } from '../sim/contracts';
 import type { LeakCheckStatus } from './types';
@@ -296,4 +297,33 @@ export function formatStumbleChip(ev: SimEventMap['PLAYER_WIPEOUT']): StumbleChi
     text: safeDropped > 0 ? `STUMBLE · -${safeDropped}` : 'STUMBLE',
     durationSec: 1.35,
   };
+}
+
+export function formatTiltStatusText(enabled: boolean, status: TiltControlStatus): string {
+  switch (status) {
+    case 'insecure':
+      return 'Tilt steering requires HTTPS';
+    case 'denied':
+      return 'Motion access denied — allow in browser settings';
+    case 'requesting':
+      return 'Waiting for motion sensor permission…';
+    case 'calibrating':
+      return enabled ? 'Hold steady — calibrating tilt…' : '';
+    case 'active':
+      return 'Tilt device left/right to carve · Tap to jump';
+    case 'no-sensor':
+      return 'No accelerometer detected — using touch drag';
+    case 'unsupported':
+      return 'Motion sensors unavailable in this browser';
+    case 'inactive':
+    default:
+      return '';
+  }
+}
+
+export function formatControlsHint(tiltActive: boolean): string {
+  if (tiltActive) {
+    return 'Carve: Tilt Device (or A/D) · Jump: Tap or Space · Brake: 2-Finger Hold or S';
+  }
+  return 'Carve: A/D, Arrows, or Drag · Jump: Space or Tap · Brake: S or 2-Finger Hold';
 }

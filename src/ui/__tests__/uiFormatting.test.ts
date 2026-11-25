@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { SKIER_ALPINE, SKIER_CARVER } from '../../content/characters';
 import {
   computeRatio01,
+  formatControlsHint,
   formatCreatureEdgeBeacon,
   formatCreatureTelegraphPopup,
   formatDeliveryPopup,
@@ -19,6 +20,7 @@ import {
   formatSkierCardInfo,
   formatStageDisplay,
   formatStumbleChip,
+  formatTiltStatusText,
   formatTrianglesCount,
   formatWipeoutEventPopup,
 } from '../hudFormatting';
@@ -297,6 +299,15 @@ describe('UI formatting & architectural isolation', () => {
         recoverySec: 1.2,
       }),
     ).toBeNull();
+
+    expect(formatTiltStatusText(false, 'inactive')).toBe('');
+    expect(formatTiltStatusText(false, 'insecure')).toContain('HTTPS');
+    expect(formatTiltStatusText(false, 'denied')).toContain('denied');
+    expect(formatTiltStatusText(true, 'calibrating')).toContain('calibrating');
+    expect(formatTiltStatusText(true, 'active')).toContain('Tilt device');
+    expect(formatTiltStatusText(true, 'no-sensor')).toContain('touch drag');
+    expect(formatControlsHint(false)).toContain('Drag');
+    expect(formatControlsHint(true)).toContain('Tilt Device');
   });
 
   it('prevents src/ui/ from importing three, render/three internals, or sim implementations', () => {

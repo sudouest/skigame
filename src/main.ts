@@ -26,6 +26,25 @@ import {
 const POINTER_DRAG_STEER_SCALE = 3.2;
 const LEAK_CHECK_INTERVAL_SEC = 20.0;
 const TELEMETRY_SAMPLE_INTERVAL_SEC = 0.2;
+const TILT_PREF_STORAGE_KEY = 'skigame:tiltSteering';
+
+function readSavedTiltPref(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(TILT_PREF_STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function writeSavedTiltPref(enabled: boolean): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(TILT_PREF_STORAGE_KEY, enabled ? 'true' : 'false');
+    }
+  } catch {
+    // Ignore storage failures in private browsing / restricted WebViews
+  }
+}
 
 export interface SkiGameAppHandle {
   dispose(): void;
@@ -124,6 +143,7 @@ export function mountSkiGame(
     overlayMode = 'playing';
     clearIntent();
     input.resetAll();
+    input.resetHasSteered();
     sim.setPaused(false);
     loop.resetAccumulator();
     loop.resume();
@@ -152,6 +172,7 @@ export function mountSkiGame(
     currentSeed += 1;
     clearIntent();
     input.resetAll();
+    input.resetHasSteered();
     sim.reset(currentSeed, sim.getState().skierId);
     sim.setPaused(false);
     sim.setDebugDrawEnabled(debugDrawEnabled);
@@ -191,6 +212,26 @@ export function mountSkiGame(
     }
   };
 
+  const setTiltEnabled = (enabled: boolean): void => {
+    if (enabled) {
+      // Invoke enableTilt() synchronously inside the UI click handler for iOS gesture activation
+      void input.enableTilt().then((status) => {
+        if (status === 'calibrating' || status === 'active') {
+          writeSavedTiltPref(true);
+        } else if (status === 'denied' || status === 'insecure' || status === 'unsupported') {
+          writeSavedTiltPref(false);
+        }
+      });
+    } else {
+      input.disableTilt();
+      writeSavedTiltPref(false);
+    }
+  };
+
+  const recenterTilt = (): void => {
+    input.recenterTilt();
+  };
+
   const uiCallbacks: GameUICallbacks = {
     onStart: startRun,
     onResume: resumeRun,
@@ -202,6 +243,8 @@ export function mountSkiGame(
     onToggleBlizzard: toggleBlizzard,
     onToggleDebugDraw: toggleDebugDraw,
     onToggleTelemetry: toggleTelemetry,
+    onSetTiltEnabled: setTiltEnabled,
+    onRecenterTilt: recenterTilt,
   };
 
   const ui = new GameUI(hudRootEl, eventBus, uiCallbacks);
@@ -215,15 +258,29 @@ export function mountSkiGame(
     hasSteered: false,
     debugDrawEnabled: false,
     telemetryVisible: false,
+    tiltEnabled: false,
+    tiltStatus: input.tiltStatus,
     overlayMode: 'start' as OverlayMode,
   };
+
+  let lastObservedTiltStatus = input.tiltStatus;
 
   loop = new FixedLoop({
     fixedDt: FIXED_DT,
     profiler,
     onBeforeFrame: (rawDtSec: number) => {
       lastRawDtSec = rawDtSec;
-      input.sampleFrameInto(inputFrame);
+      const simStateBeforeInput = sim.getState();
+      const isActivelyPlaying = overlayMode === 'playing' && !simStateBeforeInput.paused;
+      input.sampleFrameInto(inputFrame, isActivelyPlaying);
+
+      const curTiltStatus = input.tiltStatus;
+      if (curTiltStatus !== lastObservedTiltStatus) {
+        lastObservedTiltStatus = curTiltStatus;
+        if (curTiltStatus === 'no-sensor') {
+          writeSavedTiltPref(false);
+        }
+      }
 
       // Process mode/debug/pause toggles regardless of pause state
       if (inputFrame.toggleBlizzardPressed) {
@@ -295,6 +352,8 @@ export function mountSkiGame(
       uiUpdateData.hasSteered = input.hasSteered;
       uiUpdateData.debugDrawEnabled = debugDrawEnabled;
       uiUpdateData.telemetryVisible = telemetryVisible;
+      uiUpdateData.tiltEnabled = input.tiltEnabled;
+      uiUpdateData.tiltStatus = input.tiltStatus;
       uiUpdateData.overlayMode = overlayMode;
       ui.update(uiUpdateData, frameDtSec);
     },
@@ -305,6 +364,13 @@ export function mountSkiGame(
   loop.pause();
 
   input.attach(window, viewportEl);
+  if (
+    readSavedTiltPref() &&
+    !input.tiltRequiresPermission &&
+    input.tiltStatus === 'inactive'
+  ) {
+    void input.enableTilt();
+  }
 
   const handleResize = (): void => {
     const w = viewportEl.clientWidth || window.innerWidth;

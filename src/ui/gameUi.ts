@@ -1,8 +1,10 @@
 import { SKIERS } from '../content/characters';
 import type { EventBus, Unsubscribe } from '../core/eventBus';
+import type { TiltControlStatus } from '../core/input';
 import type { SimEventMap } from '../sim/contracts';
 import {
   computeRatio01,
+  formatControlsHint,
   formatCreatureEdgeBeacon,
   formatDeliveryRibbon,
   formatDistanceM,
@@ -13,6 +15,7 @@ import {
   formatSkierCardInfo,
   formatStageDisplay,
   formatStumbleChip,
+  formatTiltStatusText,
   formatTrianglesCount,
 } from './hudFormatting';
 import { HUD_STYLES } from './styles';
@@ -106,10 +109,12 @@ export class GameUI {
   private readonly pauseBtn: HTMLButtonElement;
   private stageAnnounceTimerSec = 0;
 
-  // Desktop Toggle Buttons
+  // Desktop Toggle Buttons + Mobile In-Game Tilt Recenter
+  private readonly tiltBtn: HTMLButtonElement;
   private readonly snowBtn: HTMLButtonElement;
   private readonly debugBtn: HTMLButtonElement;
   private readonly statsBtn: HTMLButtonElement;
+  private readonly hudRecenterBtn: HTMLButtonElement;
 
   // Top Broadcast Rail (Single-Slot Ribbon)
   private readonly ribbonEl: HTMLDivElement;
@@ -161,6 +166,10 @@ export class GameUI {
   private readonly summaryDeliveredEl: HTMLDivElement;
   private readonly summaryComboEl: HTMLDivElement;
   private readonly skierButtons = new Map<string, HTMLButtonElement>();
+  private readonly dragModeBtn: HTMLButtonElement;
+  private readonly tiltModeBtn: HTMLButtonElement;
+  private readonly recenterBtn: HTMLButtonElement;
+  private readonly tiltStatusEl: HTMLDivElement;
   private readonly modalTogglesEl: HTMLDivElement;
   private readonly modalSnowBtn: HTMLButtonElement;
   private readonly modalDebugBtn: HTMLButtonElement;
@@ -181,6 +190,10 @@ export class GameUI {
   private lastSnowActive = false;
   private lastDebugActive = false;
   private lastStatsActive = false;
+  private lastTiltEnabled = false;
+  private lastTiltStatus: TiltControlStatus | '' = '';
+  private lastHintText = '';
+  private tiltFeedbackPending = false;
   private lastOverlayMode: OverlayMode | '' = '';
   private lastSelectedSkierId = '';
   private lastWipeoutActive = false;
@@ -192,6 +205,34 @@ export class GameUI {
   private disposed = false;
 
   // Bound event listeners
+  private readonly onTiltToggleClick = (): void => {
+    const currentlyActive =
+      this.lastTiltEnabled &&
+      (this.lastTiltStatus === 'active' || this.lastTiltStatus === 'calibrating');
+    const shouldEnable = !currentlyActive;
+    if (shouldEnable) {
+      this.tiltFeedbackPending = true;
+    } else {
+      this.tiltFeedbackPending = false;
+    }
+    this.callbacks.onSetTiltEnabled(shouldEnable);
+    this.tiltBtn.blur();
+  };
+  private readonly onDragModeClick = (): void => {
+    this.tiltFeedbackPending = false;
+    this.callbacks.onSetTiltEnabled(false);
+    this.dragModeBtn.blur();
+  };
+  private readonly onTiltModeClick = (): void => {
+    this.tiltFeedbackPending = false;
+    this.callbacks.onSetTiltEnabled(true);
+    this.tiltModeBtn.blur();
+  };
+  private readonly onRecenterClick = (): void => {
+    this.callbacks.onRecenterTilt();
+    this.recenterBtn.blur();
+    this.hudRecenterBtn.blur();
+  };
   private readonly onSnowClick = (): void => {
     this.snowBtn.blur();
     this.modalSnowBtn.blur();
@@ -366,12 +407,21 @@ export class GameUI {
 
     const togglesRow = doc.createElement('div');
     togglesRow.className = 'sg-toggles';
+    this.tiltBtn = this.makeToggleButton(doc, 'Tilt', 'sg-toggle-btn sg-btn-tilt', this.onTiltToggleClick);
+    this.setAttr(this.tiltBtn, 'title', 'Toggle Tilt Steering');
     this.snowBtn = this.makeToggleButton(doc, 'Snow [B]', 'sg-toggle-btn sg-btn-snow', this.onSnowClick);
     this.debugBtn = this.makeToggleButton(doc, 'Debug [G]', 'sg-toggle-btn sg-btn-debug', this.onDebugClick);
     this.statsBtn = this.makeToggleButton(doc, 'Stats [P]', 'sg-toggle-btn sg-btn-stats', this.onStatsClick);
-    togglesRow.append(this.snowBtn, this.debugBtn, this.statsBtn);
+    togglesRow.append(this.tiltBtn, this.snowBtn, this.debugBtn, this.statsBtn);
 
-    topRight.append(trailCapsule, togglesRow);
+    this.hudRecenterBtn = doc.createElement('button');
+    this.hudRecenterBtn.type = 'button';
+    this.hudRecenterBtn.className = 'sg-hud-recenter-btn sg-btn-hud-recenter sg-hidden';
+    this.hudRecenterBtn.textContent = 'Recenter Tilt';
+    this.setAttr(this.hudRecenterBtn, 'title', 'Recenter neutral tilt angle');
+    this.hudRecenterBtn.addEventListener('click', this.onRecenterClick);
+
+    topRight.append(trailCapsule, togglesRow, this.hudRecenterBtn);
     topBar.append(topLeft, topRight);
 
     // 2. Single-Slot Top Broadcast Rail (Strictly Above Horizon)
@@ -453,8 +503,8 @@ export class GameUI {
     // 5. Lazy Onboarding Hint
     this.hintPillEl = doc.createElement('div');
     this.hintPillEl.className = 'sg-hint-pill sg-hidden';
-    this.hintPillEl.textContent =
-      'Carve: A/D, Arrows, or Drag · Jump: Space or Tap · Brake: S or 2-Finger Hold';
+    this.lastHintText = formatControlsHint(false);
+    this.hintPillEl.textContent = this.lastHintText;
 
     // 6. Telemetry Panel
     this.telemetryEl = doc.createElement('div');
@@ -544,6 +594,50 @@ export class GameUI {
       skierGrid.appendChild(btn);
     }
 
+    const steerSection = doc.createElement('div');
+    steerSection.className = 'sg-steer-section';
+    const steerLabel = doc.createElement('div');
+    steerLabel.className = 'sg-section-label';
+    steerLabel.textContent = 'Steering';
+
+    const steerRow = doc.createElement('div');
+    steerRow.className = 'sg-steer-row';
+    const steerSeg = doc.createElement('div');
+    steerSeg.className = 'sg-steer-segment';
+
+    this.dragModeBtn = doc.createElement('button');
+    this.dragModeBtn.type = 'button';
+    this.dragModeBtn.className = 'sg-steer-btn sg-btn-steer-drag';
+    this.dragModeBtn.dataset.active = 'true';
+    this.setAttr(this.dragModeBtn, 'aria-pressed', 'true');
+    this.dragModeBtn.textContent = 'Touch / Drag';
+    this.dragModeBtn.addEventListener('click', this.onDragModeClick);
+
+    this.tiltModeBtn = doc.createElement('button');
+    this.tiltModeBtn.type = 'button';
+    this.tiltModeBtn.className = 'sg-steer-btn sg-btn-steer-tilt';
+    this.tiltModeBtn.dataset.active = 'false';
+    this.setAttr(this.tiltModeBtn, 'aria-pressed', 'false');
+    this.tiltModeBtn.textContent = 'Tilt';
+    this.tiltModeBtn.addEventListener('click', this.onTiltModeClick);
+
+    steerSeg.append(this.dragModeBtn, this.tiltModeBtn);
+
+    this.recenterBtn = doc.createElement('button');
+    this.recenterBtn.type = 'button';
+    this.recenterBtn.className = 'sg-steer-recenter-btn sg-btn-steer-recenter sg-hidden';
+    this.recenterBtn.textContent = 'Recenter';
+    this.recenterBtn.addEventListener('click', this.onRecenterClick);
+
+    steerRow.append(steerSeg, this.recenterBtn);
+
+    this.tiltStatusEl = doc.createElement('div');
+    this.tiltStatusEl.className = 'sg-steer-status sg-hidden';
+    this.tiltStatusEl.dataset.tone = '';
+    this.setAttr(this.tiltStatusEl, 'aria-live', 'polite');
+
+    steerSection.append(steerLabel, steerRow, this.tiltStatusEl);
+
     this.modalTogglesEl = doc.createElement('div');
     this.modalTogglesEl.className = 'sg-modal-toggles sg-hidden';
     this.modalSnowBtn = this.makeToggleButton(
@@ -570,7 +664,7 @@ export class GameUI {
     controlsBox.className = 'sg-controls-box';
     controlsBox.innerHTML =
       '<div class="sg-controls-line"><strong>Desktop:</strong> <span class="sg-kbd">A</span>/<span class="sg-kbd">D</span> or Arrows carve · <span class="sg-kbd">Space</span>/<span class="sg-kbd">W</span> jump · <span class="sg-kbd">S</span> brake</div>' +
-      '<div class="sg-controls-line"><strong>Touch:</strong> Drag horizontally to carve · Tap or swipe up jump · 2-finger brake</div>' +
+      '<div class="sg-controls-line"><strong>Mobile:</strong> Drag or Tilt to carve · Tap or swipe up jump · 2-finger brake</div>' +
       '<div class="sg-controls-line"><strong>Toggles:</strong> <span class="sg-kbd">B</span> Blizzard · <span class="sg-kbd">G</span> 3D Debug · <span class="sg-kbd">P</span> Stats · <span class="sg-kbd">Esc</span> Pause</div>';
 
     const actionsRow = doc.createElement('div');
@@ -595,6 +689,7 @@ export class GameUI {
       this.summaryStripEl,
       skierLabel,
       skierGrid,
+      steerSection,
       this.modalTogglesEl,
       controlsBox,
       actionsRow,
@@ -661,12 +756,21 @@ export class GameUI {
 
     this.stumbleFlashTimerSec = 0;
     this.stumbleFlashEl.classList.remove('sg-stumble-active');
+    this.tiltFeedbackPending = false;
   }
 
   update(data: GameUIUpdateData, frameDtSec: number): void {
     if (this.disposed) return;
 
-    const { simState, overlayMode, hasSteered, debugDrawEnabled, telemetryVisible } = data;
+    const {
+      simState,
+      overlayMode,
+      hasSteered,
+      debugDrawEnabled,
+      telemetryVisible,
+      tiltEnabled,
+      tiltStatus,
+    } = data;
     const dt = Number.isFinite(frameDtSec) && frameDtSec > 0 ? frameDtSec : 0;
 
     // 1. Score & Combo
@@ -742,18 +846,77 @@ export class GameUI {
       const val = String(blizzardOn);
       this.snowBtn.dataset.active = val;
       this.modalSnowBtn.dataset.active = val;
+      this.setAttr(this.snowBtn, 'aria-pressed', val);
+      this.setAttr(this.modalSnowBtn, 'aria-pressed', val);
     }
     if (debugDrawEnabled !== this.lastDebugActive) {
       this.lastDebugActive = debugDrawEnabled;
       const val = String(debugDrawEnabled);
       this.debugBtn.dataset.active = val;
       this.modalDebugBtn.dataset.active = val;
+      this.setAttr(this.debugBtn, 'aria-pressed', val);
+      this.setAttr(this.modalDebugBtn, 'aria-pressed', val);
     }
     if (telemetryVisible !== this.lastStatsActive) {
       this.lastStatsActive = telemetryVisible;
       const val = String(telemetryVisible);
       this.statsBtn.dataset.active = val;
       this.modalStatsBtn.dataset.active = val;
+      this.setAttr(this.statsBtn, 'aria-pressed', val);
+      this.setAttr(this.modalStatsBtn, 'aria-pressed', val);
+    }
+    const overlayChanged = overlayMode !== this.lastOverlayMode;
+    if (tiltEnabled !== this.lastTiltEnabled || tiltStatus !== this.lastTiltStatus || overlayChanged) {
+      this.lastTiltEnabled = tiltEnabled;
+      this.lastTiltStatus = tiltStatus;
+      const tiltActiveOrCalibrating =
+        tiltEnabled && (tiltStatus === 'active' || tiltStatus === 'calibrating');
+      const tiltSelected =
+        tiltActiveOrCalibrating || tiltStatus === 'requesting';
+      const tiltSupported = tiltStatus !== 'unsupported';
+      const tiltUnavailable = !tiltSupported || tiltStatus === 'insecure';
+
+      this.tiltBtn.classList.toggle('sg-hidden', !tiltSupported);
+      const tiltBtnActiveStr = String(tiltActiveOrCalibrating);
+      this.tiltBtn.dataset.active = tiltBtnActiveStr;
+      this.setAttr(this.tiltBtn, 'aria-pressed', tiltBtnActiveStr);
+
+      const dragSelectedStr = String(!tiltSelected);
+      const tiltSelectedStr = String(tiltSelected);
+      this.dragModeBtn.dataset.active = dragSelectedStr;
+      this.setAttr(this.dragModeBtn, 'aria-pressed', dragSelectedStr);
+      this.tiltModeBtn.dataset.active = tiltSelectedStr;
+      this.setAttr(this.tiltModeBtn, 'aria-pressed', tiltSelectedStr);
+      this.tiltModeBtn.dataset.disabled = String(tiltUnavailable);
+      this.setAttr(this.tiltModeBtn, 'aria-disabled', String(tiltUnavailable));
+
+      this.recenterBtn.classList.toggle('sg-hidden', !tiltActiveOrCalibrating);
+      this.hudRecenterBtn.classList.toggle(
+        'sg-hidden',
+        !(tiltActiveOrCalibrating && overlayMode === 'playing'),
+      );
+
+      const statusText = formatTiltStatusText(tiltEnabled, tiltStatus);
+      this.tiltStatusEl.textContent = statusText;
+      this.tiltStatusEl.classList.toggle('sg-hidden', statusText.length === 0);
+      const isWarn =
+        tiltStatus === 'denied' ||
+        tiltStatus === 'insecure' ||
+        tiltStatus === 'no-sensor' ||
+        tiltStatus === 'unsupported';
+      const tone = tiltStatus === 'active' ? 'ok' : isWarn ? 'warn' : '';
+      this.tiltStatusEl.dataset.tone = tone;
+
+      if (this.tiltFeedbackPending) {
+        if (tiltStatus === 'active') {
+          this.tiltFeedbackPending = false;
+        } else if (isWarn) {
+          this.tiltFeedbackPending = false;
+          if (overlayMode === 'playing' && statusText.length > 0) {
+            this.showTiltWarningRibbon(statusText);
+          }
+        }
+      }
     }
 
     // 5. Wipeout Tumble Banner
@@ -786,6 +949,13 @@ export class GameUI {
       this.lastHintVisible = hintVisible;
       this.hintPillEl.classList.toggle('sg-hidden', !hintVisible);
     }
+    if (hintVisible) {
+      const hintText = formatControlsHint(tiltStatus === 'active');
+      if (hintText !== this.lastHintText) {
+        this.lastHintText = hintText;
+        this.hintPillEl.textContent = hintText;
+      }
+    }
 
     // 8. Telemetry Panel
     if (telemetryVisible !== this.lastTelemetryVisible) {
@@ -815,6 +985,11 @@ export class GameUI {
     }
     this.skierClickHandlers.length = 0;
 
+    this.tiltBtn.removeEventListener('click', this.onTiltToggleClick);
+    this.hudRecenterBtn.removeEventListener('click', this.onRecenterClick);
+    this.dragModeBtn.removeEventListener('click', this.onDragModeClick);
+    this.tiltModeBtn.removeEventListener('click', this.onTiltModeClick);
+    this.recenterBtn.removeEventListener('click', this.onRecenterClick);
     this.snowBtn.removeEventListener('click', this.onSnowClick);
     this.debugBtn.removeEventListener('click', this.onDebugClick);
     this.statsBtn.removeEventListener('click', this.onStatsClick);
@@ -828,6 +1003,17 @@ export class GameUI {
     if (this.rootEl.parentElement === this.mountEl) {
       this.mountEl.removeChild(this.rootEl);
     }
+  }
+
+  private showTiltWarningRibbon(message: string): void {
+    this.ribbonTimerSec = 2.4;
+    this.ribbonEl.dataset.tone = 'warning';
+    this.ribbonPrimaryEl.textContent = 'TILT UNAVAILABLE';
+    this.ribbonDetailEl.textContent = message;
+    this.ribbonComboEl.classList.add('sg-hidden');
+    this.ribbonEl.classList.remove('sg-hidden');
+    this.ribbonEl.classList.add('sg-ribbon-visible');
+    this.ribbonBumpToggle = this.triggerBump(this.ribbonEl, this.ribbonBumpToggle);
   }
 
   private pushPickupBurst(ev: SimEventMap['PRESENT_PICKED_UP']): void {
@@ -1113,6 +1299,7 @@ export class GameUI {
     btn.className = className;
     btn.textContent = label;
     btn.dataset.active = 'false';
+    this.setAttr(btn, 'aria-pressed', 'false');
     btn.addEventListener('click', onClick);
     return btn;
   }

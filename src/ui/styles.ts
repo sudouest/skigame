@@ -29,7 +29,6 @@ export const HUD_STYLES = `
   font-family: var(--sg-font-ui);
   color: var(--sg-text-snow);
   pointer-events: none;
-  touch-action: none;
   user-select: none;
   -webkit-user-select: none;
   overflow: hidden;
@@ -537,6 +536,53 @@ export const HUD_STYLES = `
   background: rgba(5, 150, 105, 0.64);
 }
 
+.sg-toggle-btn.sg-btn-tilt[data-active='true'] {
+  border-color: rgba(56, 189, 248, 0.78);
+  background: rgba(14, 116, 144, 0.72);
+}
+
+.sg-hud-recenter-btn {
+  pointer-events: auto;
+  cursor: pointer;
+  touch-action: manipulation;
+  appearance: none;
+  border: 1px solid rgba(52, 211, 153, 0.55);
+  border-radius: 999px;
+  background: var(--sg-frost);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 3px 10px rgba(5, 14, 30, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  padding: 4px 10px;
+  font-family: var(--sg-font-ui);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #6ee7b7;
+  transition: transform 0.08s ease, background-color 0.14s ease, border-color 0.14s ease;
+}
+
+.sg-hud-recenter-btn:hover {
+  background: rgba(5, 150, 105, 0.44);
+  border-color: rgba(52, 211, 153, 0.8);
+  color: var(--sg-text-snow);
+}
+
+.sg-hud-recenter-btn:active {
+  transform: scale(0.95);
+}
+
+.sg-icon-btn:focus-visible,
+.sg-toggle-btn:focus-visible,
+.sg-hud-recenter-btn:focus-visible,
+.sg-steer-btn:focus-visible,
+.sg-steer-recenter-btn:focus-visible,
+.sg-skier-card:focus-visible,
+.sg-modal-toggle-btn:focus-visible,
+.sg-cta-btn:focus-visible {
+  outline: 2px solid #7dd3fc;
+  outline-offset: 2px;
+}
+
 /* Single-Slot Top Broadcast Rail (Strictly Above Downhill Horizon) */
 .sg-top-rail {
   position: absolute;
@@ -936,6 +982,7 @@ export const HUD_STYLES = `
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   pointer-events: auto;
+  touch-action: pan-y;
   box-sizing: border-box;
   z-index: 10;
 }
@@ -944,7 +991,11 @@ export const HUD_STYLES = `
   position: relative;
   width: min(468px, 100%);
   max-height: 92vh;
+  max-height: 92dvh;
   overflow-y: auto;
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   background: linear-gradient(165deg, rgba(240, 248, 255, 0.1) 0%, rgba(12, 23, 42, 0) 38%),
     var(--sg-frost-strong);
   backdrop-filter: blur(18px) saturate(145%);
@@ -1119,6 +1170,102 @@ export const HUD_STYLES = `
   color: #fde68a;
   font-size: 10px;
   font-weight: 700;
+}
+
+/* Steering Mode Selector inside Modal */
+.sg-steer-section {
+  margin-bottom: 14px;
+}
+
+.sg-steer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sg-steer-segment {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 14px;
+  background: rgba(6, 14, 28, 0.56);
+  border: 1px solid rgba(224, 242, 254, 0.16);
+}
+
+.sg-steer-btn {
+  cursor: pointer;
+  appearance: none;
+  font-family: var(--sg-font-ui);
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--sg-text-mist);
+  transition: background-color 0.14s ease, border-color 0.14s ease, color 0.14s ease, transform 0.08s ease;
+}
+
+.sg-steer-btn:hover {
+  color: var(--sg-text-snow);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.sg-steer-btn:active {
+  transform: scale(0.97);
+}
+
+.sg-steer-btn[data-active='true'] {
+  color: var(--sg-text-snow);
+  border-color: rgba(56, 189, 248, 0.65);
+  background: rgba(14, 116, 144, 0.62);
+  box-shadow: 0 2px 10px rgba(14, 165, 233, 0.2);
+}
+
+.sg-steer-btn[data-disabled='true'] {
+  opacity: 0.55;
+}
+
+.sg-steer-recenter-btn {
+  cursor: pointer;
+  appearance: none;
+  font-family: var(--sg-font-ui);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 9px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(52, 211, 153, 0.45);
+  background: rgba(5, 150, 105, 0.34);
+  color: var(--sg-text-snow);
+  white-space: nowrap;
+  transition: background-color 0.14s ease, border-color 0.14s ease, transform 0.08s ease;
+}
+
+.sg-steer-recenter-btn:hover {
+  background: rgba(5, 150, 105, 0.52);
+  border-color: rgba(52, 211, 153, 0.72);
+}
+
+.sg-steer-recenter-btn:active {
+  transform: scale(0.96);
+}
+
+.sg-steer-status {
+  margin-top: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--sg-text-mist);
+}
+
+.sg-steer-status[data-tone='ok'] {
+  color: #6ee7b7;
+}
+
+.sg-steer-status[data-tone='warn'] {
+  color: #fda4af;
 }
 
 /* Pause Quick Toggles Row inside Modal */

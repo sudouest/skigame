@@ -1,3 +1,22 @@
+import {
+  TiltInputController,
+  type DeviceMotionInputEvent,
+  type DeviceOrientationInputEvent,
+  type TiltControlStatus,
+  type TiltInputOptions,
+  type TiltPermissionHost,
+} from './tiltInput';
+
+export type {
+  DeviceMotionAccelerationLike,
+  DeviceMotionInputEvent,
+  DeviceOrientationInputEvent,
+  ScreenOrientationDeg,
+  TiltControlStatus,
+  TiltInputOptions,
+  TiltPermissionHost,
+} from './tiltInput';
+
 export interface InputEventTarget {
   addEventListener(type: string, listener: (event: unknown) => void, options?: unknown): void;
   removeEventListener(type: string, listener: (event: unknown) => void, options?: unknown): void;
@@ -89,6 +108,7 @@ export interface InputManagerOptions {
   readonly swipeJumpMaxDurationMs?: number;
   readonly defaultViewportWidthPx?: number;
   readonly nowMs?: () => number;
+  readonly tilt?: TiltInputOptions;
 }
 
 interface ActivePointerTrack {
@@ -135,6 +155,7 @@ export class InputManager {
   private primaryPointerId: number | null = null;
   private readonly activePointers = new Map<number, ActivePointerTrack>();
   private readonly pointerTrackPool: ActivePointerTrack[] = [];
+  private readonly tilt: TiltInputController;
 
   private readonly onKeyDownListener = (ev: unknown): void => {
     this.handleKeyDown(ev as KeyboardInputEvent);
@@ -178,6 +199,10 @@ export class InputManager {
     this.swipeJumpMaxDurationMs = options.swipeJumpMaxDurationMs ?? 220;
     this.defaultViewportWidthPx = options.defaultViewportWidthPx ?? 800;
     this.nowMs = options.nowMs ?? (() => Date.now());
+    this.tilt = new TiltInputController({
+      ...options.tilt,
+      nowMs: options.tilt?.nowMs ?? this.nowMs,
+    });
   }
 
   get isAttached(): boolean {
@@ -188,14 +213,55 @@ export class InputManager {
     return this._hasSteered;
   }
 
+  get tiltEnabled(): boolean {
+    return this.tilt.enabled;
+  }
+
+  get tiltStatus(): TiltControlStatus {
+    return this.tilt.status;
+  }
+
+  get tiltRequiresPermission(): boolean {
+    return this.tilt.requiresExplicitPermission;
+  }
+
+  enableTilt(): Promise<TiltControlStatus> {
+    return this.tilt.enable();
+  }
+
+  disableTilt(): void {
+    this.tilt.disable();
+  }
+
+  recenterTilt(): void {
+    this.tilt.recenter();
+  }
+
+  resetHasSteered(): void {
+    this._hasSteered = false;
+  }
+
+  handleDeviceOrientation(event: DeviceOrientationInputEvent): void {
+    this.tilt.handleDeviceOrientation(event);
+  }
+
+  handleDeviceMotion(event: DeviceMotionInputEvent): void {
+    this.tilt.handleDeviceMotion(event);
+  }
+
   /**
    * Attaches DOM listeners to injectable targets (e.g., window + canvas).
    * Safe to omit in headless tests and drive via handleKeyDown/handlePointer* instead.
    */
-  attach(keyboardTarget: InputEventTarget, pointerTarget: InputEventTarget = keyboardTarget): void {
+  attach(
+    keyboardTarget: InputEventTarget,
+    pointerTarget: InputEventTarget = keyboardTarget,
+    sensorHost: TiltPermissionHost = keyboardTarget as unknown as TiltPermissionHost,
+  ): void {
     this.detach();
     this.keyboardTarget = keyboardTarget;
     this.pointerTarget = pointerTarget;
+    this.tilt.attach(sensorHost);
 
     keyboardTarget.addEventListener('keydown', this.onKeyDownListener);
     keyboardTarget.addEventListener('keyup', this.onKeyUpListener);
@@ -212,6 +278,7 @@ export class InputManager {
   }
 
   detach(): void {
+    this.tilt.detach();
     if (this.keyboardTarget) {
       this.keyboardTarget.removeEventListener('keydown', this.onKeyDownListener);
       this.keyboardTarget.removeEventListener('keyup', this.onKeyUpListener);
@@ -244,6 +311,7 @@ export class InputManager {
       this.pointerTrackPool.push(track);
     }
     this.activePointers.clear();
+    this.tilt.resetForTransition();
   }
 
   resetAll(): void {
@@ -494,11 +562,22 @@ export class InputManager {
   /**
    * Writes current held state and consumes edge-triggered actions + drag deltas into `out`.
    * Zero-allocation when `out` is reused across frames.
+   * Pass `recordTiltSteer = false` while paused or in menus so idle tilting does not dismiss
+   * the onboarding hint before the run starts.
    */
-  sampleFrameInto(out: MutableInputFrameState): InputFrameState {
-    const steer = (this.rightHeld ? 1 : 0) - (this.leftHeld ? 1 : 0);
+  sampleFrameInto(out: MutableInputFrameState, recordTiltSteer = true): InputFrameState {
+    const keySteer = (this.rightHeld ? 1 : 0) - (this.leftHeld ? 1 : 0);
+    const tiltSteer = this.tilt.sampleSteer();
+    const tiltActive = this.tilt.isActivelySteering;
+    const steer = keySteer !== 0 ? keySteer : tiltActive ? tiltSteer : 0;
+    if (recordTiltSteer && tiltActive && Math.abs(tiltSteer) >= 0.12) {
+      this._hasSteered = true;
+    }
+
     const width = this.getViewportWidth();
-    const dragPx = this.accumulatedDragPx;
+    // Suppress accidental horizontal touch-drag jitter while live tilt steering is active;
+    // tap-jump, swipe-up-jump, and 2-finger brake remain active.
+    const dragPx = tiltActive ? 0 : this.accumulatedDragPx;
     const dragNorm = (dragPx / Math.max(1, width)) * this.dragSensitivity;
 
     out.steer = steer;

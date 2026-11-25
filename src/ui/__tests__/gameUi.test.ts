@@ -43,6 +43,7 @@ class MockClassList {
 class MockElement {
   readonly children: MockElement[] = [];
   readonly dataset: Record<string, string> = {};
+  readonly attributes: Record<string, string> = {};
   readonly style: Record<string, string> = {};
   readonly classList: MockClassList;
   parentElement: MockElement | null = null;
@@ -57,6 +58,10 @@ class MockElement {
     readonly ownerDocument: MockDocument,
   ) {
     this.classList = new MockClassList(this);
+  }
+
+  setAttribute(name: string, value: string): void {
+    this.attributes[name] = value;
   }
 
   get className(): string {
@@ -144,6 +149,8 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
     let startCalls = 0;
     let blizzardCalls = 0;
     let selectedSkier = '';
+    const tiltCalls: boolean[] = [];
+    let recenterCalls = 0;
     const callbacks: GameUICallbacks = {
       onStart: () => {
         startCalls++;
@@ -159,6 +166,12 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
       },
       onToggleDebugDraw: () => {},
       onToggleTelemetry: () => {},
+      onSetTiltEnabled: (enabled) => {
+        tiltCalls.push(enabled);
+      },
+      onRecenterTilt: () => {
+        recenterCalls++;
+      },
     };
 
     const ui = new GameUI(mountEl as unknown as HTMLElement, eventBus, callbacks);
@@ -195,13 +208,20 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
       totalLeaks: 0,
     };
 
-    // Click Start + Skier card + Snow toggle button
+    // Click Start + Skier card + Snow toggle + Tilt steering buttons (modal & HUD)
     mountEl.findByClass('sg-cta-primary')[0]!.click();
     mountEl.findByClass('sg-skier-card')[1]!.click();
     mountEl.findByClass('sg-btn-snow')[0]!.click();
+    mountEl.findByClass('sg-btn-steer-tilt')[0]!.click();
+    mountEl.findByClass('sg-btn-steer-drag')[0]!.click();
+    mountEl.findByClass('sg-btn-steer-recenter')[0]!.click();
+    mountEl.findByClass('sg-btn-hud-recenter')[0]!.click();
+    mountEl.findByClass('sg-btn-tilt')[0]!.click();
     expect(startCalls).toBe(1);
     expect(selectedSkier).toBe('skier_carver');
     expect(blizzardCalls).toBe(1);
+    expect(tiltCalls).toEqual([true, false, true]);
+    expect(recenterCalls).toBe(2);
 
     // Emit multiple events to saturate & recycle the 5-slot popup pool
     for (let i = 0; i < 8; i++) {
@@ -237,6 +257,8 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
           hasSteered: false,
           debugDrawEnabled: true,
           telemetryVisible: true,
+          tiltEnabled: true,
+          tiltStatus: 'active',
           overlayMode: 'playing',
         },
         1.0,
@@ -247,8 +269,73 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
     expect(doc.createdCount).toBe(createdAtInit);
     expect(mountEl.findByClass('sg-fork-banner')).toHaveLength(0);
     expect(mountEl.findByClass('sg-hint-pill')[0]!.classList.contains('sg-hidden')).toBe(false);
+    expect(mountEl.findByClass('sg-hint-pill')[0]!.textContent).toContain('Tilt Device');
+    expect(mountEl.findByClass('sg-steer-status')[0]!.textContent).toContain('Tilt device');
+    expect(mountEl.findByClass('sg-steer-status')[0]!.dataset.tone).toBe('ok');
+    expect(mountEl.findByClass('sg-btn-steer-recenter')[0]!.classList.contains('sg-hidden')).toBe(
+      false,
+    );
+    expect(mountEl.findByClass('sg-btn-hud-recenter')[0]!.classList.contains('sg-hidden')).toBe(
+      false,
+    );
+    expect(mountEl.findByClass('sg-btn-tilt')[0]!.attributes['aria-pressed']).toBe('true');
     expect(mountEl.findByClass('sg-telemetry')[0]!.classList.contains('sg-hidden')).toBe(false);
     expect(mountEl.findByClass('sg-overlay')[0]!.classList.contains('sg-hidden')).toBe(true);
+
+    // Warning ribbon triggers if HUD Tilt fails while playing, and unsupported hides HUD Tilt button
+    ui.update(
+      {
+        simState: sim.getState(),
+        profiler,
+        renderStats,
+        leakStatus,
+        hasSteered: true,
+        debugDrawEnabled: false,
+        telemetryVisible: false,
+        tiltEnabled: false,
+        tiltStatus: 'inactive',
+        overlayMode: 'playing',
+      },
+      0.016,
+    );
+    mountEl.findByClass('sg-btn-tilt')[0]!.click();
+    ui.update(
+      {
+        simState: sim.getState(),
+        profiler,
+        renderStats,
+        leakStatus,
+        hasSteered: true,
+        debugDrawEnabled: false,
+        telemetryVisible: false,
+        tiltEnabled: false,
+        tiltStatus: 'denied',
+        overlayMode: 'playing',
+      },
+      0.016,
+    );
+    expect(mountEl.findByClass('sg-broadcast-ribbon')[0]!.dataset.tone).toBe('warning');
+    expect(mountEl.findByClass('sg-steer-status')[0]!.dataset.tone).toBe('warn');
+
+    ui.update(
+      {
+        simState: sim.getState(),
+        profiler,
+        renderStats,
+        leakStatus,
+        hasSteered: true,
+        debugDrawEnabled: false,
+        telemetryVisible: false,
+        tiltEnabled: false,
+        tiltStatus: 'unsupported',
+        overlayMode: 'start',
+      },
+      0.016,
+    );
+    expect(mountEl.findByClass('sg-btn-tilt')[0]!.classList.contains('sg-hidden')).toBe(true);
+    expect(mountEl.findByClass('sg-btn-steer-tilt')[0]!.dataset.disabled).toBe('true');
+    expect(mountEl.findByClass('sg-btn-steer-tilt')[0]!.attributes['aria-disabled']).toBe('true');
+    expect(doc.createdCount).toBe(createdAtInit);
 
     // Dispose unsubscribes every EventBus listener and unmounts cleanly
     ui.dispose();
@@ -270,6 +357,8 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
       onToggleBlizzard: () => {},
       onToggleDebugDraw: () => {},
       onToggleTelemetry: () => {},
+      onSetTiltEnabled: () => {},
+      onRecenterTilt: () => {},
     };
     const ui = new GameUI(mountEl as unknown as HTMLElement, eventBus, callbacks);
     const createdAtInit = doc.createdCount;
@@ -298,6 +387,8 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
           hasSteered: true,
           debugDrawEnabled: false,
           telemetryVisible: false,
+          tiltEnabled: false,
+          tiltStatus: 'inactive',
           overlayMode: 'playing',
         },
         dtSec,

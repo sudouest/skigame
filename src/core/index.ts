@@ -7,3 +7,4 @@ export * from './spatialGrid';
 export * from './profiler';
 export * from './fixedLoop';
 export * from './input';
+export * from './tiltInput';
