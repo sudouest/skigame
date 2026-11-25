@@ -12,7 +12,7 @@ import {
 import type { GraphicsUtils } from './graphicsUtils';
 import type { ProceduralMeshAssets } from './meshFactory';
 import { ATLAS_FRAMES, type BillboardFrameName } from './spriteAtlas';
-import type { SceneryProvider } from './terrainStreamer';
+import type { SceneryProvider } from './sceneryCellStreamer';
 import type { SharedToonMaterials } from './toonMaterials';
 
 const MAX_BOULDERS_SMALL = 128;
@@ -144,9 +144,11 @@ export class InstancePools {
     ): [THREE.InstancedMesh, THREE.InstancedMesh] => {
       const main = gfx.createInstancedMesh(geo, materials.propToonMaterial, cap, name);
       main.frustumCulled = false;
+      main.castShadow = true;
       main.count = 0;
       const outline = gfx.createInstancedMesh(geo, outlineMat, cap, `${name}_Outline`);
       outline.frustumCulled = false;
+      outline.castShadow = false;
       outline.count = 0;
       this.rootGroup.add(main, outline);
       return [main, outline];
@@ -185,6 +187,7 @@ export class InstancePools {
       MAX_DYNAMIC_BILLBOARDS,
       'DynamicBillboardPool',
     );
+    this.dynamicBillboards.mesh.castShadow = false;
     this.staticBillboards = createBillboardPoolMesh(
       gfx,
       billboardQuadGeo,
@@ -192,6 +195,7 @@ export class InstancePools {
       MAX_STATIC_BILLBOARDS,
       'StaticSceneryBillboardPool',
     );
+    this.staticBillboards.mesh.castShadow = false;
     this.rootGroup.add(this.dynamicBillboards.mesh, this.staticBillboards.mesh);
   }
 

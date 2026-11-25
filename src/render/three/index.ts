@@ -12,7 +12,11 @@ export {
 export { GraphicsUtils, type CacheableTarget } from './graphicsUtils';
 export { computeSmoothNormals } from './smoothNormals';
 export {
+  bindClipmapStoreToMaterial,
   createSharedToonMaterials,
+  NOISE_ORIGIN_MOD_PERIOD,
+  positiveMod,
+  type ClipmapShaderUniforms,
   type SharedLightingUniforms,
   type SharedToonMaterials,
 } from './toonMaterials';
@@ -45,25 +49,33 @@ export {
 } from './meshFactory';
 export { SkierRig } from './skierRig';
 export {
-  INNER_TILE_POOL_CAPACITY,
-  INNER_TILE_QUADS,
-  INNER_TILE_SIZE_M,
-  INNER_TILE_SKIRT_DEPTH_M,
-  INNER_TILE_SPACING_M,
-  INNER_TILE_VERT_SPAN,
-  OUTER_TILE_POOL_CAPACITY,
-  OUTER_TILE_QUADS,
-  OUTER_TILE_SIZE_M,
-  OUTER_TILE_SKIRT_DEPTH_M,
-  OUTER_TILE_SPACING_M,
-  OUTER_TILE_VERT_SPAN,
-  TERRAIN_LOD_SPECS,
-  TerrainTilePool,
-  type TerrainLodSpec,
-  type TerrainLodTier,
-  type TerrainTilePoolOptions,
-  type TerrainTileSlot,
-} from './terrainTilePool';
+  CLIPMAP_ANCHOR_RECENTER_THRESHOLD_M,
+  CLIPMAP_COMMITTED_SIZE,
+  CLIPMAP_GUARD_HALF,
+  CLIPMAP_GUARD_TEXELS,
+  CLIPMAP_LAYERS,
+  CLIPMAP_LAYER_TEXELS,
+  CLIPMAP_PATCH_QUADS,
+  CLIPMAP_SPACINGS_M,
+  CLIPMAP_TEX_MASK,
+  CLIPMAP_TEX_SIZE,
+  CLIPMAP_TOTAL_TEXELS,
+  ClipmapDataStore,
+  DEFAULT_CLIPMAP_STREAM_BUDGET_MS,
+  linearToSRGBChannel,
+  srgbToLinearChannel,
+  type ClipmapDataStoreOptions,
+} from './clipmapDataStore';
+export {
+  buildClipmapPatchBaseGeometry,
+  CLIPMAP_LOD_RANGES_M,
+  CLIPMAP_MORPH_STARTS_M,
+  CLIPMAP_PATCH_TRIANGLE_COUNT,
+  CLIPMAP_PATCH_VERT_SPAN,
+  CLIPMAP_PATCH_VERTEX_COUNT,
+  MAX_CLIPMAP_PATCHES,
+  TerrainClipmap,
+} from './terrainClipmap';
 export {
   computeScenerySlopeSinkY,
   computeStageSceneryDensity,
@@ -71,14 +83,17 @@ export {
   selectWinningSceneryRule,
   speciesToBillboardFrame,
   type SceneryEnvSignal,
+  type TerrainLodTier,
 } from './scenerySelector';
 export {
-  TerrainStreamer,
-  packTileKey,
+  DEFAULT_SCENERY_STREAM_BUDGET_MS,
+  packSceneryCellKey,
+  SCENERY_CELL_SIZE_M,
+  SceneryCellStreamer,
+  type SceneryCellStreamerOptions,
   type SceneryProvider,
-  type TerrainStreamerOptions,
   type TileSceneryItem,
-} from './terrainStreamer';
+} from './sceneryCellStreamer';
 export {
   LandmarkStreamer,
   type LandmarkStreamerOptions,
@@ -89,8 +104,13 @@ export { BackpackStack } from './backpackStack';
 export { TossedPresents } from './tossedPresents';
 export { SkiTracks } from './skiTracks';
 export { MAX_SNOW_PARTICLES, SnowVfx } from './snowVfx';
+export { SkyDome, type SkyDomeUniforms } from './skyDome';
+export { CarveSprayVfx, MAX_CARVE_SPRAY_PARTICLES } from './carveSprayVfx';
 export { DebugOverlay3D } from './debugOverlay';
 export {
+  CAMERA_FAR_M,
+  CAMERA_NEAR_M,
+  DEFAULT_TERRAIN_STREAM_BUDGET_MS,
   ThreeRenderer,
   type ThreeRendererOptions,
   type ThreeRendererStats,

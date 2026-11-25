@@ -1,12 +1,12 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_SCENERY_TIER_RULES } from '../../../content/sceneryRules';
 import {
   STAGE_BLIZZARD_RIDGE,
   STAGE_ICY_BLACK,
   STAGE_POWDER_BOWL,
   STAGE_SUNNY_BLUE,
 } from '../../../content/stages';
-import { DEFAULT_SCENERY_TIER_RULES } from '../../../content/sceneryRules';
 import { EventBus } from '../../../core/eventBus';
 import { FIXED_DT } from '../../../core/fixedLoop';
 import { clamp } from '../../../core/math';
@@ -17,9 +17,9 @@ import {
   createMountainSampleOut,
   createMutablePlayerIntent,
   createSurfaceSample,
+  TERRAIN_FLAG_ON_PISTE,
   type ChunkRangeOut,
   type MountainColumnOut,
-  type MountainFieldView,
   type MountainSampleOut,
   type ReadonlySimState,
   type RibbonPointOut,
@@ -27,40 +27,52 @@ import {
   type SimEvents,
   type SpineFrameOut,
   type SpineView,
+  type TerrainDirtyRect,
+  type TerrainFieldView,
+  type TerrainGridSampleOut,
   type TerrainSegmentView,
   type TrailSlotRole,
   type TrailWindowView,
 } from '../../../sim/contracts';
-import { MountainField } from '../../../sim/mountainField';
 import { SkiSimulation } from '../../../sim/skiSimulation';
-import { TrailWindow } from '../../../sim/trailWindow';
+import {
+  CLIPMAP_LAYERS,
+  CLIPMAP_PATCH_QUADS,
+  CLIPMAP_SPACINGS_M,
+  CLIPMAP_TEX_SIZE,
+  ClipmapDataStore,
+  linearToSRGBChannel,
+  srgbToLinearChannel,
+} from '../clipmapDataStore';
 import { GraphicsTracker } from '../graphicsTracker';
 import { GraphicsUtils } from '../graphicsUtils';
 import { InstancePools, MAX_STATIC_BILLBOARDS } from '../instancePools';
 import { LandmarkStreamer } from '../landmarkStreamer';
 import { createForkArchObject, createProceduralMeshAssets } from '../meshFactory';
-import { ThreeRenderer } from '../renderer';
+import { CAMERA_FAR_M, ThreeRenderer } from '../renderer';
 import {
-  TerrainStreamer,
-  packTileKey,
+  SceneryCellStreamer,
   type TileSceneryItem,
-} from '../terrainStreamer';
+} from '../sceneryCellStreamer';
 import {
   evaluateSceneryRuleFitness,
   selectWinningSceneryRule,
   type SceneryEnvSignal,
 } from '../scenerySelector';
 import {
-  CLIFF_ROCK_FULL_NY_INNER,
-  CLIFF_ROCK_FULL_NY_OUTER,
-  INNER_TILE_QUADS,
-  INNER_TILE_SIZE_M,
-  INNER_TILE_SPACING_M,
-  OUTER_TILE_QUADS,
-  OUTER_TILE_SIZE_M,
-  TerrainTilePool,
-} from '../terrainTilePool';
-import { createSharedToonMaterials } from '../toonMaterials';
+  buildClipmapPatchBaseGeometry,
+  CLIPMAP_LOD_RANGES_M,
+  CLIPMAP_PATCH_TRIANGLE_COUNT,
+  CLIPMAP_PATCH_VERTEX_COUNT,
+  MAX_CLIPMAP_PATCHES,
+  TerrainClipmap,
+} from '../terrainClipmap';
+import {
+  bindClipmapStoreToMaterial,
+  createSharedToonMaterials,
+  NOISE_ORIGIN_MOD_PERIOD,
+  positiveMod,
+} from '../toonMaterials';
 
 function createMockSegment(
   id: number,
@@ -148,12 +160,52 @@ function createMockSegment(
   };
 }
 
-function createMockMountainField(worldSeed = 1337): MountainFieldView {
+interface MutableMockField extends TerrainFieldView {
+  setOffset(ox: number, oy: number, oz: number): void;
+  addHeightBump(minAbsX: number, maxAbsX: number, minAbsZ: number, maxAbsZ: number, deltaH: number): void;
+  readonly ackCount: number;
+}
+
+function createMockMountainField(worldSeed = 1337): MutableMockField {
   const state = {
     worldSeed,
     originOffsetX: 0,
+    originOffsetY: 0,
     originOffsetZ: 0,
+    fieldRevision: 1,
+    ackCount: 0,
+    bumpRect: null as { minX: number; maxX: number; minZ: number; maxZ: number; deltaH: number } | null,
   };
+  const dirtyRects: TerrainDirtyRect[] = [];
+  const stageIdTable = ['powder-bowl', 'sunny-blue', 'granite-gorge', 'icy-black', 'blizzard-ridge'];
+
+  const heightAbs = (absX: number, absZ: number): number => {
+    let h = absZ * 0.25 + Math.sin(absX * 0.08) * 1.5;
+    const b = state.bumpRect;
+    if (b && absX >= b.minX && absX <= b.maxX && absZ >= b.minZ && absZ <= b.maxZ) {
+      h += b.deltaH;
+    }
+    return h;
+  };
+
+  const evalSample = (wx: number, wz: number, out: MountainSampleOut): MountainSampleOut => {
+    const base = createMountainSampleOut();
+    Object.assign(out, base);
+    const absX = wx + state.originOffsetX;
+    const absZ = wz + state.originOffsetZ;
+    out.heightY = heightAbs(absX, absZ) - state.originOffsetY;
+    out.macroY = absZ * 0.25 - state.originOffsetY;
+    out.onPiste = Math.abs(absX) <= 14;
+    out.pisteWeight = out.onPiste ? 1 : 0;
+    out.nearestSignedX = absX;
+    out.nearestHalfWidth = 14;
+    out.nearestStageId = 'sunny-blue';
+    out.normalX = 0;
+    out.normalY = 0.96;
+    out.normalZ = -0.25;
+    return out;
+  };
+
   return {
     get worldSeed(): number {
       return state.worldSeed;
@@ -161,8 +213,35 @@ function createMockMountainField(worldSeed = 1337): MountainFieldView {
     get originOffsetX(): number {
       return state.originOffsetX;
     },
+    get originOffsetY(): number {
+      return state.originOffsetY;
+    },
     get originOffsetZ(): number {
       return state.originOffsetZ;
+    },
+    get fieldRevision(): number {
+      return state.fieldRevision;
+    },
+    get dirtyRects(): readonly TerrainDirtyRect[] {
+      return dirtyRects;
+    },
+    get ackCount(): number {
+      return state.ackCount;
+    },
+    stageIdTable,
+    setOffset(ox: number, oy: number, oz: number): void {
+      state.originOffsetX = ox;
+      state.originOffsetY = oy;
+      state.originOffsetZ = oz;
+    },
+    addHeightBump(minX: number, maxX: number, minZ: number, maxZ: number, deltaH: number): void {
+      state.bumpRect = { minX, maxX, minZ, maxZ, deltaH };
+      dirtyRects.push({ minAbsX: minX, maxAbsX: maxX, minAbsZ: minZ, maxAbsZ: maxZ });
+      state.fieldRevision++;
+    },
+    ackDirtyRects(): void {
+      dirtyRects.length = 0;
+      state.ackCount++;
     },
     collectSpinesInBounds(
       _minX: number,
@@ -177,40 +256,64 @@ function createMockMountainField(worldSeed = 1337): MountainFieldView {
     evaluateHeight(wx: number, wz: number): number {
       const absX = wx + state.originOffsetX;
       const absZ = wz + state.originOffsetZ;
-      return absZ * 0.25 + Math.sin(absX * 0.08) * 1.5;
+      return heightAbs(absX, absZ) - state.originOffsetY;
     },
     evaluateColumn(wx: number, wz: number, out: MountainColumnOut): MountainColumnOut {
       const base = createMountainColumnOut();
       Object.assign(out, base);
       const absX = wx + state.originOffsetX;
       const absZ = wz + state.originOffsetZ;
-      const h = absZ * 0.25 + Math.sin(absX * 0.08) * 1.5;
-      out.heightY = h;
-      out.macroY = absZ * 0.25;
+      out.heightY = heightAbs(absX, absZ) - state.originOffsetY;
+      out.macroY = absZ * 0.25 - state.originOffsetY;
       out.onPiste = Math.abs(absX) <= 14;
       out.pisteWeight = out.onPiste ? 1 : 0;
       out.nearestSignedX = absX;
+      out.nearestHalfWidth = 14;
+      out.nearestStageId = 'sunny-blue';
       return out;
     },
-    evaluate(wx: number, wz: number, out: MountainSampleOut): MountainSampleOut {
-      const base = createMountainSampleOut();
-      Object.assign(out, base);
-      const absX = wx + state.originOffsetX;
-      const absZ = wz + state.originOffsetZ;
-      out.heightY = absZ * 0.25 + Math.sin(absX * 0.08) * 1.5;
-      out.macroY = absZ * 0.25;
-      out.onPiste = Math.abs(absX) <= 14;
-      out.pisteWeight = out.onPiste ? 1 : 0;
-      out.nearestSignedX = absX;
-      out.normalX = 0;
-      out.normalY = 0.96;
-      out.normalZ = -0.25;
-      return out;
+    evaluate: evalSample,
+    evaluateSample: evalSample,
+    sampleColumnGrid(
+      originAbsX: number,
+      originAbsZ: number,
+      cols: number,
+      rows: number,
+      stepM: number,
+      blockOriginY: number,
+      out: TerrainGridSampleOut,
+    ): void {
+      for (let r = 0; r < rows; r++) {
+        const absZ = originAbsZ + r * stepM;
+        for (let c = 0; c < cols; c++) {
+          const absX = originAbsX + c * stepM;
+          const idx = r * cols + c;
+          const macroY = absZ * 0.25;
+          const h = heightAbs(absX, absZ);
+          out.heights[idx] = h - blockOriginY;
+          out.macroY[idx] = macroY - blockOriginY;
+          out.normals[idx * 3] = 0;
+          out.normals[idx * 3 + 1] = 0.96;
+          out.normals[idx * 3 + 2] = -0.25;
+          const onPiste = Math.abs(absX) <= 14;
+          out.pisteWeight[idx] = onPiste ? 1 : 0;
+          out.iceWeight[idx] = 0;
+          out.powderWeight[idx] = onPiste ? 0 : 1;
+          out.dividerMask[idx] = 0;
+          out.flowXZ[idx * 2] = 0;
+          out.flowXZ[idx * 2 + 1] = -1;
+          out.offPisteDist[idx] = Math.max(0, Math.abs(absX) - 14);
+          out.primaryStageIdx[idx] = 1; // sunny-blue
+          out.secondaryStageIdx[idx] = 1;
+          out.secondaryStageWeightU8[idx] = 0;
+          out.flags[idx] = onPiste ? TERRAIN_FLAG_ON_PISTE : 0;
+        }
+      }
     },
   };
 }
 
-function createMockSimState(): ReadonlySimState {
+function createMockSimState(fieldOverride?: TerrainFieldView): ReadonlySimState {
   const currLandmarks: SegmentLandmarkRequirement[] = [
     {
       id: 'fork_arch_1_left',
@@ -375,7 +478,7 @@ function createMockSimState(): ReadonlySimState {
       blizzardDim: 0.35,
     },
     trailWindow: { prev: null, curr, nextLeft, nextRight },
-    mountainField: createMockMountainField(1337),
+    mountainField: fieldOverride ?? createMockMountainField(1337),
     rebase: {
       rebaseCount: 0,
       offsetX: 0,
@@ -524,8 +627,122 @@ function createMockSimState(): ReadonlySimState {
   };
 }
 
-describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', () => {
-  it('streams 2-tier world tiles with +Y CCW top winding, valid bounds, atomic 2x2 LOD swap, and zero GPU leaks', () => {
+interface MockGlUploadCall {
+  x: number;
+  y: number;
+  layer: number;
+  w: number;
+  h: number;
+  format: number;
+  type: number;
+  srcOffset: number;
+}
+
+function createMockWebGL2Renderer(): {
+  renderer: THREE.WebGLRenderer;
+  initCalls: Array<{ tex: THREE.Texture; versionAtInit: number }>;
+  subUploads: MockGlUploadCall[];
+  pixelStoreCalls: Array<[number, number]>;
+  clearProps(): void;
+} {
+  const initCalls: Array<{ tex: THREE.Texture; versionAtInit: number }> = [];
+  const subUploads: MockGlUploadCall[] = [];
+  const pixelStoreCalls: Array<[number, number]> = [];
+  const propsMap = new WeakMap<object, Record<string, unknown>>();
+  let nextHandleId = 1;
+  let boundArrayTex: unknown = { id: 999, sentinel: true };
+
+  const gl = {
+    TEXTURE_2D_ARRAY: 0x8c1a,
+    TEXTURE_BINDING_2D_ARRAY: 0x8c1d,
+    UNPACK_ALIGNMENT: 0x0cf5,
+    UNPACK_FLIP_Y_WEBGL: 0x9240,
+    UNPACK_PREMULTIPLY_ALPHA_WEBGL: 0x9241,
+    UNPACK_ROW_LENGTH: 0x0cf2,
+    UNPACK_IMAGE_HEIGHT: 0x806e,
+    UNPACK_SKIP_PIXELS: 0x0cf4,
+    UNPACK_SKIP_ROWS: 0x0cf3,
+    UNPACK_SKIP_IMAGES: 0x806d,
+    RED: 0x1903,
+    RGBA: 0x1908,
+    FLOAT: 0x1406,
+    UNSIGNED_BYTE: 0x1401,
+    getParameter(pname: number): unknown {
+      if (pname === 0x8c1d) return boundArrayTex;
+      return null;
+    },
+    pixelStorei(pname: number, param: number): void {
+      pixelStoreCalls.push([pname, param]);
+    },
+    bindTexture(_target: number, tex: unknown): void {
+      boundArrayTex = tex;
+    },
+    texSubImage3D(
+      _target: number,
+      _level: number,
+      x: number,
+      y: number,
+      layer: number,
+      w: number,
+      h: number,
+      _depth: number,
+      format: number,
+      type: number,
+      _srcData: ArrayBufferView,
+      srcOffset = 0,
+    ): void {
+      subUploads.push({ x, y, layer, w, h, format, type, srcOffset });
+    },
+  };
+
+  let propStore = propsMap;
+  const renderer = {
+    getContext: () => gl,
+    properties: {
+      get(obj: object): Record<string, unknown> {
+        let p = propStore.get(obj);
+        if (!p) {
+          p = {};
+          propStore.set(obj, p);
+        }
+        return p;
+      },
+    },
+    initTexture(tex: THREE.Texture): void {
+      initCalls.push({ tex, versionAtInit: tex.version });
+      if (tex.version > 0) {
+        const p = renderer.properties.get(tex) as Record<string, unknown>;
+        p.__webglTexture = { id: nextHandleId++ };
+      }
+    },
+  } as unknown as THREE.WebGLRenderer;
+
+  return {
+    renderer,
+    initCalls,
+    subUploads,
+    pixelStoreCalls,
+    clearProps(): void {
+      propStore = new WeakMap<object, Record<string, unknown>>();
+    },
+  };
+}
+
+function expandThreeShaderIncludes(source: string): string {
+  const chunks = THREE.ShaderChunk as unknown as Record<string, string>;
+  let result = source;
+  for (let depth = 0; depth < 8; depth++) {
+    const next = result.replace(/#include\s+<([\w_]+)>/g, (_m, name: string) => {
+      return chunks[name] ?? `#include <${name}>`;
+    });
+    if (next === result) break;
+    result = next;
+  }
+  return result;
+}
+
+describe('CDLOD TerrainClipmap, ClipmapDataStore, SceneryCellStreamer, LandmarkStreamer & ThreeRenderer', () => {
+  it('builds 1-draw-call 16x16 CDLOD InstancedMesh with +Y CCW diagonals, camera.far=750, non-overflowing quadtree, and zero GPU leaks', () => {
     let clockMs = 0;
     const eventBus = new EventBus<SimEvents>();
     const profiler = new Profiler();
@@ -536,109 +753,58 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
       nowMs: () => clockMs,
     });
 
-    const simState = createMockSimState();
+    expect(renderer.camera.far).toBe(CAMERA_FAR_M);
+    expect(renderer.camera.far).toBe(750);
 
-    // Stream across multiple frames until all 36 inner + 49 outer = 85 tiles finish
-    for (let f = 0; f < 30; f++) {
+    const simState = createMockSimState();
+    for (let f = 0; f < 12; f++) {
       clockMs += 16;
       renderer.sync(simState, 0.5, 1 / 60, 50);
-      if (renderer.terrainStreamer.queuedTileCount === 0) break;
-    }
-
-    expect(renderer.terrainStreamer.activeTileCount).toBe(85);
-    expect(renderer.terrainStreamer.queuedTileCount).toBe(0);
-    expect(renderer.terrainStreamer.tilePool.innerActiveCount).toBe(36);
-    expect(renderer.terrainStreamer.tilePool.outerActiveCount).toBe(49);
-    expect(renderer.terrainStreamer.tilePool.innerCapacity).toBe(48);
-    expect(renderer.terrainStreamer.tilePool.outerCapacity).toBe(96);
-
-    // Check visible counts: all 36 lod=0 inner tiles visible, 9 inner parents hidden, 40 outer visible
-    let innerVisible = 0;
-    let outerVisible = 0;
-    let outerHiddenReady = 0;
-    for (let i = 0; i < renderer.terrainStreamer.tilePool.innerCapacity; i++) {
-      const slot = renderer.terrainStreamer.tilePool.getSlot(0, i)!;
-      if (slot.inUse && slot.container.visible) innerVisible++;
-    }
-    for (let i = 0; i < renderer.terrainStreamer.tilePool.outerCapacity; i++) {
-      const slot = renderer.terrainStreamer.tilePool.getSlot(1, i)!;
-      if (slot.inUse) {
-        if (slot.container.visible) outerVisible++;
-        else if (slot.ready) outerHiddenReady++;
+      if (renderer.clipmapStore.pendingWorkCount === 0 && renderer.sceneryStreamer.queuedCellCount === 0) {
+        break;
       }
     }
-    expect(innerVisible).toBe(36);
-    expect(outerHiddenReady).toBe(9);
-    expect(outerVisible).toBe(40);
 
-    // Verify geometry buffers, bounding spheres, +Y CCW top surface winding, and outward skirts
+    // 1. Verify 1-draw-call InstancedMesh base patch geometry & +Y CCW uniform v00->v11 winding
+    const clipMesh = renderer.terrainClipmap.mesh;
+    expect(clipMesh.isInstancedMesh).toBe(true);
+    expect(clipMesh.frustumCulled).toBe(false);
+    expect(clipMesh.receiveShadow).toBe(true);
+    expect(clipMesh.castShadow).toBe(false);
+    expect(clipMesh.count).toBe(renderer.terrainClipmap.patchCount);
+    expect(clipMesh.count).toBeGreaterThan(20);
+    expect(clipMesh.count).toBeLessThanOrEqual(MAX_CLIPMAP_PATCHES);
+
+    const baseGeo = buildClipmapPatchBaseGeometry();
+    const posAttr = baseGeo.getAttribute('position') as THREE.BufferAttribute;
+    const idxAttr = baseGeo.getIndex()!;
+    expect(posAttr.count).toBe(CLIPMAP_PATCH_VERTEX_COUNT); // 289
+    expect(idxAttr.count).toBe(CLIPMAP_PATCH_TRIANGLE_COUNT * 3); // 1536 (512 tris)
+
     const vA = new THREE.Vector3();
     const vB = new THREE.Vector3();
     const vC = new THREE.Vector3();
     const e1 = new THREE.Vector3();
     const e2 = new THREE.Vector3();
     const triN = new THREE.Vector3();
-
-    for (const lod of [0, 1] as const) {
-      const slot = renderer.terrainStreamer.tilePool.getSlot(lod, 0)!;
-      expect(slot.inUse).toBe(true);
-      expect(slot.ready).toBe(true);
-      expect(slot.posAttr.array).toBe(slot.positions);
-      expect(slot.normAttr.array).toBe(slot.normals);
-      expect(slot.colAttr.array).toBe(slot.colors);
-
-      const bs = slot.geometry.boundingSphere;
-      expect(bs).not.toBeNull();
-      expect(Number.isFinite(bs!.radius)).toBe(true);
-      expect(bs!.radius).toBeGreaterThan(15);
-
-      for (let k = 0; k < slot.positions.length; k++) {
-        expect(Number.isFinite(slot.positions[k]!)).toBe(true);
-        expect(Number.isFinite(slot.normals[k]!)).toBe(true);
-        expect(Number.isFinite(slot.colors[k]!)).toBe(true);
-      }
-
-      const idxArr = slot.geometry.getIndex()!.array;
-      for (let k = 0; k < slot.spec.topIndexCount; k += 3) {
-        const ia = idxArr[k]! * 3;
-        const ib = idxArr[k + 1]! * 3;
-        const ic = idxArr[k + 2]! * 3;
-        vA.set(slot.positions[ia]!, slot.positions[ia + 1]!, slot.positions[ia + 2]!);
-        vB.set(slot.positions[ib]!, slot.positions[ib + 1]!, slot.positions[ib + 2]!);
-        vC.set(slot.positions[ic]!, slot.positions[ic + 1]!, slot.positions[ic + 2]!);
-        e1.subVectors(vB, vA);
-        e2.subVectors(vC, vA);
-        triN.crossVectors(e1, e2);
-        expect(triN.y).toBeGreaterThan(0);
-      }
-
-      // Skirt triangles sit immediately after topIndexCount and drop -skirtDepth vertically
-      const skirtTrisPerEdge = slot.spec.quads * 2 * 3;
-      for (let k = slot.spec.topIndexCount; k < slot.spec.totalIndexCount; k += 3) {
-        const ia = idxArr[k]! * 3;
-        const ib = idxArr[k + 1]! * 3;
-        const ic = idxArr[k + 2]! * 3;
-        vA.set(slot.positions[ia]!, slot.positions[ia + 1]!, slot.positions[ia + 2]!);
-        vB.set(slot.positions[ib]!, slot.positions[ib + 1]!, slot.positions[ib + 2]!);
-        vC.set(slot.positions[ic]!, slot.positions[ic + 1]!, slot.positions[ic + 2]!);
-        e1.subVectors(vB, vA);
-        e2.subVectors(vC, vA);
-        triN.crossVectors(e1, e2);
-        expect(Math.abs(triN.y)).toBeLessThan(1e-4);
-
-        const edgeIdx = Math.floor((k - slot.spec.topIndexCount) / skirtTrisPerEdge);
-        if (edgeIdx === 0) expect(triN.z).toBeLessThan(0); // North -Z
-        if (edgeIdx === 1) expect(triN.z).toBeGreaterThan(0); // South +Z
-        if (edgeIdx === 2) expect(triN.x).toBeLessThan(0); // West -X
-        if (edgeIdx === 3) expect(triN.x).toBeGreaterThan(0); // East +X
-      }
+    for (let k = 0; k < idxAttr.count; k += 3) {
+      const ia = idxAttr.getX(k);
+      const ib = idxAttr.getX(k + 1);
+      const ic = idxAttr.getX(k + 2);
+      vA.fromBufferAttribute(posAttr, ia);
+      vB.fromBufferAttribute(posAttr, ib);
+      vC.fromBufferAttribute(posAttr, ic);
+      e1.subVectors(vB, vA);
+      e2.subVectors(vC, vA);
+      triN.crossVectors(e1, e2);
+      expect(triN.y).toBeGreaterThan(0);
     }
+    baseGeo.dispose();
 
-    // Fog density clamped >= 65m
+    // 2. Verify fog density clamp (>= 65m), pools, landmarks, shadows, ski tracks, backpack, debug overlay
     const fog = renderer.scene.fog as THREE.FogExp2;
     expect(fog.density).toBeLessThanOrEqual(1.6 / 65 + 1e-4);
 
-    // Verify instanced pools, landmarks, shadows, ski tracks, backpack stack, debug overlay
     const poolsRoot = renderer.scene.getObjectByName('InstancePoolsRoot')!;
     const boulderSmallPool = poolsRoot.getObjectByName('BoulderSmallPool') as THREE.InstancedMesh;
     const boulderLargePool = poolsRoot.getObjectByName('BoulderLargePool') as THREE.InstancedMesh;
@@ -664,12 +830,8 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
       if (obj.name === 'ForkArchLandmark') forkArches.push(obj);
     });
     expect(forkArches).toHaveLength(2);
-    expect(
-      forkArches.some((a) => a.getObjectByName('ForkBadgeSquare')?.visible === true),
-    ).toBe(true);
-    expect(
-      forkArches.some((a) => a.getObjectByName('ForkBadgeDiamond')?.visible === true),
-    ).toBe(true);
+    expect(forkArches.some((a) => a.getObjectByName('ForkBadgeSquare')?.visible === true)).toBe(true);
+    expect(forkArches.some((a) => a.getObjectByName('ForkBadgeDiamond')?.visible === true)).toBe(true);
 
     const shadowsPool = renderer.scene.getObjectByName('ContactShadowsPool') as THREE.InstancedMesh;
     expect(shadowsPool.count).toBe(7);
@@ -685,7 +847,7 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     const debugRoot = renderer.scene.getObjectByName('DebugOverlay3DRoot')!;
     expect(debugRoot.visible).toBe(true);
 
-    // Leak check & clean resize + dispose
+    // 3. Leak check, resize, and complete disposal
     expect(renderer.runLeakCheck(0, true).totalLeaks).toBe(0);
 
     renderer.resize(450, 900);
@@ -702,253 +864,582 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     expect(afterDispose.cachedTextures).toBe(0);
   });
 
-  it('performs atomic 2x2 child vs 64m parent LOD visibility and scenery swap', () => {
-    let clockMs = 0;
+  it('enforces CDLOD quadtree lodRange non-overflow bounds across all 5 tiers and worst-case snap offsets (farCorner <= committedHalfSpan)', () => {
     const tracker = new GraphicsTracker();
     const gfx = new GraphicsUtils(tracker);
     const mats = createSharedToonMaterials(gfx);
-    const streamer = new TerrainStreamer(gfx, mats, {
+    const store = new ClipmapDataStore(gfx);
+    bindClipmapStoreToMaterial(gfx, mats, store);
+    const clipmap = new TerrainClipmap(gfx, mats.terrainMaterial, mats.clipmapUniforms);
+    const field = createMockMountainField(42);
+
+    // Worst-case focus positions right before 16-texel snap boundaries (positive and negative!)
+    const testPositions: Array<[number, number]> = [
+      [0, 0],
+      [7.99, 7.99],
+      [-0.01, -7.99],
+      [127.99, -255.99],
+      [-511.95, 1023.95],
+    ];
+
+    for (const [fx, fz] of testPositions) {
+      store.reset();
+      store.update(field, fx, 0, fz, null, 50);
+      // Full 360-degree quadtree (no frustum culling) to stress-test every single emitted patch
+      clipmap.update(store, fx, fz, 0, 0, 0, null);
+
+      expect(clipmap.patchCount).toBeGreaterThan(80);
+      expect(clipmap.patchCount).toBeLessThanOrEqual(MAX_CLIPMAP_PATCHES);
+
+      // Every single LOD tier L0..L4 must be represented in full 360-degree traversal
+      for (let L = 0; L < CLIPMAP_LAYERS; L++) {
+        expect(clipmap.patchCountsByLod[L]!).toBeGreaterThan(0);
+      }
+
+      // Verify EVERY emitted patch corner fits strictly inside its committed toroidal texture radius!
+      const pw = clipmap.patchWorldArray;
+      const pt = clipmap.patchTexArray;
+      for (let i = 0; i < clipmap.patchCount; i++) {
+        const o4 = i * 4;
+        const originX = pw[o4]!;
+        const originZ = pw[o4 + 2]!;
+        const spacing = pw[o4 + 3]!;
+        const modX = pt[o4]!;
+        const modZ = pt[o4 + 1]!;
+        const lod = Math.round(pt[o4 + 2]!);
+
+        expect(lod).toBeGreaterThanOrEqual(0);
+        expect(lod).toBeLessThan(CLIPMAP_LAYERS);
+        expect(spacing).toBe(CLIPMAP_SPACINGS_M[lod]!);
+        expect(Number.isInteger(modX)).toBe(true);
+        expect(Number.isInteger(modZ)).toBe(true);
+        expect(modX).toBeGreaterThanOrEqual(0);
+        expect(modX).toBeLessThan(CLIPMAP_TEX_SIZE);
+        expect(modZ).toBeGreaterThanOrEqual(0);
+        expect(modZ).toBeLessThan(CLIPMAP_TEX_SIZE);
+
+        const patchSizeM = CLIPMAP_PATCH_QUADS * spacing;
+        const absTx0 = Math.round(originX / spacing);
+        const absTz0 = Math.round(originZ / spacing);
+        expect(absTx0 & (CLIPMAP_PATCH_QUADS - 1)).toBe(0);
+        expect(absTz0 & (CLIPMAP_PATCH_QUADS - 1)).toBe(0);
+        expect((absTx0 & 255)).toBe(modX);
+        expect((absTz0 & 255)).toBe(modZ);
+
+        // Hard committed-window non-overflow check (includes right/bottom border vertex +16!)
+        expect(
+          store.isRectCommitted(
+            lod,
+            absTx0,
+            absTx0 + CLIPMAP_PATCH_QUADS,
+            absTz0,
+            absTz0 + CLIPMAP_PATCH_QUADS,
+          ),
+        ).toBe(true);
+
+        // Far corner horizontal distance from focus MUST stay strictly <= committedHalfSpanM (<= 52m on L0!)
+        const farCornerDist = Math.max(
+          Math.hypot(originX - fx, originZ - fz),
+          Math.hypot(originX + patchSizeM - fx, originZ - fz),
+          Math.hypot(originX - fx, originZ + patchSizeM - fz),
+          Math.hypot(originX + patchSizeM - fx, originZ + patchSizeM - fz),
+        );
+        const maxAllowedDist = lod === 0 ? 52 : store.getCommittedHalfSpanM(lod);
+        expect(farCornerDist).toBeLessThanOrEqual(maxAllowedDist);
+      }
+    }
+
+    expect(CLIPMAP_LOD_RANGES_M[0]).toBeLessThanOrEqual(28);
+    clipmap.dispose();
+    tracker.disposeAll();
+  });
+
+  it('produces 0 cracked vertices and 0 uncollapsed odd T-junctions across all L<->L and L<->L+1 shared patch borders (steady-state and forced scroll lag)', () => {
+    const sim = new SkiSimulation({ seed: 2025, startStageId: 'icy-black' });
+    const simState = sim.getState();
+
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const mats = createSharedToonMaterials(gfx);
+    let clockMs = 0;
+    const store = new ClipmapDataStore(gfx, {
       nowMs: () => {
-        clockMs += 0.35;
+        clockMs += 1.0;
         return clockMs;
       },
     });
+    bindClipmapStoreToMaterial(gfx, mats, store);
+    const clipmap = new TerrainClipmap(gfx, mats.terrainMaterial, mats.clipmapUniforms);
 
-    const simState = createMockSimState();
-    // Run with tight budget so 3x3 inner lod=1 parents finish while lod=0 2x2 blocks are partial
-    streamer.step(simState.trailWindow, simState.mountainField, 0, -10, 0, -1, 3);
+    const ox = simState.mountainField.originOffsetX;
+    const oy = simState.mountainField.originOffsetY;
+    const oz = simState.mountainField.originOffsetZ;
 
-    // For every 64m parent cell (px, pz), either all 4 children are visible + parent hidden,
-    // OR all 4 children are hidden + ready parent is visible!
-    const assertAtomicParents = (): void => {
-      for (let pz = -2; pz <= 0; pz++) {
-        for (let px = -1; px <= 1; px++) {
-          let parentSlot = null;
-          for (let i = 0; i < streamer.tilePool.outerCapacity; i++) {
-            const s = streamer.tilePool.getSlot(1, i)!;
-            if (s.inUse && s.absTileX === px && s.absTileZ === pz) {
-              parentSlot = s;
-              break;
-            }
-          }
+    // Exact JS mirror of the vertex shader CDLOD geomorphing & height-fetch transform
+    const evalVertexShader = (
+      patchIdx: number,
+      gx: number,
+      gz: number,
+    ): { x: number; y: number; z: number; morph: number; lod: number } => {
+      const o4 = patchIdx * 4;
+      const patchOriginX = clipmap.patchWorldArray[o4]!;
+      const patchOriginY = clipmap.patchWorldArray[o4 + 1]!;
+      const patchOriginZ = clipmap.patchWorldArray[o4 + 2]!;
+      const spacing = clipmap.patchWorldArray[o4 + 3]!;
+      const originModX = Math.round(clipmap.patchTexArray[o4]!);
+      const originModZ = Math.round(clipmap.patchTexArray[o4 + 1]!);
+      const lod = clamp(Math.round(clipmap.patchTexArray[o4 + 2]!), 0, CLIPMAP_LAYERS - 1);
+      const nextLod = Math.min(lod + 1, CLIPMAP_LAYERS - 1);
+      const morphStart = clipmap.patchTexArray[o4 + 3]!;
+      const morphEnd = mats.clipmapUniforms.uMorphEnds.value[lod]!;
 
-          let childrenReady = 0;
-          let childrenVisible = 0;
-          for (let cz = 0; cz < 2; cz++) {
-            for (let cx = 0; cx < 2; cx++) {
-              const tx = px * 2 + cx;
-              const tz = pz * 2 + cz;
-              for (let i = 0; i < streamer.tilePool.innerCapacity; i++) {
-                const cs = streamer.tilePool.getSlot(0, i)!;
-                if (cs.inUse && cs.absTileX === tx && cs.absTileZ === tz) {
-                  if (cs.ready) childrenReady++;
-                  if (cs.container.visible) childrenVisible++;
-                  break;
-                }
-              }
-            }
-          }
+      const oddX = gx & 1;
+      const oddZ = gz & 1;
+      const coarseGx = gx - oddX;
+      const coarseGz = gz - oddZ;
 
-          if (childrenReady < 4) {
-            expect(childrenVisible).toBe(0);
-            if (parentSlot?.ready) {
-              expect(parentSlot.container.visible).toBe(true);
+      const fineX = patchOriginX + gx * spacing;
+      const fineZ = patchOriginZ + gz * spacing;
+      const coarseX = patchOriginX + coarseGx * spacing;
+      const coarseZ = patchOriginZ + coarseGz * spacing;
+
+      const focus = mats.clipmapUniforms.uFocusLocalXZ.value;
+      const distXZ = Math.hypot(fineX - focus.x, fineZ - focus.y);
+      const morph =
+        lod < CLIPMAP_LAYERS - 1
+          ? clamp((distXZ - morphStart) / Math.max(1e-4, morphEnd - morphStart), 0, 1)
+          : 0;
+
+      const morphedX = fineX + (coarseX - fineX) * morph;
+      const morphedZ = fineZ + (coarseZ - fineZ) * morph;
+
+      const txFine = (originModX + gx) & 255;
+      const tzFine = (originModZ + gz) & 255;
+      const h0 = store.heightData[lod * 65536 + tzFine * 256 + txFine]!;
+      let h1 = h0;
+      if (lod < CLIPMAP_LAYERS - 1 && morph > 0.0001) {
+        const modNext = mats.clipmapUniforms.uLayerOriginModXZ.value[nextLod]!;
+        const txCoarse = Math.round((coarseX + modNext.x) * (0.5 / spacing)) & 255;
+        const tzCoarse = Math.round((coarseZ + modNext.y) * (0.5 / spacing)) & 255;
+        h1 = store.heightData[nextLod * 65536 + tzCoarse * 256 + txCoarse]!;
+      }
+      const height = h0 + (h1 - h0) * morph;
+      return { x: morphedX, y: patchOriginY + height, z: morphedZ, morph, lod };
+    };
+
+    const assertZeroCracksAcrossAllSharedBorders = (label: string): {
+      sameLodChecked: number;
+      crossLodChecked: number;
+    } => {
+      interface PatchMeta {
+        idx: number;
+        lod: number;
+        spacing: number;
+        minX: number;
+        maxX: number;
+        minZ: number;
+        maxZ: number;
+      }
+      const patches: PatchMeta[] = [];
+      for (let i = 0; i < clipmap.patchCount; i++) {
+        const o4 = i * 4;
+        const minX = clipmap.patchWorldArray[o4]!;
+        const minZ = clipmap.patchWorldArray[o4 + 2]!;
+        const spacing = clipmap.patchWorldArray[o4 + 3]!;
+        const lod = Math.round(clipmap.patchTexArray[o4 + 2]!);
+        const size = CLIPMAP_PATCH_QUADS * spacing;
+        patches.push({ idx: i, lod, spacing, minX, maxX: minX + size, minZ, maxZ: minZ + size });
+      }
+
+      let sameLodChecked = 0;
+      let crossLodChecked = 0;
+      let crackedCount = 0;
+      let uncollapsedTJunctions = 0;
+
+      for (let i = 0; i < patches.length; i++) {
+        const a = patches[i]!;
+        for (let j = i + 1; j < patches.length; j++) {
+          const b = patches[j]!;
+          const xTouch = Math.abs(a.maxX - b.minX) < 1e-4 || Math.abs(b.maxX - a.minX) < 1e-4;
+          const zTouch = Math.abs(a.maxZ - b.minZ) < 1e-4 || Math.abs(b.maxZ - a.minZ) < 1e-4;
+          if (!xTouch && !zTouch) continue;
+
+          const overlapMinX = Math.max(a.minX, b.minX);
+          const overlapMaxX = Math.min(a.maxX, b.maxX);
+          const overlapMinZ = Math.max(a.minZ, b.minZ);
+          const overlapMaxZ = Math.min(a.maxZ, b.maxZ);
+
+          const isVerticalEdge = xTouch && overlapMaxZ - overlapMinZ > 1e-4;
+          const isHorizontalEdge = zTouch && overlapMaxX - overlapMinX > 1e-4;
+          if (!isVerticalEdge && !isHorizontalEdge) continue;
+
+          if (a.lod === b.lod) {
+            const steps = isVerticalEdge
+              ? Math.round((overlapMaxZ - overlapMinZ) / a.spacing)
+              : Math.round((overlapMaxX - overlapMinX) / a.spacing);
+            for (let k = 0; k <= steps; k++) {
+              const wx = isVerticalEdge ? overlapMinX : overlapMinX + k * a.spacing;
+              const wz = isVerticalEdge ? overlapMinZ + k * a.spacing : overlapMinZ;
+              const va = evalVertexShader(
+                a.idx,
+                Math.round((wx - a.minX) / a.spacing),
+                Math.round((wz - a.minZ) / a.spacing),
+              );
+              const vb = evalVertexShader(
+                b.idx,
+                Math.round((wx - b.minX) / b.spacing),
+                Math.round((wz - b.minZ) / b.spacing),
+              );
+              sameLodChecked++;
+              const dXZ = Math.hypot(va.x - vb.x, va.z - vb.z);
+              const dY = Math.abs(va.y - vb.y);
+              if (dXZ >= 1e-4 || dY >= 1e-4) crackedCount++;
             }
           } else {
-            expect(childrenVisible).toBe(4);
-            if (parentSlot) {
-              expect(parentSlot.container.visible).toBe(false);
-              expect(parentSlot.ready).toBe(true);
+            // Cross-LOD border: fine (L) must border coarse (L+1) with diff === 1
+            const fine = a.lod < b.lod ? a : b;
+            const coarse = a.lod < b.lod ? b : a;
+            expect(coarse.lod - fine.lod, `${label}: LOD jump > 1`).toBe(1);
+
+            const fineSteps = isVerticalEdge
+              ? Math.round((overlapMaxZ - overlapMinZ) / fine.spacing)
+              : Math.round((overlapMaxX - overlapMinX) / fine.spacing);
+            for (let k = 0; k <= fineSteps; k++) {
+              const wx = isVerticalEdge ? overlapMinX : overlapMinX + k * fine.spacing;
+              const wz = isVerticalEdge ? overlapMinZ + k * fine.spacing : overlapMinZ;
+              const fgx = Math.round((wx - fine.minX) / fine.spacing);
+              const fgz = Math.round((wz - fine.minZ) / fine.spacing);
+              const vf = evalVertexShader(fine.idx, fgx, fgz);
+              crossLodChecked++;
+
+              // On shared L <-> L+1 edge, fine vertex MUST have morph === 1.0 (zero uncollapsed T-junctions!)
+              if (vf.morph < 1 - 1e-5) {
+                uncollapsedTJunctions++;
+              }
+
+              // Coarse target vertex after fine odd-vertex collapse (coarseGrid = g - (g & 1))
+              const targetX = fine.minX + (fgx - (fgx & 1)) * fine.spacing;
+              const targetZ = fine.minZ + (fgz - (fgz & 1)) * fine.spacing;
+              const cgx = Math.round((targetX - coarse.minX) / coarse.spacing);
+              const cgz = Math.round((targetZ - coarse.minZ) / coarse.spacing);
+              const vc = evalVertexShader(coarse.idx, cgx, cgz);
+
+              const dXZ = Math.hypot(vf.x - vc.x, vf.z - vc.z);
+              const dY = Math.abs(vf.y - vc.y);
+              if (dXZ >= 1e-4 || dY >= 1e-4) crackedCount++;
             }
           }
         }
       }
+
+      expect(uncollapsedTJunctions, `${label}: uncollapsed T-junctions`).toBe(0);
+      expect(crackedCount, `${label}: cracked border vertices`).toBe(0);
+      return { sameLodChecked, crossLodChecked };
     };
 
-    assertAtomicParents();
-    let revAfterPartial = streamer.sceneryRevision;
+    // Scenario A: Steady-state real MountainField (seed 2025, icy-black, full 360-degree quadtree)
+    const fx0 = simState.currSkier.posX;
+    const fy0 = simState.currSkier.posY;
+    const fz0 = simState.currSkier.posZ;
+    store.update(simState.mountainField, fx0, fy0, fz0, null, 50);
+    clipmap.update(store, fx0, fz0, ox, oy, oz, null);
+    const steadyStats = assertZeroCracksAcrossAllSharedBorders('steady-state');
+    expect(steadyStats.sameLodChecked).toBeGreaterThan(500);
+    expect(steadyStats.crossLodChecked).toBeGreaterThan(500);
 
-    // Step slowly until all tiles finish, verifying atomic invariant at every step
-    for (let f = 0; f < 160 && streamer.queuedTileCount > 0; f++) {
-      streamer.step(simState.trailWindow, simState.mountainField, 0, -10, 0, -1, 3);
-      assertAtomicParents();
+    // Scenario B: Forced scroll lag (24 m sudden move under 0.5 ms budget -> L0 lags behind committed center)
+    const fxLag = fx0 + 6.0;
+    const fzLag = fz0 - 24.0;
+    store.update(simState.mountainField, fxLag, fy0, fzLag, null, 0.5);
+    clipmap.update(store, fxLag, fzLag, ox, oy, oz, null);
+    // effectiveRanges[0] must shrink smoothly below base range while keeping 0 cracks & 0 T-junctions!
+    expect(clipmap.effectiveRanges[0]!).toBeLessThanOrEqual(CLIPMAP_LOD_RANGES_M[0]);
+    const lagStats = assertZeroCracksAcrossAllSharedBorders('forced-scroll-lag-24m');
+    expect(lagStats.sameLodChecked).toBeGreaterThan(200);
+    expect(lagStats.crossLodChecked).toBeGreaterThan(200);
+
+    // Scenario C: Extreme scroll lag (44 m move under 0.5 ms budget -> L0 shrinks to 0 cleanly, L1..L4 seamless)
+    const fzExtreme = fz0 - 44.0;
+    store.update(simState.mountainField, fx0, fy0, fzExtreme, null, 0.5);
+    clipmap.update(store, fx0, fzExtreme, ox, oy, oz, null);
+    expect(clipmap.effectiveRanges[0]!).toBe(0);
+    expect(clipmap.patchCountsByLod[0]!).toBe(0);
+    assertZeroCracksAcrossAllSharedBorders('extreme-scroll-lag-44m');
+
+    clipmap.dispose();
+    tracker.disposeAll();
+    sim.dispose();
+  });
+
+  it('uploads via needsUpdate-before-initTexture + raw gl.texSubImage3D with toroidal wrap splits, zero uploads on fractional WORLD_REBASED, global re-anchor, dirtyRects invalidation, and instant context restore', () => {
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const mats = createSharedToonMaterials(gfx);
+    const store = new ClipmapDataStore(gfx);
+    bindClipmapStoreToMaterial(gfx, mats, store);
+    const clipmap = new TerrainClipmap(gfx, mats.terrainMaterial, mats.clipmapUniforms);
+    const field = createMockMountainField(777);
+    const mockGl = createMockWebGL2Renderer();
+
+    // 1. Initial boot MUST set needsUpdate=true (version > 0) BEFORE renderer.initTexture(tex) (#21 S1!)
+    store.update(field, 0, 0, 0, mockGl.renderer, 50);
+    expect(store.isGpuInitialized).toBe(true);
+    expect(mockGl.initCalls).toHaveLength(4);
+    for (const call of mockGl.initCalls) {
+      expect(call.versionAtInit).toBeGreaterThan(0);
     }
-    expect(streamer.queuedTileCount).toBe(0);
-    expect(streamer.sceneryRevision).toBeGreaterThan(revAfterPartial);
 
-    streamer.clearAll();
+    // Drain initial refinement completely on fast mock field
+    for (let f = 0; f < 30 && store.pendingWorkCount > 0; f++) {
+      store.update(field, 0, 0, 0, mockGl.renderer, 100);
+    }
+    expect(store.pendingWorkCount).toBe(0);
+
+    // 2. Verify ZERO texel evaluations and ZERO GPU uploads across fractional WORLD_REBASED!
+    const evalsBeforeRebase = store.texelsEvaluatedCount;
+    const uploadsBeforeRebase = store.gpuUploadCount;
+    const stripsBeforeRebase = store.dirtyStripUploadCount;
+    const subLenBeforeRebase = mockGl.subUploads.length;
+
+    const fracDx = 128.37;
+    const fracDy = -34.62;
+    const fracDz = -128.83;
+    field.setOffset(fracDx, fracDy, fracDz);
+    // Focus in local render space shifts by -delta so absFocus remains bit-identical!
+    store.update(field, -fracDx, -fracDy, -fracDz, mockGl.renderer, 50);
+    clipmap.update(store, -fracDx, -fracDz, fracDx, fracDy, fracDz, null);
+
+    expect(store.texelsEvaluatedCount).toBe(evalsBeforeRebase);
+    expect(store.gpuUploadCount).toBe(uploadsBeforeRebase);
+    expect(store.dirtyStripUploadCount).toBe(stripsBeforeRebase);
+    expect(mockGl.subUploads.length).toBe(subLenBeforeRebase);
+
+    // 3. Scroll across toroidal 255 -> 0 wrap boundary and verify raw gl.texSubImage3D zero-copy rows + UNPACK_IMAGE_HEIGHT=0 + continuity
+    mockGl.subUploads.length = 0;
+    mockGl.pixelStoreCalls.length = 0;
+    for (let step = 1; step <= 20; step++) {
+      // Advance +8 m per step along -Z so L0 shifts 16 texels/step across wrap boundary 255 -> 0
+      const absZ = -step * 8.0;
+      const localZ = absZ - field.originOffsetZ;
+      for (let s = 0; s < 20 && (s === 0 || store.pendingWorkCount > 0); s++) {
+        store.update(field, -fracDx, -fracDy, localZ, mockGl.renderer, 50);
+      }
+    }
+    expect(mockGl.subUploads.length).toBeGreaterThan(0);
+    expect(mockGl.pixelStoreCalls.some(([p, v]) => p === 0x0cf5 && v === 1)).toBe(true); // UNPACK_ALIGNMENT = 1
+    expect(mockGl.pixelStoreCalls.some(([p, v]) => p === 0x806e && v === 0)).toBe(true); // UNPACK_IMAGE_HEIGHT = 0
+    // Full-width row uploads MUST hit the zero-copy fast path (x === 0, w === 256, never split horizontally)
+    // and iOS Safari / Metal ANGLE hardening requires srcOffset === 0 via TypedArray.subarray()!
+    expect(mockGl.subUploads.every((u) => u.x === 0 && u.w === CLIPMAP_TEX_SIZE)).toBe(true);
+    expect(mockGl.subUploads.every((u) => u.srcOffset === 0)).toBe(true);
+    // Verify wrap-around height continuity in L0 mirror right after scrolling 160 m (> 128 m full wrap!)
+    const testAbsZ = -152.0;
+    const testAbsX = 4.0;
+    const expectedAbsH = field.evaluateHeight(testAbsX - fracDx, testAbsZ - fracDz) + fracDy;
+    const mirrorAbsH = store.sampleMirrorHeightBilinearAbs(0, testAbsX, testAbsZ);
+    expect(Math.abs(mirrorAbsH - expectedAbsH)).toBeLessThan(0.01);
+
+    // 4. fieldRevision + dirtyRects invalidation updates only clipped affected region & calls ackDirtyRects()
+    const acksBefore = field.ackCount;
+    const patchAbsX = 2.0;
+    const patchAbsZ = -154.0;
+    const heightBeforeBump = store.sampleMirrorHeightAbs(0, Math.round(patchAbsX / 0.5), Math.round(patchAbsZ / 0.5));
+    field.addHeightBump(patchAbsX - 2, patchAbsX + 2, patchAbsZ - 2, patchAbsZ + 2, 12.5);
+    for (let s = 0; s < 20 && (s === 0 || store.pendingWorkCount > 0); s++) {
+      store.update(field, -fracDx, -fracDy, -160 - fracDz, mockGl.renderer, 50);
+    }
+    expect(field.ackCount).toBe(acksBefore + 1);
+    const heightAfterBump = store.sampleMirrorHeightAbs(0, Math.round(patchAbsX / 0.5), Math.round(patchAbsZ / 0.5));
+    expect(heightAfterBump - heightBeforeBump).toBeCloseTo(12.5, 2);
+
+    // 4b. Partial teleport (L0 jumps >= 128 texels = 80m, while L1..L4 jump < 128 texels) MUST preserve L1..L4 dirtyRects!
+    const l1TestTx = 0;
+    const l1TestTz = -170;
+    const l1BeforePartial = store.sampleMirrorHeightAbs(1, l1TestTx, l1TestTz);
+    field.addHeightBump(-4, 4, -174, -166, 9.0);
+    // Jump -80m along Z -> L0 shifts 160 texels (partial teleport!) while L1 shifts 80 texels (< 128, non-booted!)
+    const jumpLocalZ = -240 - fracDz;
+    store.update(field, -fracDx, -fracDy, jumpLocalZ, mockGl.renderer, 50);
+    for (let s = 0; s < 300 && store.pendingWorkCount > 0; s++) {
+      store.update(field, -fracDx, -fracDy, jumpLocalZ, mockGl.renderer, 50);
+    }
+    const l1AfterPartial = store.sampleMirrorHeightAbs(1, l1TestTx, l1TestTz);
+    expect(l1AfterPartial - l1BeforePartial).toBeCloseTo(9.0, 2);
+
+    // 4c. Scrolling mid-refinement MUST never skip a coarse-seeded row (256-bit toroidal bitmask drains to 0)
+    store.reset();
+    let mockClockMs = 0;
+    const pacedStore = new ClipmapDataStore(gfx, {
+      nowMs: () => {
+        mockClockMs += 0.6;
+        return mockClockMs;
+      },
+    });
+    pacedStore.update(field, -fracDx, -fracDy, jumpLocalZ, null, 0.5);
+    expect(pacedStore.getUnrefinedRowCount(0)).toBe(CLIPMAP_TEX_SIZE);
+    // Refine a few rows, then scroll 16 texels on L0, then drain completely with generous budget
+    for (let s = 0; s < 5; s++) {
+      pacedStore.update(field, -fracDx, -fracDy, jumpLocalZ, null, 0.5);
+    }
+    const scrolledZ = jumpLocalZ - 8.5;
+    for (let s = 0; s < 350 && pacedStore.getUnrefinedRowCount(0) > 0; s++) {
+      pacedStore.update(field, -fracDx, -fracDy, scrolledZ, null, 2.0);
+    }
+    expect(pacedStore.getUnrefinedRowCount(0)).toBe(0);
+    const minTz0 = pacedStore.getLoadedMinTexelZ(0);
+    for (let r = 0; r < CLIPMAP_TEX_SIZE; r++) {
+      expect(pacedStore.isToroidalRowRefined(0, minTz0 + r)).toBe(true);
+    }
+
+    // 5. ONE shared global clipmapAnchorAbsY re-anchoring across all 5 layers when |focusAbsY - anchor| > 2048m
+    // Re-sync store cleanly at jumpLocalZ before re-anchor test
+    store.update(field, -fracDx, -fracDy, jumpLocalZ, mockGl.renderer, 50);
+    const anchorBefore = store.clipmapAnchorAbsY;
+    const sampleAbsBefore = store.sampleMirrorHeightAbs(0, 0, -480);
+    const sampleL4Before = store.sampleMirrorHeightAbs(4, 0, -30);
+    store.update(field, -fracDx, -fracDy - 2500, jumpLocalZ, mockGl.renderer, 50);
+    expect(store.reanchorCount).toBe(1);
+    expect(Math.abs(store.clipmapAnchorAbsY - anchorBefore)).toBeGreaterThan(2048);
+    expect(store.sampleMirrorHeightAbs(0, 0, -480)).toBeCloseTo(sampleAbsBefore, 3);
+    expect(store.sampleMirrorHeightAbs(4, 0, -30)).toBeCloseTo(sampleL4Before, 3);
+
+    // 6. webglcontextrestored instantaneously restores all 4 DataArrayTextures from CPU mirrors with 0 terrain re-evals
+    const evalsBeforeRestore = store.texelsEvaluatedCount;
+    const initLenBeforeRestore = mockGl.initCalls.length;
+    mockGl.clearProps();
+    store.handleContextRestored(mockGl.renderer);
+    expect(store.texelsEvaluatedCount).toBe(evalsBeforeRestore);
+    expect(mockGl.initCalls.length).toBe(initLenBeforeRestore + 4);
+    for (let i = initLenBeforeRestore; i < mockGl.initCalls.length; i++) {
+      expect(mockGl.initCalls[i]!.versionAtInit).toBeGreaterThan(0);
+    }
+
+    clipmap.dispose();
     tracker.disposeAll();
   });
 
-  it('preserves zero vertex uploads on WORLD_REBASED, mid-stream height invariance, and multi-rebase offset fallback', () => {
-    // 1. Zero vertex buffer uploads on WORLD_REBASED
-    const eventBus = new EventBus<SimEvents>();
-    const renderer = new ThreeRenderer(null, eventBus, undefined, { headless: true });
-    const simState = createMockSimState();
-
-    for (let f = 0; f < 10; f++) {
-      renderer.sync(simState, 0.5, 1 / 60, 50);
-    }
-    expect(renderer.terrainStreamer.queuedTileCount).toBe(0);
-
-    const innerSlot = renderer.terrainStreamer.tilePool.getSlot(0, 0)!;
-    const outerSlot = renderer.terrainStreamer.tilePool.getSlot(1, 0)!;
-    expect(innerSlot.inUse).toBe(true);
-    expect(outerSlot.inUse).toBe(true);
-
-    const prevInnerPos = innerSlot.container.position.clone();
-    const prevInnerUploads = innerSlot.positionUploadCount;
-    const prevOuterPos = outerSlot.container.position.clone();
-    const prevOuterUploads = outerSlot.positionUploadCount;
-    const prevRev = renderer.terrainStreamer.sceneryRevision;
-
-    eventBus.emit('WORLD_REBASED', {
-      rebaseCount: 1,
-      deltaX: 16,
-      deltaY: -32,
-      deltaZ: -128,
-      totalOffsetX: 16,
-      totalOffsetY: -32,
-      totalOffsetZ: -128,
+  it('encodes uAlbedoTex in sRGB (no double-gamma dark snow) and achieves < 1 cm L0 height parity & CPU cavity AO against real MountainField', () => {
+    const sim = new SkiSimulation({
+      seed: 2025,
+      startStageId: 'icy-black',
+      debugDrawEnabled: true,
     });
+    const intent = createMutablePlayerIntent();
+    for (let i = 0; i < 45; i++) {
+      const st = sim.getState();
+      const targetX = st.trailWindow.curr.sampleSafeX(st.surfaceSample.s + 8);
+      intent.steer = clamp((targetX - st.surfaceSample.x) * 0.14, -1, 1);
+      sim.savePreviousPoses();
+      sim.step(FIXED_DT, intent);
+    }
 
-    expect(innerSlot.container.position.x).toBeCloseTo(prevInnerPos.x - 16, 5);
-    expect(innerSlot.container.position.y).toBeCloseTo(prevInnerPos.y + 32, 5);
-    expect(innerSlot.container.position.z).toBeCloseTo(prevInnerPos.z + 128, 5);
-    expect(innerSlot.positionUploadCount).toBe(prevInnerUploads);
+    const renderer = new ThreeRenderer(null, sim.eventBus, undefined, { headless: true });
+    const simState = sim.getState();
 
-    expect(outerSlot.container.position.x).toBeCloseTo(prevOuterPos.x - 16, 5);
-    expect(outerSlot.container.position.y).toBeCloseTo(prevOuterPos.y + 32, 5);
-    expect(outerSlot.container.position.z).toBeCloseTo(prevOuterPos.z + 128, 5);
-    expect(outerSlot.positionUploadCount).toBe(prevOuterUploads);
-    expect(renderer.terrainStreamer.sceneryRevision).toBeGreaterThan(prevRev);
+    // Frame 0 cold boot immediately seeds all 5 layers AND exact 32x32 L0 core around skier
+    renderer.sync(simState, 0.5, 1 / 60, 50);
 
-    // 2. Multi-rebase fallback without EventBus notification (2 missed rebases accumulated in offsetX/Y/Z)
-    const beforeFallbackPos = innerSlot.container.position.clone();
-    const beforeFallbackUploads = innerSlot.positionUploadCount;
-    const multiRebaseState: ReadonlySimState = {
+    const store = renderer.clipmapStore;
+    expect(store.albedoTex.colorSpace).toBe(THREE.SRGBColorSpace);
+    expect(store.heightTex.format).toBe(THREE.RedFormat);
+    expect(store.heightTex.type).toBe(THREE.FloatType);
+    expect(store.heightTex.minFilter).toBe(THREE.NearestFilter);
+    expect(store.heightTex.magFilter).toBe(THREE.NearestFilter);
+
+    // 1. Verify < 1 cm height parity between L0 CPU mirror and real MountainField around skier
+    const sx = simState.currSkier.posX;
+    const sz = simState.currSkier.posZ;
+    const ox = simState.mountainField.originOffsetX;
+    const oy = simState.mountainField.originOffsetY;
+    const oz = simState.mountainField.originOffsetZ;
+
+    let maxErrM = 0;
+    for (let dz = -5; dz <= 5; dz += 1) {
+      for (let dx = -5; dx <= 5; dx += 1) {
+        const wx = sx + dx;
+        const wz = sz + dz;
+        const trueAbsH = simState.mountainField.evaluateHeight(wx, wz) + oy;
+        const mirrorAbsH = store.sampleMirrorHeightBilinearAbs(0, wx + ox, wz + oz);
+        const err = Math.abs(mirrorAbsH - trueAbsH);
+        if (err > maxErrM) maxErrM = err;
+      }
+    }
+    expect(maxErrM).toBeLessThan(0.01);
+
+    // 2. Verify uAlbedoTex sRGB encoding on sunny-blue snow (#f8fbff -> sRGB bytes ~[248, 251, 255], NOT dark linear!)
+    const sunnyField = createMockMountainField(555);
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const sunnyStore = new ClipmapDataStore(gfx);
+    sunnyStore.update(sunnyField, 0, 0, 0, null, 50);
+
+    const bytes: [number, number, number, number] = [0, 0, 0, 0];
+    sunnyStore.readMirrorAlbedoBytes(0, 0, 0, bytes);
+    const expectedLinear = new THREE.Color(STAGE_SUNNY_BLUE.palette.snowColor);
+    expect(bytes[0]).toBeGreaterThanOrEqual(246);
+    expect(bytes[1]).toBeGreaterThanOrEqual(249);
+    expect(bytes[2]).toBeGreaterThanOrEqual(253);
+    expect(srgbToLinearChannel(bytes[0] / 255)).toBeCloseTo(expectedLinear.r, 2);
+    expect(srgbToLinearChannel(bytes[1] / 255)).toBeCloseTo(expectedLinear.g, 2);
+    expect(srgbToLinearChannel(bytes[2] / 255)).toBeCloseTo(expectedLinear.b, 2);
+    expect(linearToSRGBChannel(expectedLinear.r) * 255).toBeCloseTo(248, 0);
+
+    // 3. Verify CPU-baked AO channel in flowElevData stays in valid [0.62, 1.06] physical range
+    let minAo = Infinity;
+    let maxAo = -Infinity;
+    for (let i = 0; i < CLIPMAP_TEX_SIZE * CLIPMAP_TEX_SIZE; i++) {
+      const aoByte = store.flowElevData[i * 4 + 3]!;
+      const ao = 0.5 + (aoByte / 255) * 0.6;
+      if (ao < minAo) minAo = ao;
+      if (ao > maxAo) maxAo = ao;
+    }
+    expect(minAo).toBeGreaterThanOrEqual(0.6);
+    expect(maxAo).toBeLessThanOrEqual(1.1);
+
+    // 4. Verify SnowVfx forward-centering on a curved camera looking along +X
+    const curvedState: ReadonlySimState = {
       ...simState,
-      rebase: {
-        rebaseCount: 3, // jumped from 1 -> 3!
-        offsetX: 16 + 10,
-        offsetY: -32 - 40,
-        offsetZ: -128 - 256,
-        lastDeltaX: 5,
-        lastDeltaY: -20,
-        lastDeltaZ: -128,
+      prevCamera: {
+        ...simState.prevCamera,
+        posX: 0,
+        posY: 4,
+        posZ: 0,
+        lookAtX: 25,
+        lookAtY: 2,
+        lookAtZ: 0,
+      },
+      currCamera: {
+        ...simState.currCamera,
+        posX: 0,
+        posY: 4,
+        posZ: 0,
+        lookAtX: 25,
+        lookAtY: 2,
+        lookAtZ: 0,
       },
     };
-    renderer.sync(multiRebaseState, 0.5, 1 / 60, 50);
-    // Must shift by FULL (offset - lastOriginOffset) = (+10, -40, -256), not just lastDelta!
-    expect(innerSlot.container.position.x).toBeCloseTo(beforeFallbackPos.x - 10, 5);
-    expect(innerSlot.container.position.y).toBeCloseTo(beforeFallbackPos.y + 40, 5);
-    expect(innerSlot.container.position.z).toBeCloseTo(beforeFallbackPos.z + 256, 5);
-    expect(innerSlot.positionUploadCount).toBe(beforeFallbackUploads);
+    renderer.sync(curvedState, 1, 1 / 60, 50);
 
+    const snowMesh = renderer.scene.getObjectByName('SnowVfxStreaks') as THREE.InstancedMesh;
+    expect(snowMesh.count).toBeGreaterThan(0);
+    const mat = new THREE.Matrix4();
+    const pos = new THREE.Vector3();
+    let meanX = 0;
+    for (let i = 0; i < snowMesh.count; i++) {
+      snowMesh.getMatrixAt(i, mat);
+      pos.setFromMatrixPosition(mat);
+      meanX += pos.x;
+    }
+    meanX /= snowMesh.count;
+    expect(meanX).toBeGreaterThan(5);
+
+    expect(renderer.runLeakCheck(0, true).totalLeaks).toBe(0);
     renderer.dispose();
-
-    // 3. Mid-stream rebase height invariance across TerrainTilePool.writeBorderRow yields
-    const tracker = new GraphicsTracker();
-    const gfx = new GraphicsUtils(tracker);
-    const mats = createSharedToonMaterials(gfx);
-    const pool = new TerrainTilePool(gfx, mats.terrainMaterial, {
-      innerCapacity: 4,
-      outerCapacity: 2,
-    });
-
-    const trailWin = new TrailWindow(4242, 'icy-black');
-    const field = new MountainField(trailWin);
-    field.setWorldSeed(4242);
-
-    const midSlot = pool.acquireSlot(0, 0, -2, field)!;
-    const haloSpan = midSlot.spec.haloSpan;
-    // Build first 9 halo rows pre-rebase
-    for (let r = 0; r < 9; r++) {
-      pool.writeBorderRow(midSlot, field, r);
-    }
-
-    // Trigger floating-origin rebase mid-tile!
-    const dx = 12;
-    const dy = -28;
-    const dz = -128;
-    trailWin.rebaseOrigin(dx, dy, dz);
-    field.setOriginOffset(dx, dz);
-    pool.shiftAllOrigins(dx, dy, dz);
-
-    // Finish remaining rows post-rebase
-    for (let r = 9; r < haloSpan; r++) {
-      pool.writeBorderRow(midSlot, field, r);
-    }
-    pool.finishSlot(midSlot);
-
-    // Reference tile built completely post-rebase at exact same (absTileX=0, absTileZ=-2)
-    const refSlot = pool.acquireSlot(0, 0, -2, field)!;
-    for (let r = 0; r < haloSpan; r++) {
-      pool.writeBorderRow(refSlot, field, r);
-    }
-    pool.finishSlot(refSlot);
-
-    expect(midSlot.originX).toBeCloseTo(refSlot.originX, 5);
-    expect(midSlot.originZ).toBeCloseTo(refSlot.originZ, 5);
-    for (let i = 0; i < midSlot.spec.topVertexCount; i++) {
-      const idx3 = i * 3;
-      const midWorldY = midSlot.originY + midSlot.positions[idx3 + 1]!;
-      const refWorldY = refSlot.originY + refSlot.positions[idx3 + 1]!;
-      expect(midWorldY).toBeCloseTo(refWorldY, 3);
-      expect(midSlot.normals[idx3 + 1]!).toBeCloseTo(refSlot.normals[idx3 + 1]!, 3);
-    }
-
-    pool.releaseSlot(midSlot);
-    pool.releaseSlot(refSlot);
     tracker.disposeAll();
+    sim.dispose();
   });
 
-  it('respects frame budget across frames and never busy-spins when a tier pool is full', () => {
-    let clockMs = 0;
-    const eventBus = new EventBus<SimEvents>();
-    const renderer = new ThreeRenderer(null, eventBus, undefined, {
-      headless: true,
-      nowMs: () => {
-        clockMs += 2;
-        return clockMs;
-      },
-    });
-
-    const simState = createMockSimState();
-    renderer.sync(simState, 0, 1 / 60, 3);
-    expect(renderer.terrainStreamer.queuedTileCount).toBeGreaterThan(0);
-
-    for (let f = 0; f < 60 && renderer.terrainStreamer.queuedTileCount > 0; f++) {
-      renderer.sync(simState, 0, 1 / 60, 20);
-    }
-    expect(renderer.terrainStreamer.queuedTileCount).toBe(0);
-    renderer.dispose();
-
-    // Non-busy-spin when innerCapacity = 1 & outerCapacity = 1 and clock stays 0
-    let nowCalls = 0;
-    const tracker = new GraphicsTracker();
-    const gfx = new GraphicsUtils(tracker);
-    const mats = createSharedToonMaterials(gfx);
-    const tinyStreamer = new TerrainStreamer(gfx, mats, {
-      innerCapacity: 1,
-      outerCapacity: 1,
-      nowMs: () => {
-        nowCalls++;
-        return 0;
-      },
-    });
-
-    tinyStreamer.step(simState.trailWindow, simState.mountainField, 0, -10, 0, -1, 14);
-    expect(tinyStreamer.tilePool.innerActiveCount).toBe(1);
-    expect(tinyStreamer.tilePool.outerActiveCount).toBe(1);
-    expect(tinyStreamer.queuedTileCount).toBe(83);
-    expect(nowCalls).toBeLessThan(35);
-
-    tinyStreamer.clearAll();
-    tracker.disposeAll();
-  });
-
-  it('decouples LandmarkStreamer from tiles, handles async assetWaiter, O(1) prune, and reset() badge updates', async () => {
+  it('decouples LandmarkStreamer from terrain, handles async assetWaiter, O(1) prune, and reset() badge updates', async () => {
     const tracker = new GraphicsTracker();
     const gfx = new GraphicsUtils(tracker);
     const mats = createSharedToonMaterials(gfx);
@@ -1012,26 +1503,22 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     const seg2 = createMockSegment(2, 'nextLeft', 'icy-black', -140, 105, 35, [], 101);
     const window1: TrailWindowView = { prev: null, curr: seg1, nextLeft: seg2, nextRight: null };
 
-    // Sync once: procedural landmarks attach immediately while ONLY mesh landmark waits
     landmarkStreamer.sync(window1);
     expect(landmarkStreamer.activeCount).toBe(2);
     expect(landmarkStreamer.pendingCount).toBe(1);
 
-    // Resolve async asset and re-sync
     resolveHero();
     await heroPromise;
     landmarkStreamer.sync(window1);
     expect(landmarkStreamer.pendingCount).toBe(0);
     expect(landmarkStreamer.activeCount).toBe(3);
 
-    // Rebase shifts attached landmark positions directly
     landmarkStreamer.handleWorldRebased(5, -10, -20);
     const archObj = landmarkStreamer.rootGroup.getObjectByName('ForkArchLandmark')!;
     expect(archObj.position.x).toBeCloseTo(-18, 5);
     expect(archObj.position.y).toBeCloseTo(-25, 5);
     expect(archObj.position.z).toBeCloseTo(-120, 5);
 
-    // Reset with SAME segmentId=1 and lm.id='fork_arch_1_left', but NEW seed and badgeStageId='icy-black'
     const resetLandmarks: SegmentLandmarkRequirement[] = [
       {
         id: 'fork_arch_1_left',
@@ -1062,7 +1549,6 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     expect(updatedArch.getObjectByName('ForkBadgeDiamond')?.visible).toBe(true);
     expect(updatedArch.getObjectByName('ForkBadgeSquare')?.visible).toBe(false);
 
-    // Prune seg1 from window -> O(1) reclamation
     landmarkStreamer.sync({ prev: null, curr: seg2, nextLeft: null, nextRight: null });
     expect(landmarkStreamer.activeCount).toBe(0);
 
@@ -1070,44 +1556,7 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     tracker.disposeAll();
   });
 
-  it('keeps scenery outside pisteWeight > 0.15 on wide-transition sunny-blue across both LOD tiers', () => {
-    const sim = new SkiSimulation({ seed: 321, startStageId: 'sunny-blue' });
-    const simState = sim.getState();
-    const tracker = new GraphicsTracker();
-    const gfx = new GraphicsUtils(tracker);
-    const mats = createSharedToonMaterials(gfx);
-    const streamer = new TerrainStreamer(gfx, mats);
-
-    for (let f = 0; f < 30; f++) {
-      streamer.step(
-        simState.trailWindow,
-        simState.mountainField,
-        simState.currSkier.posX,
-        simState.currSkier.posZ,
-        0,
-        -1,
-        50,
-      );
-      if (streamer.queuedTileCount === 0) break;
-    }
-    expect(streamer.queuedTileCount).toBe(0);
-
-    const out = createMountainSampleOut();
-    let count = 0;
-    streamer.forEachActiveScenery((ox, _oy, oz, item) => {
-      count++;
-      simState.mountainField.evaluate(ox + item.localX, oz + item.localZ, out);
-      expect(out.onPiste).toBe(false);
-      expect(out.pisteWeight).toBeLessThanOrEqual(0.15);
-      expect(out.inChasmZone).toBe(false);
-    });
-    expect(count).toBeGreaterThan(0);
-
-    streamer.clearAll();
-    tracker.disposeAll();
-  });
-
-  it('packs per-tile off-piste scenery lod=0 before lod=1 and excludes piste, cliffs, chasms, and landmarks', () => {
+  it('streams decoupled 32m SceneryCellStreamer with deterministic placement, exclusions, LOD-change invariance, cross-fork biomes, and translation-only rebase', () => {
     const sim = new SkiSimulation({ seed: 777, startStageId: 'icy-black' });
     const simState = sim.getState();
 
@@ -1122,11 +1571,11 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     const bbQuad = new THREE.PlaneGeometry(1, 1);
     gfx.markAsCache(bbQuad, 'TestBbQuad');
 
-    const streamer = new TerrainStreamer(gfx, mats);
+    const scenery = new SceneryCellStreamer({ halfExtentCells: 3 });
     const pools = new InstancePools(gfx, mats, outlineMat, bbMat, bbQuad, assets);
 
-    for (let f = 0; f < 30; f++) {
-      streamer.step(
+    for (let f = 0; f < 30 && (f === 0 || scenery.queuedCellCount > 0); f++) {
+      scenery.step(
         simState.trailWindow,
         simState.mountainField,
         simState.currSkier.posX,
@@ -1135,12 +1584,10 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
         -1,
         50,
       );
-      if (streamer.queuedTileCount === 0) break;
     }
-    expect(streamer.queuedTileCount).toBe(0);
-    expect(streamer.sceneryRevision).toBeGreaterThan(0);
+    expect(scenery.queuedCellCount).toBe(0);
+    expect(scenery.sceneryRevision).toBeGreaterThan(0);
 
-    // Collect active landmarks for clearance verification
     const activeLandmarks: SegmentLandmarkRequirement[] = [];
     for (const seg of [
       simState.trailWindow.prev,
@@ -1151,98 +1598,113 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
       if (seg) activeLandmarks.push(...seg.landmarks);
     }
 
-    // Verify lod=0 items strictly precede lod=1 items, and every item satisfies exclusions
     const sampleOut = createMountainSampleOut();
-    let seenOuter = false;
-    let innerItemCount = 0;
-    let outerItemCount = 0;
+    const snapshotBeforeMove = new Map<string, { x: number; y: number; z: number; frame: string }>();
     let totalItems = 0;
 
-    const innerBounds = new Set<number>();
-    for (let i = 0; i < streamer.tilePool.innerCapacity; i++) {
-      const s = streamer.tilePool.getSlot(0, i)!;
-      if (s.inUse && s.container.visible) {
-        innerBounds.add(packTileKey(0, s.absTileX, s.absTileZ));
-      }
-    }
-
-    streamer.forEachActiveScenery((ox, oy, oz, item) => {
+    scenery.forEachActiveScenery((ox, oy, oz, item) => {
       totalItems++;
       const wx = ox + item.localX;
       const wy = oy + item.localY;
       const wz = oz + item.localZ;
 
-      const absX = wx + simState.mountainField.originOffsetX;
-      const absZ = wz + simState.mountainField.originOffsetZ;
-      const innerKey = packTileKey(
-        0,
-        Math.floor(absX / INNER_TILE_SIZE_M),
-        Math.floor(absZ / INNER_TILE_SIZE_M),
-      );
-      const isInner = innerBounds.has(innerKey);
-
-      if (isInner) {
-        expect(seenOuter).toBe(false);
-        innerItemCount++;
-      } else {
-        seenOuter = true;
-        outerItemCount++;
-      }
-
       simState.mountainField.evaluate(wx, wz, sampleOut);
       expect(sampleOut.onPiste).toBe(false);
       expect(sampleOut.pisteWeight).toBeLessThanOrEqual(0.15);
-      expect(sampleOut.normalY).toBeGreaterThanOrEqual(0.5);
+      expect(sampleOut.normalY).toBeGreaterThanOrEqual(0.72);
       expect(sampleOut.inChasmZone).toBe(false);
-      expect(Math.abs(wy - sampleOut.heightY)).toBeLessThan(2.5); // scenery follows the rendered (coarse LOD) mesh, not the analytic field
+      // Authoritative height parity minus slope sink (zero coarse-LOD floating/sinking drift!)
+      expect(wy).toBeLessThanOrEqual(sampleOut.heightY + 1e-4);
+      expect(sampleOut.heightY - wy).toBeLessThan(1.5);
 
       for (let i = 0; i < activeLandmarks.length; i++) {
         const lm = activeLandmarks[i]!;
         const minR = Math.max(2.5, lm.clearanceRadius);
-        const dist = Math.hypot(wx - lm.worldX, wz - lm.worldZ);
-        expect(dist).toBeGreaterThanOrEqual(minR - 1e-3);
+        expect(Math.hypot(wx - lm.worldX, wz - lm.worldZ)).toBeGreaterThanOrEqual(minR - 1e-3);
       }
+
+      const key = `${Math.round(wx * 100)},${Math.round(wz * 100)}`;
+      snapshotBeforeMove.set(key, { x: wx, y: wy, z: wz, frame: item.frame });
     });
 
-    expect(innerItemCount).toBeGreaterThan(0);
-    expect(outerItemCount).toBeGreaterThan(0);
+    expect(totalItems).toBeGreaterThan(20);
     expect(totalItems).toBeLessThanOrEqual(MAX_STATIC_BILLBOARDS);
 
-    pools.sync(simState, 0.5, streamer);
+    pools.sync(simState, 0.5, scenery);
     const staticMesh = pools.rootGroup.getObjectByName(
       'StaticSceneryBillboardPool',
     ) as THREE.InstancedMesh;
     expect(staticMesh.count).toBe(totalItems);
 
-    // Deterministic seeding check: same seed -> identical scenery; different seed -> distinct scenery
-    const streamerSame = new TerrainStreamer(gfx, mats);
-    for (let f = 0; f < 40; f++) {
-      streamerSame.step(
-        simState.trailWindow,
-        simState.mountainField,
-        simState.currSkier.posX,
-        simState.currSkier.posZ,
-        0,
-        -1,
-        50,
-      );
-      if (streamerSame.queuedTileCount === 0) break;
+    // Moving skier slightly (crossing CDLOD L0 morph rings!) MUST NOT alter any surviving scenery item's height/position
+    scenery.step(
+      simState.trailWindow,
+      simState.mountainField,
+      simState.currSkier.posX + 5,
+      simState.currSkier.posZ - 14,
+      0,
+      -1,
+      50,
+    );
+    let overlapChecked = 0;
+    scenery.forEachActiveScenery((ox, oy, oz, item) => {
+      const wx = ox + item.localX;
+      const wy = oy + item.localY;
+      const wz = oz + item.localZ;
+      const key = `${Math.round(wx * 100)},${Math.round(wz * 100)}`;
+      const prev = snapshotBeforeMove.get(key);
+      if (prev) {
+        overlapChecked++;
+        expect(wy).toBe(prev.y);
+        expect(item.frame).toBe(prev.frame);
+      }
+    });
+    expect(overlapChecked).toBeGreaterThan(15);
+
+    // Translation-only WORLD_REBASED shifts all scenery positions by exact (-dx, -dy, -dz)
+    const revBeforeRebase = scenery.sceneryRevision;
+    const preRebaseFirst: [number, number, number] = [0, 0, 0];
+    scenery.forEachActiveScenery((ox, oy, oz, item) => {
+      preRebaseFirst[0] = ox + item.localX;
+      preRebaseFirst[1] = oy + item.localY;
+      preRebaseFirst[2] = oz + item.localZ;
+      return false;
+    });
+    scenery.handleWorldRebased(16, -32, -128);
+    expect(scenery.sceneryRevision).toBe(revBeforeRebase + 1);
+    const postRebaseFirst: [number, number, number] = [0, 0, 0];
+    scenery.forEachActiveScenery((ox, oy, oz, item) => {
+      postRebaseFirst[0] = ox + item.localX;
+      postRebaseFirst[1] = oy + item.localY;
+      postRebaseFirst[2] = oz + item.localZ;
+      return false;
+    });
+    expect(postRebaseFirst[0]).toBeCloseTo(preRebaseFirst[0] - 16, 5);
+    expect(postRebaseFirst[1]).toBeCloseTo(preRebaseFirst[1] + 32, 5);
+    expect(postRebaseFirst[2]).toBeCloseTo(preRebaseFirst[2] + 128, 5);
+
+    // Deterministic seeding: identical seed -> identical placements; different seed -> distinct placements
+    const scenerySame = new SceneryCellStreamer({ halfExtentCells: 3 });
+    const sceneryBase = new SceneryCellStreamer({ halfExtentCells: 3 });
+    for (let f = 0; f < 30; f++) {
+      sceneryBase.step(simState.trailWindow, simState.mountainField, simState.currSkier.posX, simState.currSkier.posZ, 0, -1, 50);
+      scenerySame.step(simState.trailWindow, simState.mountainField, simState.currSkier.posX, simState.currSkier.posZ, 0, -1, 50);
+      if (sceneryBase.queuedCellCount === 0 && scenerySame.queuedCellCount === 0) break;
     }
-    expect(streamerSame.queuedTileCount).toBe(0);
     const itemsA: number[] = [];
     const itemsB: number[] = [];
-    streamer.forEachActiveScenery((ox, _oy, oz, itItem) => {
+    sceneryBase.forEachActiveScenery((ox, _oy, oz, itItem) => {
       itemsA.push(ox + itItem.localX, oz + itItem.localZ);
     });
-    streamerSame.forEachActiveScenery((ox, _oy, oz, itItem) => {
+    scenerySame.forEachActiveScenery((ox, _oy, oz, itItem) => {
       itemsB.push(ox + itItem.localX, oz + itItem.localZ);
     });
     expect(itemsB).toEqual(itemsA);
 
     const simDiff = new SkiSimulation({ seed: 888, startStageId: 'icy-black' });
-    const streamerDiff = new TerrainStreamer(gfx, mats);
-    for (let f = 0; f < 40; f++) {
-      streamerDiff.step(
+    const sceneryDiff = new SceneryCellStreamer({ halfExtentCells: 3 });
+    for (let f = 0; f < 30; f++) {
+      sceneryDiff.step(
         simDiff.getState().trailWindow,
         simDiff.getState().mountainField,
         simDiff.getState().currSkier.posX,
@@ -1251,146 +1713,27 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
         -1,
         50,
       );
-      if (streamerDiff.queuedTileCount === 0) break;
+      if (sceneryDiff.queuedCellCount === 0) break;
     }
-    expect(streamerDiff.queuedTileCount).toBe(0);
     const itemsC: number[] = [];
-    streamerDiff.forEachActiveScenery((ox, _oy, oz, itItem) => {
+    sceneryDiff.forEachActiveScenery((ox, _oy, oz, itItem) => {
       itemsC.push(ox + itItem.localX, oz + itItem.localZ);
     });
     expect(itemsC).not.toEqual(itemsA);
 
-    streamer.clearAll();
-    pools.sync(simState, 0.5, streamer);
+    scenery.clearAll();
+    pools.sync(simState, 0.5, scenery);
     expect(staticMesh.count).toBe(0);
 
-    streamerSame.clearAll();
-    streamerDiff.clearAll();
+    sceneryBase.clearAll();
+    scenerySame.clearAll();
+    sceneryDiff.clearAll();
     tracker.disposeAll();
+    simDiff.dispose();
+    sim.dispose();
   });
 
-  it('integrates real SkiSimulation MountainField with ThreeRenderer for icy-black cliffs, chasms, zero leaks, and dispose', () => {
-    const sim = new SkiSimulation({
-      seed: 2025,
-      startStageId: 'icy-black',
-      debugDrawEnabled: true,
-    });
-    const intent = createMutablePlayerIntent();
-    for (let i = 0; i < 60; i++) {
-      const st = sim.getState();
-      const targetX = st.trailWindow.curr.sampleSafeX(st.surfaceSample.s + 8);
-      intent.steer = clamp((targetX - st.surfaceSample.x) * 0.14, -1, 1);
-      sim.savePreviousPoses();
-      sim.step(FIXED_DT, intent);
-    }
-
-    const renderer = new ThreeRenderer(null, sim.eventBus, undefined, { headless: true });
-    const simState = sim.getState();
-
-    for (let f = 0; f < 30; f++) {
-      renderer.sync(simState, 0.5, 1 / 60, 50);
-      if (renderer.terrainStreamer.queuedTileCount === 0) break;
-    }
-    expect(renderer.terrainStreamer.queuedTileCount).toBe(0);
-
-    const cliffColor = new THREE.Color(STAGE_ICY_BLACK.palette.cliffColor);
-    const snowColor = new THREE.Color(STAGE_ICY_BLACK.palette.snowColor);
-    const chasmFloorColor = new THREE.Color(STAGE_ICY_BLACK.palette.chasmFloorColor!);
-    const vColor = new THREE.Color();
-
-    let sawCliffRock = false;
-    let sawChasmDrop = false;
-    let sawSnowColor = false;
-
-    for (let i = 0; i < renderer.terrainStreamer.tilePool.innerCapacity; i++) {
-      const slot = renderer.terrainStreamer.tilePool.getSlot(0, i)!;
-      if (!slot.inUse || !slot.ready) continue;
-
-      for (let v = 0; v < slot.spec.topVertexCount; v++) {
-        const v3 = v * 3;
-        const worldY = slot.originY + slot.positions[v3 + 1]!;
-        const ny = slot.normals[v3 + 1]!;
-        vColor.setRGB(slot.colors[v3]!, slot.colors[v3 + 1]!, slot.colors[v3 + 2]!);
-
-        if (ny < 0.72) {
-          const distCliff = Math.hypot(
-            vColor.r - cliffColor.r,
-            vColor.g - cliffColor.g,
-            vColor.b - cliffColor.b,
-          );
-          if (distCliff < 0.15) sawCliffRock = true;
-        }
-        if (worldY < simState.currSkier.posY - 22) {
-          const distChasm = Math.hypot(
-            vColor.r - chasmFloorColor.r,
-            vColor.g - chasmFloorColor.g,
-            vColor.b - chasmFloorColor.b,
-          );
-          if (distChasm < 0.4) sawChasmDrop = true;
-        }
-        const distSnow = Math.hypot(
-          vColor.r - snowColor.r,
-          vColor.g - snowColor.g,
-          vColor.b - snowColor.b,
-        );
-        if (distSnow < 0.12) sawSnowColor = true;
-      }
-    }
-
-    expect(sawSnowColor).toBe(true);
-    expect(sawCliffRock).toBe(true);
-    expect(sawChasmDrop).toBe(true);
-
-    // Also verify SnowVfx forward-centering on a curved camera looking along +X
-    const curvedState: ReadonlySimState = {
-      ...simState,
-      prevCamera: {
-        ...simState.prevCamera,
-        posX: 0,
-        posY: 4,
-        posZ: 0,
-        lookAtX: 25,
-        lookAtY: 2,
-        lookAtZ: 0,
-      },
-      currCamera: {
-        ...simState.currCamera,
-        posX: 0,
-        posY: 4,
-        posZ: 0,
-        lookAtX: 25,
-        lookAtY: 2,
-        lookAtZ: 0,
-      },
-    };
-    renderer.sync(curvedState, 1, 1 / 60, 50);
-
-    const snowMesh = renderer.scene.getObjectByName('SnowVfxStreaks') as THREE.InstancedMesh;
-    expect(snowMesh.count).toBeGreaterThan(0);
-    const mat = new THREE.Matrix4();
-    const pos = new THREE.Vector3();
-    let meanX = 0;
-    for (let i = 0; i < snowMesh.count; i++) {
-      snowMesh.getMatrixAt(i, mat);
-      pos.setFromMatrixPosition(mat);
-      meanX += pos.x;
-    }
-    meanX /= snowMesh.count;
-    expect(meanX).toBeGreaterThan(5);
-
-    expect(renderer.runLeakCheck(0, true).totalLeaks).toBe(0);
-    renderer.dispose();
-    const afterDispose = renderer.getStats().graphics;
-    expect(afterDispose.activeObjects).toBe(0);
-    expect(afterDispose.activeGeometries).toBe(0);
-    expect(afterDispose.activeMaterials).toBe(0);
-    expect(afterDispose.activeTextures).toBe(0);
-    expect(afterDispose.cachedGeometries).toBe(0);
-    expect(afterDispose.cachedMaterials).toBe(0);
-    expect(afterDispose.cachedTextures).toBe(0);
-  });
-
-  it('evaluates SceneryTierRule slope gates, canopy suppression, and LOD margins accurately', () => {
+  it('evaluates SceneryTierRule slope gates, canopy suppression, cross-fork biome fidelity, dual-radius tucking, and green circle badge', () => {
     const talusSignal: SceneryEnvSignal = {
       minNormalY: 0.74,
       distFromTrail: 12,
@@ -1407,16 +1750,10 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     expect(evaluateSceneryRuleFitness(shrubRule, talusSignal)).toBe(0);
     expect(evaluateSceneryRuleFitness(rockRule, talusSignal)).toBeGreaterThan(0);
 
-    // On outer lod = 1 (+0.07 margin), 0.80 allows alpine_rock (>= 0.79) while excluding pines (< 0.85)
-    const outerSlopeSignal: SceneryEnvSignal = {
-      ...talusSignal,
-      minNormalY: 0.81,
-      lod: 1,
-    };
+    const outerSlopeSignal: SceneryEnvSignal = { ...talusSignal, minNormalY: 0.81, lod: 1 };
     expect(evaluateSceneryRuleFitness(pineRule, outerSlopeSignal)).toBe(0);
     expect(evaluateSceneryRuleFitness(rockRule, outerSlopeSignal)).toBeGreaterThan(0);
 
-    // Canopy blocking forces ground-layer understory selection
     const flatForestSignal: SceneryEnvSignal = {
       minNormalY: 0.94,
       distFromTrail: 14,
@@ -1426,35 +1763,23 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
       scenery: STAGE_POWDER_BOWL.layout.scenery,
     };
     for (const roll of [0.05, 0.35, 0.75, 0.95]) {
-      const winner = selectWinningSceneryRule(
-        DEFAULT_SCENERY_TIER_RULES,
-        flatForestSignal,
-        true,
-        roll,
-      );
+      const winner = selectWinningSceneryRule(DEFAULT_SCENERY_TIER_RULES, flatForestSignal, true, roll);
       expect(winner).not.toBeNull();
       expect(winner!.layer).toBe('ground');
     }
-  });
 
-  it('supports cross-fork biome fidelity, exact spatial thinning, dual-radius spacing, granite rocks, and blizzard/green badges', () => {
-    // 1. Single straddling tile with opposing left/right stages verifies local biome fidelity & exact thinning
-    const tracker = new GraphicsTracker();
-    const gfx = new GraphicsUtils(tracker);
-    const mats = createSharedToonMaterials(gfx);
-    const streamer = new TerrainStreamer(gfx, mats);
-
+    // Cross-fork straddling 32m cell (powder-bowl left vs blizzard-ridge right)
+    const scenery = new SceneryCellStreamer({ halfExtentCells: 2 });
     const mockSeg = createMockSegment(1, 'curr', 'powder-bowl', 0, 140, 35);
-    const mockWindow: TrailWindowView = {
-      prev: null,
-      curr: mockSeg,
-      nextLeft: null,
-      nextRight: null,
-    };
-    const splitField: MountainFieldView = {
+    const mockWindow: TrailWindowView = { prev: null, curr: mockSeg, nextLeft: null, nextRight: null };
+    const splitField: TerrainFieldView = {
       worldSeed: 901,
       originOffsetX: 0,
+      originOffsetY: 0,
       originOffsetZ: 0,
+      fieldRevision: 1,
+      dirtyRects: [],
+      stageIdTable: ['powder-bowl', 'blizzard-ridge'],
       collectSpinesInBounds(_minX, _maxX, _minZ, _maxZ, _padM, outSpines) {
         outSpines.length = 0;
       },
@@ -1478,44 +1803,47 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
         Object.assign(out, base);
         out.heightY = wz * 0.1 + wx * 0.02;
         out.macroY = out.heightY;
+        out.onPiste = false;
+        out.pisteWeight = 0;
+        out.nearestSignedX = wx < 16 ? -24 : 24;
+        out.nearestHalfWidth = 10;
         out.nearestStageId = wx < 16 ? 'powder-bowl' : 'blizzard-ridge';
+        out.normalX = 0;
+        out.normalY = 0.99;
+        out.normalZ = -0.1;
         return out;
+      },
+      evaluateSample(wx, wz, out) {
+        return this.evaluate(wx, wz, out);
+      },
+      sampleColumnGrid() {
+        // Unused by SceneryCellStreamer
       },
     };
 
-    for (let f = 0; f < 30; f++) {
-      streamer.step(mockWindow, splitField, 16, 16, 0, -1, 50);
-      if (streamer.queuedTileCount === 0) break;
+    for (let f = 0; f < 20 && (f === 0 || scenery.queuedCellCount > 0); f++) {
+      scenery.step(mockWindow, splitField, 16, 16, 0, -1, 50);
     }
-    expect(streamer.queuedTileCount).toBe(0);
+    expect(scenery.queuedCellCount).toBe(0);
 
-    // Inspect straddling inner tile at absTileX=0, absTileZ=0 (world X in [0, 32))
     let leftGreenCount = 0;
     let leftRockOrFrostedCount = 0;
     let rightRockOrFrostedCount = 0;
     let rightCount = 0;
     let leftCount = 0;
-    streamer.forEachActiveScenery((ox, _oy, oz, item) => {
+    scenery.forEachActiveScenery((ox, _oy, oz, item) => {
       const wx = ox + item.localX;
       const wz = oz + item.localZ;
       if (wx < 0 || wx >= 32 || wz < 0 || wz >= 32) return;
       if (wx < 15.5) {
         leftCount++;
         if (item.frame === 'pine_green' || item.frame === 'snow_shrub') leftGreenCount++;
-        if (
-          item.frame === 'alpine_rock' ||
-          item.frame === 'rock_crag' ||
-          item.frame === 'pine_frosted'
-        ) {
+        if (item.frame === 'alpine_rock' || item.frame === 'rock_crag' || item.frame === 'pine_frosted') {
           leftRockOrFrostedCount++;
         }
       } else if (wx > 16.5) {
         rightCount++;
-        if (
-          item.frame === 'alpine_rock' ||
-          item.frame === 'rock_crag' ||
-          item.frame === 'pine_frosted'
-        ) {
+        if (item.frame === 'alpine_rock' || item.frame === 'rock_crag' || item.frame === 'pine_frosted') {
           rightRockOrFrostedCount++;
         }
       }
@@ -1525,74 +1853,47 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     expect(leftGreenCount).toBeGreaterThan(leftRockOrFrostedCount);
     expect(rightRockOrFrostedCount).toBeGreaterThanOrEqual(1);
 
-    // Also verify tilePool.getSlotStageIds reports both stages on the straddling tile
-    let straddleSlot = null;
-    for (let i = 0; i < streamer.tilePool.innerCapacity; i++) {
-      const s = streamer.tilePool.getSlot(0, i)!;
-      if (s.inUse && s.absTileX === 0 && s.absTileZ === 0) {
-        straddleSlot = s;
-        break;
-      }
-    }
-    expect(straddleSlot).not.toBeNull();
-    const slotStages: string[] = [];
-    streamer.tilePool.getSlotStageIds(straddleSlot!, slotStages);
-    expect(slotStages).toContain('powder-bowl');
-    expect(slotStages).toContain('blizzard-ridge');
-
-    streamer.clearAll();
-
-    // 2. Real SkiSimulation for powder-bowl (circle badge + dual-radius canopy/ground tucking)
+    // Real SkiSimulation powder-bowl: dual-radius spacing + understory tucking
     const simPowder = new SkiSimulation({ seed: 505, startStageId: 'powder-bowl' });
     const powderState = simPowder.getState();
-    const rendererPowder = new ThreeRenderer(null, simPowder.eventBus, undefined, { headless: true });
-    for (let f = 0; f < 30; f++) {
-      rendererPowder.sync(powderState, 0.5, 1 / 60, 50);
-      if (rendererPowder.terrainStreamer.queuedTileCount === 0) break;
+    const powderScenery = new SceneryCellStreamer({ halfExtentCells: 3 });
+    for (let f = 0; f < 30 && (f === 0 || powderScenery.queuedCellCount > 0); f++) {
+      powderScenery.step(
+        powderState.trailWindow,
+        powderState.mountainField,
+        powderState.currSkier.posX,
+        powderState.currSkier.posZ,
+        0,
+        -1,
+        50,
+      );
     }
-    expect(rendererPowder.terrainStreamer.queuedTileCount).toBe(0);
+    expect(powderScenery.queuedCellCount).toBe(0);
 
-    // Check dual-radius spacing and understory placement per tile across visible powder-bowl tiles
-    const itemsByTile = new Map<
-      string,
-      Array<{ wx: number; wz: number; item: TileSceneryItem }>
-    >();
-    let totalPowderItems = 0;
-    rendererPowder.terrainStreamer.forEachActiveScenery((ox, _oy, oz, item) => {
-      totalPowderItems++;
+    const itemsByCell = new Map<string, Array<{ wx: number; wz: number; item: TileSceneryItem }>>();
+    powderScenery.forEachActiveScenery((ox, _oy, oz, item) => {
       const key = `${Math.round(ox)},${Math.round(oz)}`;
-      let list = itemsByTile.get(key);
+      let list = itemsByCell.get(key);
       if (!list) {
         list = [];
-        itemsByTile.set(key, list);
+        itemsByCell.set(key, list);
       }
       list.push({ wx: ox + item.localX, wz: oz + item.localZ, item: { ...item } });
     });
-    expect(totalPowderItems).toBeGreaterThan(20);
 
     const isCanopy = (f: string): boolean => f === 'pine_green' || f === 'pine_frosted';
     let minTreeDist = Infinity;
     let minItemDist = Infinity;
-    let totalTrees = 0;
-    let totalGroundProps = 0;
     let sawUnderstoryTucked = false;
-
-    for (const tileItems of itemsByTile.values()) {
-      const trees = tileItems.filter((e) => isCanopy(e.item.frame));
-      const groundProps = tileItems.filter((e) => !isCanopy(e.item.frame));
-      totalTrees += trees.length;
-      totalGroundProps += groundProps.length;
-
-      for (let i = 0; i < tileItems.length; i++) {
-        for (let j = i + 1; j < tileItems.length; j++) {
-          const d = Math.hypot(
-            tileItems[i]!.wx - tileItems[j]!.wx,
-            tileItems[i]!.wz - tileItems[j]!.wz,
-          );
+    for (const cellItems of itemsByCell.values()) {
+      const trees = cellItems.filter((e) => isCanopy(e.item.frame));
+      const groundProps = cellItems.filter((e) => !isCanopy(e.item.frame));
+      for (let i = 0; i < cellItems.length; i++) {
+        for (let j = i + 1; j < cellItems.length; j++) {
+          const d = Math.hypot(cellItems[i]!.wx - cellItems[j]!.wx, cellItems[i]!.wz - cellItems[j]!.wz);
           if (d < minItemDist) minItemDist = d;
         }
       }
-
       for (let i = 0; i < trees.length; i++) {
         for (let j = i + 1; j < trees.length; j++) {
           const d = Math.hypot(trees[i]!.wx - trees[j]!.wx, trees[i]!.wz - trees[j]!.wz);
@@ -1611,65 +1912,12 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     }
     expect(minItemDist).toBeGreaterThanOrEqual(STAGE_ICY_BLACK.layout.scenery.groundMinRadius - 1e-3);
     expect(minTreeDist).toBeGreaterThanOrEqual(4.19);
-    expect(totalTrees).toBeGreaterThan(10);
-    expect(totalGroundProps).toBeGreaterThan(3);
     expect(sawUnderstoryTucked).toBe(true);
 
-    expect(rendererPowder.runLeakCheck(0, true).totalLeaks).toBe(0);
-    rendererPowder.dispose();
-
-    // Verify 'blizzard-ridge' weather fog clamp (>= 65m), #152033 chasm floor, and rocky scenery
-    const archCheckSim = new SkiSimulation({ seed: 101, startStageId: 'blizzard-ridge' });
-    const archState = archCheckSim.getState();
-    const rendererBliz = new ThreeRenderer(null, archCheckSim.eventBus, undefined, {
-      headless: true,
-    });
-    for (let f = 0; f < 30; f++) {
-      rendererBliz.sync(archState, 0.5, 0.1, 50);
-    }
-    expect(rendererBliz.terrainStreamer.queuedTileCount).toBe(0);
-
-    const fogBliz = rendererBliz.scene.fog as THREE.FogExp2;
-    expect(fogBliz.density).toBeCloseTo(1.6 / STAGE_BLIZZARD_RIDGE.weather.fogMinDist, 2);
-
-    const sampleOut = createMountainSampleOut();
-    let sawRockScenery = false;
-    rendererBliz.terrainStreamer.forEachActiveScenery((ox, _oy, oz, item) => {
-      if (item.frame === 'alpine_rock' || item.frame === 'rock_crag') {
-        sawRockScenery = true;
-      }
-      archState.mountainField.evaluate(ox + item.localX, oz + item.localZ, sampleOut);
-      expect(sampleOut.normalY).toBeGreaterThanOrEqual(0.5);
-    });
-    expect(sawRockScenery).toBe(true);
-
-    // Verify chasmFloorColor #152033 rendered in blizzard-ridge tiles
-    const blizChasmColor = new THREE.Color(STAGE_BLIZZARD_RIDGE.palette.chasmFloorColor!);
-    const vCol = new THREE.Color();
-    let sawBlizChasm = false;
-    for (let i = 0; i < rendererBliz.terrainStreamer.tilePool.innerCapacity; i++) {
-      const slot = rendererBliz.terrainStreamer.tilePool.getSlot(0, i)!;
-      if (!slot.inUse || !slot.ready) continue;
-      for (let v = 0; v < slot.spec.topVertexCount; v++) {
-        const v3 = v * 3;
-        vCol.setRGB(slot.colors[v3]!, slot.colors[v3 + 1]!, slot.colors[v3 + 2]!);
-        const distC = Math.hypot(
-          vCol.r - blizChasmColor.r,
-          vCol.g - blizChasmColor.g,
-          vCol.b - blizChasmColor.b,
-        );
-        if (distC < 0.35 && slot.originY + slot.positions[v3 + 1]! < archState.currSkier.posY - 18) {
-          sawBlizChasm = true;
-          break;
-        }
-      }
-      if (sawBlizChasm) break;
-    }
-    expect(sawBlizChasm).toBe(true);
-
-    expect(rendererBliz.runLeakCheck(0, true).totalLeaks).toBe(0);
-
     // Explicitly verify green circle badge on 'powder-bowl' fork arch
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const mats = createSharedToonMaterials(gfx);
     const powderAssets = createProceduralMeshAssets(gfx);
     const powderArch = createForkArchObject(
       gfx,
@@ -1684,94 +1932,462 @@ describe('TerrainTilePool, TerrainStreamer, LandmarkStreamer & ThreeRenderer', (
     expect(powderArch.group.getObjectByName('ForkGateTrimCircle')?.visible).toBe(true);
     gfx.disposeObject(powderArch.group);
 
-    // Also verify 'granite-gorge' canyon walls emit rock/crag scenery safely on both LOD tiers
-    const simGorge = new SkiSimulation({ seed: 606, startStageId: 'granite-gorge' });
-    const gorgeState = simGorge.getState();
-    rendererBliz.sync(gorgeState, 0.5, 1 / 60, 50);
-    for (let f = 0; f < 30; f++) {
-      rendererBliz.sync(gorgeState, 0.5, 1 / 60, 50);
-      if (rendererBliz.terrainStreamer.queuedTileCount === 0) break;
+    // Verify blizzard-ridge fog clamp & rocky scenery
+    const blizSim = new SkiSimulation({ seed: 101, startStageId: 'blizzard-ridge' });
+    const blizRenderer = new ThreeRenderer(null, blizSim.eventBus, undefined, { headless: true });
+    for (let f = 0; f < 15; f++) {
+      blizRenderer.sync(blizSim.getState(), 0.5, 0.1, 50);
     }
-    expect(rendererBliz.terrainStreamer.queuedTileCount).toBe(0);
-    let sawGorgeRock = false;
-    rendererBliz.terrainStreamer.forEachActiveScenery((ox, _oy, oz, item) => {
-      if (item.frame === 'alpine_rock' || item.frame === 'rock_crag') {
-        sawGorgeRock = true;
-      }
-      gorgeState.mountainField.evaluate(ox + item.localX, oz + item.localZ, sampleOut);
-      expect(sampleOut.normalY).toBeGreaterThanOrEqual(0.5);
-    });
-    expect(sawGorgeRock).toBe(true);
+    const fogBliz = blizRenderer.scene.fog as THREE.FogExp2;
+    expect(fogBliz.density).toBeCloseTo(1.6 / STAGE_BLIZZARD_RIDGE.weather.fogMinDist, 2);
 
-    expect(rendererBliz.runLeakCheck(0, true).totalLeaks).toBe(0);
-    rendererBliz.dispose();
+    let sawRockScenery = false;
+    blizRenderer.sceneryStreamer.forEachActiveScenery((_ox, _oy, _oz, item) => {
+      if (item.frame === 'alpine_rock' || item.frame === 'rock_crag') {
+        sawRockScenery = true;
+      }
+    });
+    expect(sawRockScenery).toBe(true);
+
+    expect(blizRenderer.runLeakCheck(0, true).totalLeaks).toBe(0);
+    blizRenderer.dispose();
     tracker.disposeAll();
+    scenery.clearAll();
+    powderScenery.clearAll();
+    blizSim.dispose();
+    simPowder.dispose();
   });
 
-  it('renders bare rock (no snow) on steep off-piste cliff faces across both LODs while keeping steep pistes snowy', () => {
-    const sim = new SkiSimulation({ seed: 2026, startStageId: 'granite-gorge' });
-    const simState = sim.getState();
-    const renderer = new ThreeRenderer(null, sim.eventBus, undefined, { headless: true });
+  it('stitched CDLOD snow-toon hybrid GLSL expands cleanly against three@0.181.0 ShaderLib.toon with shadow-normal alignment, morph blending, SkyDome, shadows, and CarveSprayVfx', () => {
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const mats = createSharedToonMaterials(gfx);
 
-    for (let f = 0; f < 40; f++) {
-      renderer.sync(simState, 0.5, 1 / 60, 50);
-      if (renderer.terrainStreamer.queuedTileCount === 0) break;
+    // 1. Expand all #include chunks against live three@0.181.0 ShaderLib.toon
+    const toonShader = THREE.ShaderLib.toon!;
+    const mockShader = {
+      uniforms: {} as Record<string, THREE.IUniform>,
+      vertexShader: toonShader.vertexShader,
+      fragmentShader: toonShader.fragmentShader,
+    };
+    mats.terrainMaterial.onBeforeCompile(
+      mockShader as unknown as THREE.WebGLProgramParametersWithUniforms,
+      {} as THREE.WebGLRenderer,
+    );
+
+    const expandedVert = expandThreeShaderIncludes(mockShader.vertexShader);
+    const expandedFrag = expandThreeShaderIncludes(mockShader.fragmentShader);
+
+    // 0 unresolved #include directives
+    expect(expandedVert).not.toMatch(/#include\s+</);
+    expect(expandedFrag).not.toMatch(/#include\s+</);
+
+    // Balanced braces
+    const countChar = (s: string, ch: string): number => s.split(ch).length - 1;
+    expect(countChar(expandedVert, '{')).toBe(countChar(expandedVert, '}'));
+    expect(countChar(expandedFrag, '{')).toBe(countChar(expandedFrag, '}'));
+    expect(countChar(expandedVert, '(')).toBe(countChar(expandedVert, ')'));
+    expect(countChar(expandedFrag, '(')).toBe(countChar(expandedFrag, ')'));
+
+    // Vertex CDLOD geomorphing + shadow-normal alignment BEFORE <defaultnormal_vertex> & <shadowmap_vertex>
+    expect(expandedVert).toContain('uniform highp sampler2DArray uHeightTex;');
+    expect(expandedVert).toContain('texelFetch(uHeightTex, ivec3(cdlodTexFine, cdlodLayer), 0).r');
+    expect(expandedVert).toContain('ivec2(round(aPatchTex.xy))');
+    expect(expandedVert).toContain('int(round(aPatchTex.z))');
+    expect(expandedVert).toContain('float cdlodDistXZ = length(cdlodFineXZ - uFocusLocalXZ);');
+    expect(expandedVert).toContain('float cdlodHeight = mix(cdlodH0, cdlodH1, cdlodMorph);');
+    const objNormIdx = expandedVert.indexOf('vec3 objectNormal = cdlodWorldNorm;');
+    const defNormIdx = expandedVert.indexOf('transformedNormal = normalMatrix * transformedNormal;');
+    const shadowNormIdx = expandedVert.indexOf(
+      'vec3 shadowWorldNormal = inverseTransformDirection( transformedNormal, viewMatrix );',
+    );
+    const shadowBiasUseIdx = expandedVert.lastIndexOf('shadowNormalBias');
+    expect(objNormIdx).toBeGreaterThan(0);
+    expect(defNormIdx).toBeGreaterThan(objNormIdx);
+    expect(shadowNormIdx).toBeGreaterThan(defNormIdx);
+    expect(shadowBiasUseIdx).toBeGreaterThan(shadowNormIdx);
+
+    // Fragment morph-band seam blending + M2 snow-toon hybrid shading + zero legacy dFdx faceting
+    expect(expandedFrag).toContain('uniform highp sampler2DArray uNormalMaskTex;');
+    expect(expandedFrag).toContain('uniform highp sampler2DArray uAlbedoTex;');
+    expect(expandedFrag).toContain('uniform highp sampler2DArray uFlowElevTex;');
+    expect(expandedFrag).toContain('if (vMorph > 0.001 && fragLod < 4)');
+    expect(expandedFrag).toContain('uniform vec3 uShadowSnowTint;');
+    expect(expandedFrag).toContain('uniform vec3 uSkyTopColor;');
+    expect(expandedFrag).toContain('uniform vec3 uCliffColor;');
+    expect(expandedFrag).toContain('uniform vec2 uNoiseOriginModXZ;');
+    expect(expandedFrag).toContain('uniform float uNoiseOriginModY;');
+    expect(expandedFrag).toContain('float snowSunlit = 0.84 + 0.16 * saturate(ndl);');
+    expect(expandedFrag).toContain('float cordK = 11.78097245;');
+    expect(expandedFrag).toContain('float sastrugiFade =');
+    expect(expandedFrag).toContain('float sparkleGate = smoothstep(0.45, 0.62, ndl)');
+    expect(expandedFrag).toContain('vec3 iceSpecColor =');
+    expect(expandedFrag).toContain('outgoingLight += reflectedLight.directSpecular;');
+    const expandedFragNoComments = expandedFrag.replace(/\/\/[^\n]*/g, '');
+    expect(expandedFragNoComments).not.toContain('dFdx(vViewPosition)');
+    expect(expandedFragNoComments).not.toMatch(/\bpow\s*\(\s*0/);
+
+    expect(mockShader.uniforms.uHeightTex).toBe(mats.clipmapUniforms.uHeightTex);
+    expect(mockShader.uniforms.uNormalMaskTex).toBe(mats.clipmapUniforms.uNormalMaskTex);
+    expect(mockShader.uniforms.uAlbedoTex).toBe(mats.clipmapUniforms.uAlbedoTex);
+    expect(mockShader.uniforms.uFlowElevTex).toBe(mats.clipmapUniforms.uFlowElevTex);
+    expect(mockShader.uniforms.uShadowSnowTint).toBe(mats.sharedUniforms.uShadowSnowTint);
+    expect(mockShader.uniforms.uCliffColor).toBe(mats.sharedUniforms.uCliffColor);
+    expect(mockShader.uniforms.uNoiseOriginModXZ).toBe(mats.sharedUniforms.uNoiseOriginModXZ);
+    expect(mockShader.uniforms.uNoiseOriginModY).toBe(mats.sharedUniforms.uNoiseOriginModY);
+    tracker.disposeAll();
+
+    // 2. Verify ThreeRenderer wires SkyDome, texel-snapped directional shadows, CarveSprayVfx, and WORLD_REBASED
+    const eventBus = new EventBus<SimEvents>();
+    const renderer = new ThreeRenderer(null, eventBus, undefined, { headless: true });
+    const simState = createMockSimState();
+    renderer.sync(simState, 0.5, 1 / 60, 50);
+
+    expect(renderer.dirLight.castShadow).toBe(true);
+    expect(renderer.dirLight.shadow.mapSize.x).toBe(1024);
+    expect(renderer.dirLight.shadow.mapSize.y).toBe(1024);
+    expect(renderer.dirLight.shadow.camera.left).toBe(-48);
+    expect(renderer.dirLight.shadow.camera.right).toBe(48);
+    expect(renderer.dirLight.shadow.camera.top).toBe(56);
+    expect(renderer.dirLight.shadow.camera.bottom).toBe(-56);
+    expect(renderer.dirLight.target.parent).toBe(renderer.scene);
+
+    const poolsRoot = renderer.scene.getObjectByName('InstancePoolsRoot')!;
+    const staticBbPool = poolsRoot.getObjectByName('StaticSceneryBillboardPool') as THREE.InstancedMesh;
+    const dynBbPool = poolsRoot.getObjectByName('DynamicBillboardPool') as THREE.InstancedMesh;
+    const boulderSmallPool = poolsRoot.getObjectByName('BoulderSmallPool') as THREE.InstancedMesh;
+    expect(staticBbPool.castShadow).toBe(false);
+    expect(dynBbPool.castShadow).toBe(false);
+    expect(boulderSmallPool.castShadow).toBe(true);
+
+    const skyMesh = renderer.scene.getObjectByName('SkyDomeMesh') as THREE.Mesh;
+    expect(skyMesh).toBe(renderer.skyDome.mesh);
+    expect(skyMesh.renderOrder).toBe(-1000);
+    expect(skyMesh.frustumCulled).toBe(false);
+    expect(skyMesh.castShadow).toBe(false);
+    expect(skyMesh.receiveShadow).toBe(false);
+    expect(skyMesh.position.x).toBeCloseTo(renderer.camera.position.x, 5);
+    expect(skyMesh.position.y).toBeCloseTo(renderer.camera.position.y, 5);
+    expect(skyMesh.position.z).toBeCloseTo(renderer.camera.position.z, 5);
+
+    const sunnyTopBefore = renderer.skyDome.uniforms.uSkyTop.value.clone();
+    const blizState: ReadonlySimState = { ...simState, activeStageId: 'blizzard-ridge' };
+    for (let f = 0; f < 25; f++) {
+      renderer.sync(blizState, 1, 1 / 60, 50);
     }
-    expect(renderer.terrainStreamer.queuedTileCount).toBe(0);
+    expect(renderer.skyDome.uniforms.uSkyTop.value.b).toBeLessThan(sunnyTopBefore.b);
+    expect(renderer.skyDome.uniforms.uBlizzardDim.value).toBeCloseTo(0.35, 3);
 
-    const snowColor = new THREE.Color(STAGE_SUNNY_BLUE.palette.snowColor);
-    let innerSteepCount = 0;
-    let outerSteepCount = 0;
-    let pisteVertCount = 0;
+    const targetBeforeNudge = renderer.dirLight.target.position.clone();
+    const tinyNudgeState: ReadonlySimState = {
+      ...blizState,
+      prevSkier: { ...blizState.prevSkier, posX: blizState.prevSkier.posX + 0.01 },
+      currSkier: { ...blizState.currSkier, posX: blizState.currSkier.posX + 0.01 },
+    };
+    renderer.sync(tinyNudgeState, 1, 1 / 60, 50);
+    expect(renderer.dirLight.target.position.distanceTo(targetBeforeNudge)).toBeLessThan(1e-5);
 
-    for (const lod of [0, 1] as const) {
-      const cap =
-        lod === 0
-          ? renderer.terrainStreamer.tilePool.innerCapacity
-          : renderer.terrainStreamer.tilePool.outerCapacity;
-      const fullRockNy = lod === 0 ? CLIFF_ROCK_FULL_NY_INNER : CLIFF_ROCK_FULL_NY_OUTER;
+    const sprayMesh = renderer.scene.getObjectByName('CarveSprayPool') as THREE.InstancedMesh;
+    expect(sprayMesh).toBe(renderer.carveSprayVfx.instancedMesh);
+    expect(sprayMesh.castShadow).toBe(false);
+    expect(sprayMesh.receiveShadow).toBe(false);
+    expect(sprayMesh.frustumCulled).toBe(false);
 
-      for (let i = 0; i < cap; i++) {
-        const slot = renderer.terrainStreamer.tilePool.getSlot(lod, i)!;
-        if (!slot.inUse || !slot.ready) continue;
-        expect(slot.geometry.getAttribute('aRockInfo')).toBe(slot.rockInfoAttr);
+    const carvingState: ReadonlySimState = {
+      ...blizState,
+      currSkier: {
+        ...blizState.currSkier,
+        grounded: true,
+        speed: 24,
+        carveAngleRad: 0.45,
+        braking: false,
+      },
+    };
+    for (let f = 0; f < 6; f++) {
+      renderer.sync(carvingState, 1, 1 / 30, 50);
+    }
+    expect(sprayMesh.count).toBeGreaterThan(0);
 
-        for (let v = 0; v < slot.spec.topVertexCount; v++) {
-          const v3 = v * 3;
-          const v4 = v * 4;
-          const ny = slot.normals[v3 + 1]!;
-          const offPiste = slot.rockInfo[v4 + 3]!;
-          const r = slot.colors[v3]!;
-          const g = slot.colors[v3 + 1]!;
-          const b = slot.colors[v3 + 2]!;
-          const rockR = slot.rockInfo[v4]!;
-          const rockG = slot.rockInfo[v4 + 1]!;
-          const rockB = slot.rockInfo[v4 + 2]!;
+    const targetBeforeRebase = renderer.dirLight.target.position.clone();
+    eventBus.emit('WORLD_REBASED', {
+      rebaseCount: 1,
+      deltaX: 128,
+      deltaY: -64,
+      deltaZ: -1152,
+      totalOffsetX: 128,
+      totalOffsetY: -64,
+      totalOffsetZ: -1152,
+    });
+    const uniforms = renderer.getSharedLightingUniforms();
+    expect(uniforms.uNoiseOriginModXZ.value.x).toBeCloseTo(
+      positiveMod(128, NOISE_ORIGIN_MOD_PERIOD),
+      5,
+    );
+    expect(uniforms.uNoiseOriginModXZ.value.y).toBeCloseTo(
+      positiveMod(-1152, NOISE_ORIGIN_MOD_PERIOD),
+      5,
+    );
+    expect(uniforms.uNoiseOriginModY.value).toBeCloseTo(
+      positiveMod(-64, NOISE_ORIGIN_MOD_PERIOD),
+      5,
+    );
+    expect(renderer.dirLight.target.position.x).toBeCloseTo(targetBeforeRebase.x - 128, 4);
+    expect(renderer.dirLight.target.position.y).toBeCloseTo(targetBeforeRebase.y + 64, 4);
+    expect(renderer.dirLight.target.position.z).toBeCloseTo(targetBeforeRebase.z + 1152, 4);
 
-          if (offPiste < 0.5) {
-            pisteVertCount++;
-            // Piste vertices must stay snowy/icy, never replaced by dark cliff rock
-            const distFromRock = Math.hypot(r - rockR, g - rockG, b - rockB);
-            expect(distFromRock).toBeGreaterThan(0.15);
-          } else if (ny <= fullRockNy) {
-            if (lod === 0) innerSteepCount++;
-            else outerSteepCount++;
-            // Steep off-piste cliff faces must be 100% rock color (no snow blend)
-            expect(r).toBeCloseTo(rockR, 4);
-            expect(g).toBeCloseTo(rockG, 4);
-            expect(b).toBeCloseTo(rockB, 4);
-            // Rock must be clearly darker than snow
-            const distFromSnow = Math.hypot(r - snowColor.r, g - snowColor.g, b - snowColor.b);
-            expect(distFromSnow).toBeGreaterThan(0.5);
+    // Sim reset (tickCount decreases) clears carve spray pool, resets clipmap & noise offsets
+    const resetState: ReadonlySimState = {
+      ...simState,
+      tickCount: 0,
+      currSkier: { ...simState.currSkier, speed: 0, carveAngleRad: 0, braking: false },
+      rebase: {
+        rebaseCount: 0,
+        offsetX: 0,
+        offsetY: 0,
+        offsetZ: 0,
+        lastDeltaX: 0,
+        lastDeltaY: 0,
+        lastDeltaZ: 0,
+      },
+    };
+    renderer.sync(resetState, 1, 1 / 60, 50);
+    expect(sprayMesh.count).toBe(0);
+    expect(uniforms.uNoiseOriginModXZ.value.x).toBe(0);
+    expect(uniforms.uNoiseOriginModXZ.value.y).toBe(0);
+    expect(uniforms.uNoiseOriginModY.value).toBe(0);
+
+    expect(renderer.runLeakCheck(0, true).totalLeaks).toBe(0);
+    renderer.dispose();
+    const afterDispose = renderer.getStats().graphics;
+    expect(afterDispose.activeObjects).toBe(0);
+    expect(afterDispose.activeGeometries).toBe(0);
+    expect(afterDispose.activeMaterials).toBe(0);
+    expect(afterDispose.activeTextures).toBe(0);
+    expect(afterDispose.cachedGeometries).toBe(0);
+    expect(afterDispose.cachedMaterials).toBe(0);
+    expect(afterDispose.cachedTextures).toBe(0);
+  });
+
+  it(
+    'sustains real-budget (3.25 ms) 1.5 km streaming across 60 FPS & 30 FPS (sunny-blue + icy-black, multiple WORLD_REBASED) with 0 missing frames, >=98% L0 coverage, <=0.15 m skier parity, and srcOffset===0 texSubImage3D uploads',
+    { timeout: 60_000 },
+    () => {
+      const scenarios: ReadonlyArray<{
+        label: string;
+        seed: number;
+        startStageId: string;
+        simStepsPerFrame: number;
+        budgetMs: number;
+        targetDistM: number;
+      }> = [
+        {
+          label: 'sunny-blue-60fps',
+          seed: 1337,
+          startStageId: 'sunny-blue',
+          simStepsPerFrame: 1,
+          budgetMs: 3.25,
+          targetDistM: 1500,
+        },
+        {
+          label: 'sunny-blue-30fps',
+          seed: 1337,
+          startStageId: 'sunny-blue',
+          simStepsPerFrame: 2,
+          budgetMs: 3.25,
+          targetDistM: 1500,
+        },
+        {
+          label: 'icy-black-30fps',
+          seed: 2025,
+          startStageId: 'icy-black',
+          simStepsPerFrame: 2,
+          budgetMs: 3.25,
+          targetDistM: 1500,
+        },
+      ];
+
+      for (const sc of scenarios) {
+        const sim = new SkiSimulation({ seed: sc.seed, startStageId: sc.startStageId });
+        const intent = createMutablePlayerIntent();
+        const tracker = new GraphicsTracker();
+        const gfx = new GraphicsUtils(tracker);
+        const mats = createSharedToonMaterials(gfx);
+        const store = new ClipmapDataStore(gfx);
+        bindClipmapStoreToMaterial(gfx, mats, store);
+        const clipmap = new TerrainClipmap(gfx, mats.terrainMaterial, mats.clipmapUniforms);
+        const mockGl = createMockWebGL2Renderer();
+
+        // 5 initial frames before downhill start (matching browser boot)
+        for (let f = 0; f < 5; f++) {
+          const st = sim.getState();
+          store.update(
+            st.mountainField,
+            st.currSkier.posX,
+            st.currSkier.posY,
+            st.currSkier.posZ,
+            mockGl.renderer,
+            sc.budgetMs,
+          );
+          clipmap.update(
+            store,
+            st.currSkier.posX,
+            st.currSkier.posZ,
+            st.mountainField.originOffsetX,
+            st.mountainField.originOffsetY,
+            st.mountainField.originOffsetZ,
+            null,
+          );
+        }
+
+        const evalClipmapAt = (
+          wx: number,
+          wz: number,
+          ox: number,
+          oy: number,
+          oz: number,
+        ): { y: number; lod: number } => {
+          let bestLod = 99;
+          for (let i = 0; i < clipmap.patchCount; i++) {
+            const o4 = i * 4;
+            const x0 = clipmap.patchWorldArray[o4]!;
+            const z0 = clipmap.patchWorldArray[o4 + 2]!;
+            const sz = CLIPMAP_PATCH_QUADS * clipmap.patchWorldArray[o4 + 3]!;
+            if (
+              wx >= x0 - 1e-4 &&
+              wx <= x0 + sz + 1e-4 &&
+              wz >= z0 - 1e-4 &&
+              wz <= z0 + sz + 1e-4
+            ) {
+              const lod = Math.round(clipmap.patchTexArray[o4 + 2]!);
+              if (lod < bestLod) bestLod = lod;
+            }
+          }
+          if (bestLod >= CLIPMAP_LAYERS) return { y: NaN, lod: -1 };
+          return {
+            y: store.sampleMirrorHeightBilinearAbs(bestLod, wx + ox, wz + oz) - oy,
+            lod: bestLod,
+          };
+        };
+
+        let frames = 0;
+        let missingFrames = 0;
+        let l0ActiveFrames = 0;
+        let maxSkierErrM = 0;
+        let maxPresentErrM = 0;
+        let maxLandmarkErrM = 0;
+        let nonZeroSrcOffsetCount = 0;
+        let totalSubUploads = 0;
+        const maxFrames = 8000;
+
+        while (sim.getState().distanceM < sc.targetDistM && frames < maxFrames) {
+          for (let s = 0; s < sc.simStepsPerFrame; s++) {
+            const st0 = sim.getState();
+            if (st0.gameOver) break;
+            const targetX = st0.trailWindow.curr.sampleSafeX(st0.surfaceSample.s + 14);
+            const downhillYaw = Math.atan2(
+              -st0.surfaceSample.tangentX,
+              -st0.surfaceSample.tangentZ,
+            );
+            const latErr = targetX - st0.surfaceSample.x;
+            const desiredYaw = downhillYaw - clamp(latErr * 0.065, -0.55, 0.55);
+            let headingErr = desiredYaw - st0.currSkier.headingRad;
+            while (headingErr > Math.PI) headingErr -= Math.PI * 2;
+            while (headingErr < -Math.PI) headingErr += Math.PI * 2;
+            intent.steer = clamp(-headingErr * 2.2, -1, 1);
+            sim.savePreviousPoses();
+            sim.step(FIXED_DT, intent);
+          }
+
+          const st = sim.getState();
+          if (st.gameOver) break;
+          frames++;
+          const ox = st.mountainField.originOffsetX;
+          const oy = st.mountainField.originOffsetY;
+          const oz = st.mountainField.originOffsetZ;
+
+          mockGl.subUploads.length = 0;
+          store.update(
+            st.mountainField,
+            st.currSkier.posX,
+            st.currSkier.posY,
+            st.currSkier.posZ,
+            mockGl.renderer,
+            sc.budgetMs,
+          );
+          for (let u = 0; u < mockGl.subUploads.length; u++) {
+            totalSubUploads++;
+            if (mockGl.subUploads[u]!.srcOffset !== 0) {
+              nonZeroSrcOffsetCount++;
+            }
+          }
+
+          clipmap.update(store, st.currSkier.posX, st.currSkier.posZ, ox, oy, oz, null);
+
+          const skierSample = evalClipmapAt(st.currSkier.posX, st.currSkier.posZ, ox, oy, oz);
+          if (clipmap.mesh.count <= 0 || Number.isNaN(skierSample.y)) {
+            missingFrames++;
+          } else {
+            if (skierSample.lod === 0) l0ActiveFrames++;
+            const trueY = st.mountainField.evaluateHeight(st.currSkier.posX, st.currSkier.posZ);
+            const err = Math.abs(skierSample.y - trueY);
+            if (err > maxSkierErrM) maxSkierErrM = err;
+          }
+
+          // Spot-check nearby presents and landmarks within 45 m (L0/L1 playable corridor)
+          if (frames % 10 === 0 && st.distanceM >= 20) {
+            const presents = st.entities.presents;
+            for (let i = 0; i < presents.count; i++) {
+              if (presents.collected[i]) continue;
+              const px = presents.posX[i]!;
+              const pz = presents.posZ[i]!;
+              if (Math.hypot(px - st.currSkier.posX, pz - st.currSkier.posZ) > 45) continue;
+              const pRes = evalClipmapAt(px, pz, ox, oy, oz);
+              if (!Number.isNaN(pRes.y)) {
+                const ty = st.mountainField.evaluateHeight(px, pz);
+                const e = Math.abs(pRes.y - ty);
+                if (e > maxPresentErrM) maxPresentErrM = e;
+              }
+            }
+            for (const seg of [
+              st.trailWindow.curr,
+              st.trailWindow.nextLeft,
+              st.trailWindow.nextRight,
+            ]) {
+              if (!seg) continue;
+              for (let i = 0; i < seg.landmarks.length; i++) {
+                const lm = seg.landmarks[i]!;
+                if (Math.hypot(lm.worldX - st.currSkier.posX, lm.worldZ - st.currSkier.posZ) > 45) {
+                  continue;
+                }
+                const lRes = evalClipmapAt(lm.worldX, lm.worldZ, ox, oy, oz);
+                if (!Number.isNaN(lRes.y)) {
+                  const ty = st.mountainField.evaluateHeight(lm.worldX, lm.worldZ);
+                  const e = Math.abs(lRes.y - ty);
+                  if (e > maxLandmarkErrM) maxLandmarkErrM = e;
+                }
+              }
+            }
           }
         }
+
+        const finalState = sim.getState();
+        expect(finalState.distanceM, `${sc.label}: distance`).toBeGreaterThanOrEqual(sc.targetDistM);
+        expect(finalState.rebase.rebaseCount, `${sc.label}: multiple rebases`).toBeGreaterThanOrEqual(4);
+        expect(missingFrames, `${sc.label}: 0 missing terrain frames`).toBe(0);
+        expect(
+          l0ActiveFrames / Math.max(1, frames),
+          `${sc.label}: >= 98% L0 coverage`,
+        ).toBeGreaterThanOrEqual(0.98);
+        expect(maxSkierErrM, `${sc.label}: skier parity <= 0.15m`).toBeLessThanOrEqual(0.15);
+        expect(maxPresentErrM, `${sc.label}: present parity <= 0.20m`).toBeLessThanOrEqual(0.2);
+        expect(maxLandmarkErrM, `${sc.label}: landmark parity <= 0.20m`).toBeLessThanOrEqual(0.2);
+        expect(totalSubUploads, `${sc.label}: performed texSubImage3D uploads`).toBeGreaterThan(0);
+        expect(nonZeroSrcOffsetCount, `${sc.label}: texSubImage3D srcOffset === 0`).toBe(0);
+
+        clipmap.dispose();
+        tracker.disposeAll();
+        sim.dispose();
       }
-    }
-
-    expect(pisteVertCount).toBeGreaterThan(0);
-    expect(innerSteepCount).toBeGreaterThan(50);
-    expect(outerSteepCount).toBeGreaterThan(50);
-
-    renderer.dispose();
-  });
+    },
+  );
 });

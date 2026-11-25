@@ -14,9 +14,12 @@ import type {
   StageSpawnRule,
 } from '../content/types';
 import {
-  createRibbonPointOut,
+  createMountainSampleOut,
+  createPisteHeightOut,
   createSpineFrameOut,
-  type RibbonPointOut,
+  type MountainFieldView,
+  type MountainSampleOut,
+  type PisteHeightOut,
   type SegmentLandmarkRequirement,
   type SpineFrameOut,
 } from './contracts';
@@ -138,7 +141,16 @@ export class LayoutEngine {
 
   private readonly segmentOccupationGrid = new SpatialGrid<number>(12);
   private readonly scratchFrame: SpineFrameOut = createSpineFrameOut();
-  private readonly scratchRibbon: RibbonPointOut = createRibbonPointOut();
+  private readonly scratchMountain: MountainSampleOut = createMountainSampleOut();
+  private readonly scratchPiste: PisteHeightOut = createPisteHeightOut();
+  private readonly scratchPlacement = {
+    posX: 0,
+    posY: 0,
+    posZ: 0,
+    normalX: 0,
+    normalY: 1,
+    normalZ: 0,
+  };
   private readonly deliverySBuffer: number[] = [];
   private readonly rampWindows: RampWindow[] = [];
 
@@ -161,6 +173,7 @@ export class LayoutEngine {
     segment: TrailSegment,
     pools: EntityPools,
     backpackFillRatio: number,
+    mountainField?: MountainFieldView,
   ): LayoutBakeResult {
     const segRng = this.rng.fork(segment.id * 97 + 13);
     this.segmentOccupationGrid.clear();
@@ -185,7 +198,7 @@ export class LayoutEngine {
       const def = rule ? getDeliveryZoneDef(rule.deliveryZoneId) : getDeliveryZoneDef('child_solo');
       if (!def) continue;
 
-      if (this.placeDeliveryZone(segment, def, s, segRng, pools)) {
+      if (this.placeDeliveryZone(segment, def, s, segRng, pools, mountainField)) {
         deliveryZoneCount++;
       }
     }
@@ -206,16 +219,22 @@ export class LayoutEngine {
         );
         if (Math.abs(x) < this.scratchFrame.dividerHalfWidth + 2.5) continue;
 
-        segment.evaluateSurfaceAtX(s, x, this.scratchRibbon);
-        if (this.segmentOccupationGrid.hasOverlap(this.scratchRibbon.posX, this.scratchRibbon.posZ, 10)) {
+        this.samplePlacementSurface(segment, s, x, mountainField);
+        if (
+          this.segmentOccupationGrid.hasOverlap(
+            this.scratchPlacement.posX,
+            this.scratchPlacement.posZ,
+            10,
+          )
+        ) {
           continue;
         }
         const idx = pools.ramps.add(
           rampDef.id,
           segment.id,
-          this.scratchRibbon.posX,
-          this.scratchRibbon.posY,
-          this.scratchRibbon.posZ,
+          this.scratchPlacement.posX,
+          this.scratchPlacement.posY,
+          this.scratchPlacement.posZ,
           this.scratchFrame.yawRad,
           this.scratchFrame.pitchRad,
           rampDef.width,
@@ -224,7 +243,12 @@ export class LayoutEngine {
           rampDef.lipPitchBoostDeg,
         );
         if (idx >= 0) {
-          this.segmentOccupationGrid.insert(idx, this.scratchRibbon.posX, this.scratchRibbon.posZ, 8);
+          this.segmentOccupationGrid.insert(
+            idx,
+            this.scratchPlacement.posX,
+            this.scratchPlacement.posZ,
+            8,
+          );
           this.rampWindows.push({ startS: s - 4, endS: s + 28 });
           rampCount++;
         }
@@ -255,6 +279,7 @@ export class LayoutEngine {
           baseSpacing,
           segRng,
           pools,
+          mountainField,
         );
         hazardCount += placed;
         cursorS += Math.max(24, baseSpacing * Math.max(1, count * 0.65));
@@ -292,11 +317,11 @@ export class LayoutEngine {
             laneDir,
             segRng,
           );
-          segment.evaluateSurfaceAtX(s, x, this.scratchRibbon);
+          this.samplePlacementSurface(segment, s, x, mountainField);
           if (
             this.segmentOccupationGrid.hasOverlap(
-              this.scratchRibbon.posX,
-              this.scratchRibbon.posZ,
+              this.scratchPlacement.posX,
+              this.scratchPlacement.posZ,
               2.6,
             )
           ) {
@@ -305,9 +330,9 @@ export class LayoutEngine {
           const idx = pools.presents.add(
             presentDef.id,
             segment.id,
-            this.scratchRibbon.posX,
-            this.scratchRibbon.posY + 0.65,
-            this.scratchRibbon.posZ,
+            this.scratchPlacement.posX,
+            this.scratchPlacement.posY + 0.65,
+            this.scratchPlacement.posZ,
             segRng.nextRange(0, Math.PI * 2),
           );
           if (idx >= 0) {
@@ -337,11 +362,11 @@ export class LayoutEngine {
               -(hw - 2.5),
               hw - 2.5,
             );
-            segment.evaluateSurfaceAtX(s, x, this.scratchRibbon);
+            this.samplePlacementSurface(segment, s, x, mountainField);
             if (
               !this.segmentOccupationGrid.hasOverlap(
-                this.scratchRibbon.posX,
-                this.scratchRibbon.posZ,
+                this.scratchPlacement.posX,
+                this.scratchPlacement.posZ,
                 6.0,
               )
             ) {
@@ -349,12 +374,12 @@ export class LayoutEngine {
               const idx = pools.creatures.add(
                 creatureDef.id,
                 segment.id,
-                this.scratchRibbon.posX,
-                this.scratchRibbon.posY,
-                this.scratchRibbon.posZ,
-                this.scratchRibbon.normalX,
-                this.scratchRibbon.normalY,
-                this.scratchRibbon.normalZ,
+                this.scratchPlacement.posX,
+                this.scratchPlacement.posY,
+                this.scratchPlacement.posZ,
+                this.scratchPlacement.normalX,
+                this.scratchPlacement.normalY,
+                this.scratchPlacement.normalZ,
                 heading,
                 creatureDef.collider.radius,
                 creatureDef.collider.height,
@@ -381,12 +406,56 @@ export class LayoutEngine {
     };
   }
 
+  /**
+   * Samples world position and surface normal at (s, x) directly from MountainField
+   * (omitting legacy 3.6m ribbon snowbank height discrepancies).
+   */
+  private samplePlacementSurface(
+    segment: TrailSegment,
+    s: number,
+    x: number,
+    mountainField: MountainFieldView | undefined,
+  ): void {
+    const f = this.scratchFrame;
+    const wx = f.posX + x * f.rightX;
+    const wz = f.posZ + x * f.rightZ;
+    this.scratchPlacement.posX = wx;
+    this.scratchPlacement.posZ = wz;
+
+    if (mountainField !== undefined) {
+      const m = mountainField.evaluate(wx, wz, this.scratchMountain);
+      this.scratchPlacement.posY = m.heightY;
+      this.scratchPlacement.normalX = m.normalX;
+      this.scratchPlacement.normalY = m.normalY;
+      this.scratchPlacement.normalZ = m.normalZ;
+      return;
+    }
+
+    // Fallback when invoked without MountainField in standalone unit tests (still omits 3.6m wall)
+    segment.evaluatePisteHeight(s, x, this.scratchPiste);
+    this.scratchPlacement.posY = this.scratchPiste.heightY;
+    const nx = f.rightY * f.forwardZ - f.rightZ * f.forwardY;
+    const ny = f.rightZ * f.forwardX - f.rightX * f.forwardZ;
+    const nz = f.rightX * f.forwardY - f.rightY * f.forwardX;
+    const nLen = Math.hypot(nx, ny, nz);
+    if (nLen > 1e-6) {
+      this.scratchPlacement.normalX = nx / nLen;
+      this.scratchPlacement.normalY = ny / nLen;
+      this.scratchPlacement.normalZ = nz / nLen;
+    } else {
+      this.scratchPlacement.normalX = 0;
+      this.scratchPlacement.normalY = 1;
+      this.scratchPlacement.normalZ = 0;
+    }
+  }
+
   private placeDeliveryZone(
     segment: TrailSegment,
     def: DeliveryZoneDef,
     s: number,
     rng: SeededRng,
     pools: EntityPools,
+    mountainField: MountainFieldView | undefined,
   ): boolean {
     segment.sampleSpineFrame(s, this.scratchFrame);
     const hw = this.scratchFrame.halfWidth;
@@ -395,15 +464,15 @@ export class LayoutEngine {
     // Place children near safeX within deliveryRadius (7.5-9.0m) so safeX stays inside zone
     const zoneX = clamp(safeX + side * 4.2, -(hw - 2.4), hw - 2.4);
 
-    segment.evaluateSurfaceAtX(s, zoneX, this.scratchRibbon);
+    this.samplePlacementSurface(segment, s, zoneX, mountainField);
     const zoneYaw = this.scratchFrame.yawRad + side * 0.45;
 
     const idx = pools.deliveryZones.add(
       def.id,
       segment.id,
-      this.scratchRibbon.posX,
-      this.scratchRibbon.posY,
-      this.scratchRibbon.posZ,
+      this.scratchPlacement.posX,
+      this.scratchPlacement.posY,
+      this.scratchPlacement.posZ,
       zoneYaw,
       def.deliveryRadius,
       def.deliveryLength,
@@ -412,23 +481,23 @@ export class LayoutEngine {
 
     this.segmentOccupationGrid.insert(
       idx,
-      this.scratchRibbon.posX,
-      this.scratchRibbon.posZ,
+      this.scratchPlacement.posX,
+      this.scratchPlacement.posZ,
       def.deliveryRadius + 2.5,
     );
 
     // Emit SegmentLandmarkRequirement for LandmarkStreamer (cabin/lantern/arch beside children)
     const landmarkX = clamp(zoneX + side * 3.0, -(hw + 2.0), hw + 2.0);
-    segment.evaluateSurfaceAtX(s, landmarkX, this.scratchRibbon);
+    this.samplePlacementSurface(segment, s, landmarkX, mountainField);
     const landmarkReq: SegmentLandmarkRequirement = {
       id: `deliv_lm_${segment.id}_${Math.round(s)}_${rng.nextInt(100, 999)}`,
       kind: 'deliveryLandmark',
       segmentId: segment.id,
       s,
       x: landmarkX,
-      worldX: this.scratchRibbon.posX,
-      worldY: this.scratchRibbon.posY,
-      worldZ: this.scratchRibbon.posZ,
+      worldX: this.scratchPlacement.posX,
+      worldY: this.scratchPlacement.posY,
+      worldZ: this.scratchPlacement.posZ,
       yawRad: this.scratchFrame.yawRad + side * 0.35,
       clearanceRadius: 4.5,
       visual: def.landmarkVisual,
@@ -436,8 +505,8 @@ export class LayoutEngine {
     segment.addLandmarkRequirement(landmarkReq);
     this.segmentOccupationGrid.insert(
       idx,
-      this.scratchRibbon.posX,
-      this.scratchRibbon.posZ,
+      this.scratchPlacement.posX,
+      this.scratchPlacement.posZ,
       4.5,
     );
 
@@ -454,6 +523,7 @@ export class LayoutEngine {
     spacing: number,
     rng: SeededRng,
     pools: EntityPools,
+    mountainField: MountainFieldView | undefined,
   ): number {
     let placed = 0;
     const baseSide = rng.nextBool(0.5) ? 1 : -1;
@@ -485,7 +555,16 @@ export class LayoutEngine {
         x = this.sampleBandX(segment, s, hw, divHw, rule.band, baseSide, rng);
       }
 
-      x = clamp(x, -(hw + 1.0), hw + 1.0);
+      // Keep hazards strictly on this child's own piste side inside the early fork V-wedge (s < 45m)
+      const minX =
+        segment.fork.isForkChild && segment.fork.forkSide === 'right' && s < 45
+          ? -(hw - 1.0)
+          : -(hw + 1.0);
+      const maxX =
+        segment.fork.isForkChild && segment.fork.forkSide === 'left' && s < 45
+          ? hw - 1.0
+          : hw + 1.0;
+      x = clamp(x, minX, maxX);
       if (divHw > 0.1 && Math.abs(x) < divHw + 1.2) {
         continue;
       }
@@ -512,12 +591,12 @@ export class LayoutEngine {
         continue;
       }
 
-      segment.evaluateSurfaceAtX(s, x, this.scratchRibbon);
+      this.samplePlacementSurface(segment, s, x, mountainField);
       const minGap = hazardDef.collider.radius + 2.4;
       if (
         this.segmentOccupationGrid.hasOverlap(
-          this.scratchRibbon.posX,
-          this.scratchRibbon.posZ,
+          this.scratchPlacement.posX,
+          this.scratchPlacement.posZ,
           minGap,
         )
       ) {
@@ -536,12 +615,12 @@ export class LayoutEngine {
       const idx = pools.hazards.add(
         hazardDef.id,
         segment.id,
-        this.scratchRibbon.posX,
-        this.scratchRibbon.posY,
-        this.scratchRibbon.posZ,
-        this.scratchRibbon.normalX,
-        this.scratchRibbon.normalY,
-        this.scratchRibbon.normalZ,
+        this.scratchPlacement.posX,
+        this.scratchPlacement.posY,
+        this.scratchPlacement.posZ,
+        this.scratchPlacement.normalX,
+        this.scratchPlacement.normalY,
+        this.scratchPlacement.normalZ,
         yaw,
         scale * rng.nextRange(0.92, 1.08),
         hazardDef.collider.radius,
@@ -552,8 +631,8 @@ export class LayoutEngine {
       if (idx >= 0) {
         this.segmentOccupationGrid.insert(
           idx,
-          this.scratchRibbon.posX,
-          this.scratchRibbon.posZ,
+          this.scratchPlacement.posX,
+          this.scratchPlacement.posZ,
           hazardDef.collider.radius + 1.5,
         );
         placed++;

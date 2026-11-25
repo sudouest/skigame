@@ -328,6 +328,7 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
 
     // Dispose unsubscribes every EventBus listener and unmounts cleanly
     ui.dispose();
+    sim.dispose();
     expect(eventBus.listenerCount()).toBe(0);
     expect(mountEl.children.length).toBe(0);
   });
@@ -382,11 +383,15 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
         dtSec,
       );
     };
-    return { doc, mountEl, eventBus, ui, createdAtInit, stepUi };
+    const dispose = (): void => {
+      ui.dispose();
+      sim.dispose();
+    };
+    return { doc, mountEl, eventBus, ui, createdAtInit, stepUi, dispose };
   }
 
   it('coalesces rapid PRESENT_PICKED_UP events into a single pickup chip with zero DOM allocation', () => {
-    const { doc, mountEl, eventBus, ui, createdAtInit, stepUi } = createHarness();
+    const { doc, mountEl, eventBus, createdAtInit, stepUi, dispose } = createHarness();
     const chip = mountEl.findByClass('sg-pickup-chip')[0]!;
     const pointsEl = mountEl.findByClass('sg-pickup-points')[0]!;
     const starEl = mountEl.findByClass('sg-pickup-star')[0]!;
@@ -425,11 +430,11 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
 
     stepUi(1.5);
     expect(chip.classList.contains('sg-hidden')).toBe(true);
-    ui.dispose();
+    dispose();
   });
 
   it('shows PRESENT_DELIVERED in the single-slot broadcast ribbon and replaces prior ribbon cleanly', () => {
-    const { mountEl, eventBus, ui, stepUi } = createHarness();
+    const { mountEl, eventBus, stepUi, dispose } = createHarness();
     const ribbon = mountEl.findByClass('sg-broadcast-ribbon')[0]!;
     const primary = mountEl.findByClass('sg-ribbon-primary')[0]!;
     const detail = mountEl.findByClass('sg-ribbon-detail')[0]!;
@@ -469,11 +474,11 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
 
     stepUi(2.2);
     expect(ribbon.classList.contains('sg-hidden')).toBe(true);
-    ui.dispose();
+    dispose();
   });
 
   it('routes left/right creature telegraphs to edge beacons and center telegraphs to top ribbon', () => {
-    const { mountEl, eventBus, ui, stepUi } = createHarness();
+    const { mountEl, eventBus, stepUi, dispose } = createHarness();
     const leftBeacon = mountEl.findByClass('sg-edge-left')[0]!;
     const rightBeacon = mountEl.findByClass('sg-edge-right')[0]!;
     const ribbon = mountEl.findByClass('sg-broadcast-ribbon')[0]!;
@@ -527,11 +532,11 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
     expect(leftBeacon.classList.contains('sg-hidden')).toBe(true);
     expect(rightBeacon.classList.contains('sg-hidden')).toBe(true);
     expect(ribbon.classList.contains('sg-hidden')).toBe(true);
-    ui.dispose();
+    dispose();
   });
 
   it('announces FORK_ENTERED inline on stage pill, handles stumble chip/flash, and resets cleanly', () => {
-    const { mountEl, eventBus, ui, stepUi } = createHarness();
+    const { mountEl, eventBus, ui, stepUi, dispose } = createHarness();
     const stagePill = mountEl.findByClass('sg-stage-pill')[0]!;
     const chip = mountEl.findByClass('sg-pickup-chip')[0]!;
     const flash = mountEl.findByClass('sg-stumble-flash')[0]!;
@@ -598,6 +603,6 @@ describe('GameUI lifecycle, pooled popups, banners, and dispose', () => {
     expect(ribbon.classList.contains('sg-hidden')).toBe(true);
     expect(leftBeacon.classList.contains('sg-hidden')).toBe(true);
     expect(flash.classList.contains('sg-stumble-active')).toBe(false);
-    ui.dispose();
+    dispose();
   });
 });

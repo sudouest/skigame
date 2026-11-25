@@ -588,6 +588,10 @@ export function createForkArchObject(
   const trimCircle = gfx.createMesh(assets.badgeTrimCircleGeo, toonMat, 'ForkGateTrimCircle');
   const trimSquare = gfx.createMesh(assets.badgeTrimSquareGeo, toonMat, 'ForkGateTrimSquare');
   const trimDiamond = gfx.createMesh(assets.badgeTrimDiamondGeo, toonMat, 'ForkGateTrimDiamond');
+  frameMesh.castShadow = true;
+  trimCircle.castShadow = true;
+  trimSquare.castShadow = true;
+  trimDiamond.castShadow = true;
   frameHolder.add(frameMesh, trimCircle, trimSquare, trimDiamond);
   group.add(frameHolder);
 
@@ -597,6 +601,9 @@ export function createForkArchObject(
   const circle = gfx.createMesh(assets.badgeCircleGeo, badgeMat, 'ForkBadgeCircle');
   const square = gfx.createMesh(assets.badgeSquareGeo, badgeMat, 'ForkBadgeSquare');
   const diamond = gfx.createMesh(assets.badgeDiamondGeo, badgeMat, 'ForkBadgeDiamond');
+  circle.castShadow = true;
+  square.castShadow = true;
+  diamond.castShadow = true;
   badgeHolder.add(circle, square, diamond);
   group.add(badgeHolder);
 

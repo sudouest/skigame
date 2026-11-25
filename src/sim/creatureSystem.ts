@@ -13,6 +13,11 @@ import {
 } from './contracts';
 import type { CreaturePool } from './entityPools';
 
+const CREATURE_ACTIVE_RANGE_M = 85;
+const CREATURE_ACTIVE_RANGE_SQ = CREATURE_ACTIVE_RANGE_M * CREATURE_ACTIVE_RANGE_M;
+const CREATURE_RESAMPLE_DIST_M = 0.25;
+const CREATURE_RESAMPLE_DIST_SQ = CREATURE_RESAMPLE_DIST_M * CREATURE_RESAMPLE_DIST_M;
+
 /**
  * Three-tier world-space creature behavior orchestrator for patrolling creatures (Bear).
  * Executes in authoritative World Space (X, Y, Z), querying SurfaceQueryView.sampleSurface
@@ -55,21 +60,27 @@ export class CreatureSystem {
     for (let i = 0; i < creatures.count; i++) {
       const defId = creatures.defIds[i];
       if (!defId) continue;
-      const def = getCreatureDef(defId);
-      if (!def || def.behavior.type !== 'bearPatrol') continue;
 
       const cx = creatures.posX[i]!;
-      const cy = creatures.posY[i]!;
       const cz = creatures.posZ[i]!;
       const dx = cx - skierPosX;
       const dz = cz - skierPosZ;
-      const distToPlayer = Math.hypot(dx, dz);
+      const distSqToPlayer = dx * dx + dz * dz;
+      if (distSqToPlayer > CREATURE_ACTIVE_RANGE_SQ) {
+        continue;
+      }
 
+      const def = getCreatureDef(defId);
+      if (!def || def.behavior.type !== 'bearPatrol') continue;
+
+      const cy = creatures.posY[i]!;
       let phase = creatures.stateCode[i]!;
       let timer = creatures.stateTimer[i]! + dt;
 
       if (phase === CREATURE_PHASE_IDLE) {
-        if (distToPlayer <= def.telegraph.warningRange) {
+        const warningRange = def.telegraph.warningRange;
+        if (distSqToPlayer <= warningRange * warningRange) {
+          const distToPlayer = Math.sqrt(distSqToPlayer);
           phase = CREATURE_PHASE_TELEGRAPH;
           timer = 0;
           creatures.telegraphProgress[i] = 0;
@@ -108,14 +119,10 @@ export class CreatureSystem {
         surfaceQuery.sampleSurface(cx, cz, hintSeg, hintS, this.sampleScratch);
 
         if (this.sampleScratch.valid) {
-          creatures.hintSegId[i] = this.sampleScratch.segmentId;
-          creatures.hintS[i] = this.sampleScratch.s;
-          creatures.segmentIds[i] = this.sampleScratch.segmentId;
-
           // Tangent & horizontal right vector of local trail surface
           const tx = this.sampleScratch.tangentX;
           const tz = this.sampleScratch.tangentZ;
-          const tLen = Math.hypot(tx, tz) || 1;
+          const tLen = Math.sqrt(tx * tx + tz * tz) || 1;
           const fwdX = tx / tLen;
           const fwdZ = tz / tLen;
           // rightXZ from forwardXZ=(fwdX, 0, fwdZ): ( -fwdZ, 0, fwdX )
@@ -136,20 +143,33 @@ export class CreatureSystem {
           const vx = rightX * (dir * crossSpeed) + fwdX * forwardCreep;
           const vz = rightZ * (dir * crossSpeed) + fwdZ * forwardCreep;
 
-          const nextX = cx + vx * dt;
-          const nextZ = cz + vz * dt;
-          surfaceQuery.sampleSurface(
-            nextX,
-            nextZ,
-            creatures.hintSegId[i]!,
-            creatures.hintS[i]!,
-            this.sampleScratch,
-          );
+          const stepDx = vx * dt;
+          const stepDz = vz * dt;
+          const nextX = cx + stepDx;
+          const nextZ = cz + stepDz;
+          const moveDistSq = stepDx * stepDx + stepDz * stepDz;
+
+          let nextGroundY: number;
+          if (moveDistSq > CREATURE_RESAMPLE_DIST_SQ) {
+            surfaceQuery.sampleSurface(
+              nextX,
+              nextZ,
+              this.sampleScratch.segmentId,
+              this.sampleScratch.s,
+              this.sampleScratch,
+            );
+            nextGroundY = this.sampleScratch.groundY;
+          } else {
+            const ny = Math.max(0.35, this.sampleScratch.normalY);
+            const planeDy =
+              -(this.sampleScratch.normalX * stepDx + this.sampleScratch.normalZ * stepDz) / ny;
+            nextGroundY = this.sampleScratch.groundY + planeDy;
+          }
 
           creatures.posX[i] = nextX;
           creatures.posZ[i] = nextZ;
-          creatures.posY[i] = this.sampleScratch.groundY;
-          creatures.groundY[i] = this.sampleScratch.groundY;
+          creatures.posY[i] = nextGroundY;
+          creatures.groundY[i] = nextGroundY;
           creatures.normalX[i] = this.sampleScratch.normalX;
           creatures.normalY[i] = this.sampleScratch.normalY;
           creatures.normalZ[i] = this.sampleScratch.normalZ;

@@ -25,6 +25,7 @@ export class SkierRig {
   private readonly rightArmGroup: THREE.Group;
 
   private activeSkierId = '';
+  private skiBankRad = 0;
   private readonly gfx: GraphicsUtils;
   private readonly materials: SharedToonMaterials;
   private readonly outlineMat: THREE.Material;
@@ -115,7 +116,9 @@ export class SkierRig {
         true,
       );
       const mesh = this.gfx.createMesh(geo, this.materials.propToonMaterial, `Ski_${side}`);
+      mesh.castShadow = true;
       const outline = this.gfx.createMesh(geo, this.outlineMat, `SkiOutline_${side}`);
+      outline.castShadow = false;
       mesh.add(outline);
       return mesh;
     };
@@ -146,7 +149,9 @@ export class SkierRig {
       true,
     );
     const bodyMesh = this.gfx.createMesh(bodyGeo, this.materials.propToonMaterial, 'SkierBody');
+    bodyMesh.castShadow = true;
     const bodyOutline = this.gfx.createMesh(bodyGeo, this.outlineMat, 'SkierBodyOutline');
+    bodyOutline.castShadow = false;
     bodyMesh.add(bodyOutline);
     this.upperBodyGroup.add(bodyMesh);
 
@@ -163,7 +168,9 @@ export class SkierRig {
         `SkierArmGeo_${side}`,
         true,
       );
-      return this.gfx.createMesh(geo, this.materials.propToonMaterial, `SkierArm_${side}`);
+      const armMesh = this.gfx.createMesh(geo, this.materials.propToonMaterial, `SkierArm_${side}`);
+      armMesh.castShadow = true;
+      return armMesh;
     };
 
     this.leftArmGroup.add(makeArmAndPole('L', -1));
@@ -214,10 +221,15 @@ export class SkierRig {
       const duration = Math.max(0.1, simState.wipeoutDurationSec);
       const progress = clamp(1 - simState.wipeoutTimerSec / duration, 0, 1);
       const tumbleSpin = progress * Math.PI * 4;
+      this.skiBankRad = 0;
       this.bodyGroup.position.set(0, Math.sin(progress * Math.PI) * 0.45 + 0.25, 0);
       this.bodyGroup.rotation.set(tumbleSpin, progress * Math.PI * 2.5, Math.sin(progress * Math.PI * 3) * 0.9);
+      this.leftSkiGroup.position.y = 0.04;
+      this.rightSkiGroup.position.y = 0.04;
       this.leftSkiGroup.rotation.y = -0.5;
       this.rightSkiGroup.rotation.y = 0.5;
+      this.leftSkiGroup.rotation.z = 0;
+      this.rightSkiGroup.rotation.z = 0;
       this.upperBodyGroup.position.y = 0.42;
       this.upperBodyGroup.rotation.x = 0;
       return;
@@ -230,12 +242,28 @@ export class SkierRig {
     const grounded = curr.grounded;
     const speedNorm = clamp(speed / 35, 0, 1);
 
+    // Align grounded skis smoothly to cross-slope terrain bank (normal projected onto right axis)
+    let targetBankRad = 0;
+    if (grounded) {
+      const nx = lerp(prev.normalX, curr.normalX, t);
+      const ny = lerp(prev.normalY, curr.normalY, t);
+      const nz = lerp(prev.normalZ, curr.normalZ, t);
+      const rightX = Math.cos(headingRad);
+      const rightZ = -Math.sin(headingRad);
+      const dotRight = nx * rightX + nz * rightZ;
+      targetBankRad = clamp(Math.atan2(-dotRight, Math.max(0.35, ny)), -0.6, 0.6);
+    }
+    this.skiBankRad = lerp(this.skiBankRad, targetBankRad, grounded ? 0.28 : 0.14);
+
     // Snowplow V-wedge skis when braking (`yaw = -0.3` toes left ski inward toward +X, `+0.3` toes right ski inward toward -X).
     const wedgeYaw = braking ? 0.34 : 0;
+    const skiYOffset = 0.22 * Math.sin(this.skiBankRad);
+    this.leftSkiGroup.position.y = 0.04 - skiYOffset;
+    this.rightSkiGroup.position.y = 0.04 + skiYOffset;
     this.leftSkiGroup.rotation.y = -wedgeYaw;
     this.rightSkiGroup.rotation.y = wedgeYaw;
-    this.leftSkiGroup.rotation.z = -carveAngleRad * 0.35;
-    this.rightSkiGroup.rotation.z = -carveAngleRad * 0.35;
+    this.leftSkiGroup.rotation.z = this.skiBankRad - carveAngleRad * 0.25;
+    this.rightSkiGroup.rotation.z = this.skiBankRad - carveAngleRad * 0.25;
 
     // Tuck crouch when braking, carving hard, or airborne
     const crouchY = !grounded ? 0.31 : braking ? 0.28 : 0.42 - speedNorm * 0.08;

@@ -8,6 +8,9 @@ export default defineConfig(({ command }) => {
 
   return {
     base: '/skigame/',
+    optimizeDeps: {
+      exclude: ['jolt-physics'],
+    },
     ...(https
       ? {
           server: { https, host: true },
@@ -17,6 +20,7 @@ export default defineConfig(({ command }) => {
     test: {
       environment: 'node',
       include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
+      setupFiles: ['./src/test/joltSetup.ts'],
     },
   };
 });

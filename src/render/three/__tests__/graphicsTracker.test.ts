@@ -2,8 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
+import { ClipmapDataStore } from '../clipmapDataStore';
 import { GraphicsTracker } from '../graphicsTracker';
 import { GraphicsUtils } from '../graphicsUtils';
+import { SkyDome } from '../skyDome';
+import { TerrainClipmap } from '../terrainClipmap';
+import { bindClipmapStoreToMaterial, createSharedToonMaterials } from '../toonMaterials';
 
 describe('GraphicsTracker & GraphicsUtils', () => {
   it('reference-counts shared Geometry, Material, and Texture across Mesh, InstancedMesh, Line, and Points', () => {
@@ -173,5 +177,78 @@ describe('GraphicsTracker & GraphicsUtils', () => {
       }
     }
     expect(violations).toEqual([]);
+  });
+
+  it('tracks SkyDome through GraphicsUtils with cached resources and zero GPU leaks', () => {
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const scene = new THREE.Scene();
+
+    const skyDome = new SkyDome(gfx, scene);
+    expect(skyDome.mesh.renderOrder).toBe(-1000);
+    expect(skyDome.mesh.frustumCulled).toBe(false);
+    expect(skyDome.mesh.castShadow).toBe(false);
+    expect(skyDome.mesh.receiveShadow).toBe(false);
+    expect(skyDome.material.depthWrite).toBe(false);
+    expect(tracker.isTracked(skyDome.mesh)).toBe(true);
+    expect(tracker.isCached(skyDome.mesh.geometry)).toBe(true);
+    expect(tracker.isCached(skyDome.material)).toBe(true);
+    expect(tracker.checkLeaks(0, true, scene).totalLeaks).toBe(0);
+
+    skyDome.dispose();
+    tracker.disposeAll();
+    const stats = tracker.getStats();
+    expect(stats.activeObjects).toBe(0);
+    expect(stats.activeGeometries).toBe(0);
+    expect(stats.activeMaterials).toBe(0);
+    expect(stats.cachedGeometries).toBe(0);
+    expect(stats.cachedMaterials).toBe(0);
+  });
+
+  it('tracks ClipmapDataStore 4 DataArrayTextures and TerrainClipmap InstancedMesh with zero GPU leaks across reset, restore, and dispose', () => {
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const scene = new THREE.Scene();
+
+    const shared = createSharedToonMaterials(gfx);
+    const store = new ClipmapDataStore(gfx);
+    bindClipmapStoreToMaterial(gfx, shared, store);
+    const clipmap = new TerrainClipmap(gfx, shared.terrainMaterial, shared.clipmapUniforms);
+    scene.add(clipmap.mesh);
+
+    expect(clipmap.mesh.isInstancedMesh).toBe(true);
+    expect(clipmap.mesh.frustumCulled).toBe(false);
+    expect(clipmap.mesh.receiveShadow).toBe(true);
+    expect(clipmap.mesh.castShadow).toBe(false);
+
+    expect(tracker.isTracked(clipmap.mesh)).toBe(true);
+    expect(tracker.isCached(clipmap.geometry)).toBe(true);
+    expect(tracker.isCached(shared.terrainMaterial)).toBe(true);
+    expect(tracker.isCached(store.heightTex)).toBe(true);
+    expect(tracker.isCached(store.normalMaskTex)).toBe(true);
+    expect(tracker.isCached(store.albedoTex)).toBe(true);
+    expect(tracker.isCached(store.flowElevTex)).toBe(true);
+
+    expect(tracker.getTextureRefCount(store.heightTex)).toBe(1);
+    expect(tracker.getTextureRefCount(store.normalMaskTex)).toBe(1);
+    expect(tracker.getTextureRefCount(store.albedoTex)).toBe(1);
+    expect(tracker.getTextureRefCount(store.flowElevTex)).toBe(1);
+    expect(tracker.checkLeaks(0, true, scene).totalLeaks).toBe(0);
+
+    // Reset + simulated context restore must not leak or duplicate tracked resources
+    store.reset();
+    store.handleContextRestored(null);
+    expect(tracker.checkLeaks(0, true, scene).totalLeaks).toBe(0);
+
+    clipmap.dispose();
+    tracker.disposeAll();
+    const stats = tracker.getStats();
+    expect(stats.activeObjects).toBe(0);
+    expect(stats.activeGeometries).toBe(0);
+    expect(stats.activeMaterials).toBe(0);
+    expect(stats.activeTextures).toBe(0);
+    expect(stats.cachedGeometries).toBe(0);
+    expect(stats.cachedMaterials).toBe(0);
+    expect(stats.cachedTextures).toBe(0);
   });
 });

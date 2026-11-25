@@ -11,15 +11,18 @@ import {
   type SpineFrameOut,
   type SpineProjectionOut,
   type SpineView,
+  type TopologyChangeListener,
   type TrailSlotRole,
   type TrailWindowView,
+  type WorldDirtyRect,
 } from './contracts';
 import { TrailSegment, type TrailSegmentConfig } from './trailSegment';
 import { TrailSpine, type TrailSpineConfig } from './trailSpine';
 
 export const DEFAULT_FORK_PRUNE_DISTANCE_M = 40;
-export const MAX_GHOST_SPINES = 28;
-export const GHOST_SPINE_PRUNE_DISTANCE_M = 600;
+export const MAX_GHOST_SPINES = 44;
+export const GHOST_SPINE_PRUNE_DISTANCE_M = 960;
+const TOPOLOGY_DIRTY_PAD_M = 300;
 
 export interface SegmentInitData {
   readonly segment: TrailSegment;
@@ -59,9 +62,24 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
   private horizonRL: TrailSpine | null = null;
   private horizonRR: TrailSpine | null = null;
 
+  // Lightweight math-only 2nd lookahead tier (~600-950m ahead) so new spawns stay beyond R_macro + fog
+  private horizon2LLL: TrailSpine | null = null;
+  private horizon2LLR: TrailSpine | null = null;
+  private horizon2LRL: TrailSpine | null = null;
+  private horizon2LRR: TrailSpine | null = null;
+  private horizon2RLL: TrailSpine | null = null;
+  private horizon2RLR: TrailSpine | null = null;
+  private horizon2RRL: TrailSpine | null = null;
+  private horizon2RRR: TrailSpine | null = null;
+
   private readonly _horizonSpines: TrailSpine[] = [];
+  private readonly _horizon2Spines: TrailSpine[] = [];
   private readonly _ghostSpines: TrailSpine[] = [];
   private readonly _elevationSpines: SpineView[] = [];
+  private readonly topologyListeners: TopologyChangeListener[] = [];
+  private readonly dirtyRectScratch: WorldDirtyRect[] = [];
+  private readonly avoidSpinesScratch: TrailSpine[] = [];
+  private readonly prunedParentIdsScratch = new Set<number>();
 
   private nextSegmentId = 1;
   private rng: SeededRng;
@@ -118,8 +136,18 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
     return this._horizonSpines;
   }
 
+  get horizon2Spines(): readonly TrailSpine[] {
+    return this._horizon2Spines;
+  }
+
   get ghostSpines(): readonly TrailSpine[] {
     return this._ghostSpines;
+  }
+
+  addTopologyListener(listener: TopologyChangeListener): void {
+    if (!this.topologyListeners.includes(listener)) {
+      this.topologyListeners.push(listener);
+    }
   }
 
   reset(seed: number | string, startStageId = this.initialStageId): void {
@@ -132,9 +160,19 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
     this.horizonLR = null;
     this.horizonRL = null;
     this.horizonRR = null;
+    this.horizon2LLL = null;
+    this.horizon2LLR = null;
+    this.horizon2LRL = null;
+    this.horizon2LRR = null;
+    this.horizon2RLL = null;
+    this.horizon2RLR = null;
+    this.horizon2RRL = null;
+    this.horizon2RRR = null;
     this._horizonSpines.length = 0;
+    this._horizon2Spines.length = 0;
     this._ghostSpines.length = 0;
     this._elevationSpines.length = 0;
+    this.dirtyRectScratch.length = 0;
     this.forkAnnouncedOnCurr = false;
 
     const stage = this.requireStage(startStageId);
@@ -160,11 +198,17 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
       seamWorldZ: 0,
       seamYawRad: 0,
       allowIslandDivider: true,
+      hasUpstreamParent: false,
     });
     this.curr = curr;
-    this.onSegmentCreated?.(curr);
-    this.ensureLookaheadBranches(null, null);
+    // S6 ordering fix: build lookahead & rebuild elevationSpines + notify MountainField BEFORE firing onSegmentCreated
+    this.ensureLookaheadBranches(null, null, null, null, null, null);
     this.rebuildElevationSpines();
+    this.notifyTopologyChanged(true);
+
+    this.onSegmentCreated?.(curr);
+    if (this.nextLeft) this.onSegmentCreated?.(this.nextLeft);
+    if (this.nextRight) this.onSegmentCreated?.(this.nextRight);
   }
 
   getActiveSegmentById(segmentId: number): TrailSegment | null {
@@ -191,12 +235,40 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
 
     for (let i = 0; i < this._elevationSpines.length; i++) {
       const sp = this._elevationSpines[i]!;
-      if (
-        sp.boundsMaxX >= qMinX &&
-        sp.boundsMinX <= qMaxX &&
-        sp.boundsMaxZ >= qMinZ &&
-        sp.boundsMinZ <= qMaxZ
-      ) {
+      let sMinX = sp.boundsMinX;
+      let sMaxX = sp.boundsMaxX;
+      let sMinZ = sp.boundsMinZ;
+      let sMaxZ = sp.boundsMaxZ;
+      const mn = sp.macroNodes;
+      if (mn !== undefined) {
+        if (mn.useUpstreamExt && mn.upBoundsMinX <= mn.upBoundsMaxX) {
+          if (mn.upBoundsMinX < sMinX) sMinX = mn.upBoundsMinX;
+          if (mn.upBoundsMaxX > sMaxX) sMaxX = mn.upBoundsMaxX;
+          if (mn.upBoundsMinZ < sMinZ) sMinZ = mn.upBoundsMinZ;
+          if (mn.upBoundsMaxZ > sMaxZ) sMaxZ = mn.upBoundsMaxZ;
+        }
+        if (mn.useDownstreamExt && mn.downBoundsMinX <= mn.downBoundsMaxX) {
+          if (mn.downBoundsMinX < sMinX) sMinX = mn.downBoundsMinX;
+          if (mn.downBoundsMaxX > sMaxX) sMaxX = mn.downBoundsMaxX;
+          if (mn.downBoundsMinZ < sMinZ) sMinZ = mn.downBoundsMinZ;
+          if (mn.downBoundsMaxZ > sMaxZ) sMaxZ = mn.downBoundsMaxZ;
+        }
+      }
+      const cl = sp.corridorLeft;
+      if (cl !== undefined && cl.boundsMinX <= cl.boundsMaxX) {
+        if (cl.boundsMinX < sMinX) sMinX = cl.boundsMinX;
+        if (cl.boundsMaxX > sMaxX) sMaxX = cl.boundsMaxX;
+        if (cl.boundsMinZ < sMinZ) sMinZ = cl.boundsMinZ;
+        if (cl.boundsMaxZ > sMaxZ) sMaxZ = cl.boundsMaxZ;
+      }
+      const cr = sp.corridorRight;
+      if (cr !== undefined && cr.boundsMinX <= cr.boundsMaxX) {
+        if (cr.boundsMinX < sMinX) sMinX = cr.boundsMinX;
+        if (cr.boundsMaxX > sMaxX) sMaxX = cr.boundsMaxX;
+        if (cr.boundsMinZ < sMinZ) sMinZ = cr.boundsMinZ;
+        if (cr.boundsMaxZ > sMaxZ) sMaxZ = cr.boundsMaxZ;
+      }
+      if (sMaxX >= qMinX && sMinX <= qMaxX && sMaxZ >= qMinZ && sMinZ <= qMaxZ) {
         outSpines.push(sp);
       }
     }
@@ -214,6 +286,9 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
 
     for (let i = 0; i < this._horizonSpines.length; i++) {
       this._horizonSpines[i]!.rebaseOrigin(deltaX, deltaY, deltaZ);
+    }
+    for (let i = 0; i < this._horizon2Spines.length; i++) {
+      this._horizon2Spines[i]!.rebaseOrigin(deltaX, deltaY, deltaZ);
     }
     for (let i = 0; i < this._ghostSpines.length; i++) {
       this._ghostSpines[i]!.rebaseOrigin(deltaX, deltaY, deltaZ);
@@ -444,20 +519,41 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
       return this.advanceResultScratch;
     }
 
-    // Extract chosen vs unchosen horizon spines before clearing slots (strict single ownership)
+    // Extract chosen vs unchosen horizon & horizon2 spines before clearing slots (strict single ownership)
     const choseLeft = chosenSide === 'left';
     const promotedLeft = choseLeft ? this.horizonLL : this.horizonRL;
     const promotedRight = choseLeft ? this.horizonLR : this.horizonRR;
+    const promotedHLL = choseLeft ? this.horizon2LLL : this.horizon2RLL;
+    const promotedHLR = choseLeft ? this.horizon2LLR : this.horizon2RLR;
+    const promotedHRL = choseLeft ? this.horizon2LRL : this.horizon2RRL;
+    const promotedHRR = choseLeft ? this.horizon2LRR : this.horizon2RRR;
+
     const unchosenHorizonA = choseLeft ? this.horizonRL : this.horizonLL;
     const unchosenHorizonB = choseLeft ? this.horizonRR : this.horizonLR;
+    const unchosenH2A = choseLeft ? this.horizon2RLL : this.horizon2LLL;
+    const unchosenH2B = choseLeft ? this.horizon2RLR : this.horizon2LLR;
+    const unchosenH2C = choseLeft ? this.horizon2RRL : this.horizon2LRL;
+    const unchosenH2D = choseLeft ? this.horizon2RRR : this.horizon2LRR;
 
     this.horizonLL = null;
     this.horizonLR = null;
     this.horizonRL = null;
     this.horizonRR = null;
+    this.horizon2LLL = null;
+    this.horizon2LLR = null;
+    this.horizon2LRL = null;
+    this.horizon2LRR = null;
+    this.horizon2RLL = null;
+    this.horizon2RLR = null;
+    this.horizon2RRL = null;
+    this.horizon2RRR = null;
     this._horizonSpines.length = 0;
+    this._horizon2Spines.length = 0;
+    this.dirtyRectScratch.length = 0;
 
-    // Move pruned active spines and unchosen horizon spines into ghostSpines
+    // Move pruned active spines and unchosen horizon + horizon2 spines into ghostSpines so
+    // unchosenHorizonA/B never become truncated macro stubs and heightfield invariance within 280m
+    // stays exact (0.0m pop). Distant ghosts (> 960m) are cleanly pruned with leaf-extension restoration.
     if (this.prev) {
       this.prunedIdScratch.push(this.prev.id);
       this._ghostSpines.push(this.prev.spine);
@@ -466,12 +562,12 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
       this.prunedIdScratch.push(unchosen.id);
       this._ghostSpines.push(unchosen.spine);
     }
-    if (unchosenHorizonA) {
-      this._ghostSpines.push(unchosenHorizonA);
-    }
-    if (unchosenHorizonB) {
-      this._ghostSpines.push(unchosenHorizonB);
-    }
+    if (unchosenHorizonA) this._ghostSpines.push(unchosenHorizonA);
+    if (unchosenHorizonB) this._ghostSpines.push(unchosenHorizonB);
+    if (unchosenH2A) this._ghostSpines.push(unchosenH2A);
+    if (unchosenH2B) this._ghostSpines.push(unchosenH2B);
+    if (unchosenH2C) this._ghostSpines.push(unchosenH2C);
+    if (unchosenH2D) this._ghostSpines.push(unchosenH2D);
 
     this.curr.slot = 'prev';
     this.prev = this.curr;
@@ -481,7 +577,14 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
     this.nextRight = null;
     this.forkAnnouncedOnCurr = false;
 
-    this.ensureLookaheadBranches(promotedLeft, promotedRight);
+    this.ensureLookaheadBranches(
+      promotedLeft,
+      promotedRight,
+      promotedHLL,
+      promotedHLR,
+      promotedHRL,
+      promotedHRR,
+    );
     if (this.nextLeft) this.spawnedSegScratch.push(this.nextLeft);
     if (this.nextRight) this.spawnedSegScratch.push(this.nextRight);
 
@@ -493,7 +596,13 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
       refZ = this.frameScratch.posZ;
     }
     this.pruneGhostSpines(refX, refZ);
+    // S6 ordering fix: rebuild elevationSpines & notify MountainField BEFORE firing onSegmentCreated
     this.rebuildElevationSpines();
+    this.notifyTopologyChanged(false);
+
+    for (let i = 0; i < this.spawnedSegScratch.length; i++) {
+      this.onSegmentCreated?.(this.spawnedSegScratch[i]!);
+    }
 
     return this.advanceResultScratch;
   }
@@ -501,6 +610,10 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
   private ensureLookaheadBranches(
     promotedLeft: TrailSpine | null,
     promotedRight: TrailSpine | null,
+    promotedHLL: TrailSpine | null,
+    promotedHLR: TrailSpine | null,
+    promotedHRL: TrailSpine | null,
+    promotedHRR: TrailSpine | null,
   ): void {
     const endPose = this.curr.getEndPose();
     if (this.curr.fork.hasFork) {
@@ -536,13 +649,18 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
               seamWorldY: endPose.posY,
               seamWorldZ: endPose.posZ,
               seamYawRad: endPose.yawRad,
+              hasUpstreamParent: true,
+              targetBranchYawRad: clamp(endPose.yawRad * 0.5 + degToRad(22), -degToRad(44), degToRad(44)),
+              bisectorYawRad: endPose.yawRad * 0.5,
             });
         this.nextLeft = segL;
         this.curr.nextLeftId = segL.id;
-        this.onSegmentCreated?.(segL);
+        if (!promotedLeft) this.recordSpineDirtyRect(segL.spine);
       }
 
       if (!this.nextRight) {
+        this.avoidSpinesScratch.length = 0;
+        if (this.nextLeft) this.avoidSpinesScratch.push(this.nextLeft.spine);
         const segR = promotedRight
           ? new TrailSegment(
               this.segmentConfigFromSpine(promotedRight, 'nextRight', this.curr.id),
@@ -565,11 +683,16 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
               seamWorldY: endPose.posY,
               seamWorldZ: endPose.posZ,
               seamYawRad: endPose.yawRad,
+              hasUpstreamParent: true,
+              targetBranchYawRad: clamp(endPose.yawRad * 0.5 - degToRad(22), -degToRad(44), degToRad(44)),
+              bisectorYawRad: endPose.yawRad * 0.5,
+              avoidSpines: this.avoidSpinesScratch,
             });
         this.nextRight = segR;
         this.curr.nextRightId = segR.id;
-        this.onSegmentCreated?.(segR);
+        if (!promotedRight) this.recordSpineDirtyRect(segR.spine);
       }
+      this.curr.spine.setHasDownstreamChildren(true);
     } else if (!this.nextLeft) {
       const segNext = promotedLeft
         ? new TrailSegment(
@@ -599,111 +722,279 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
             seamWorldZ: endPose.posZ,
             seamYawRad: endPose.yawRad,
             initialSafeX: this.curr.sampleSafeX(this.curr.length),
+            hasUpstreamParent: true,
           });
       this.nextLeft = segNext;
       this.curr.nextLeftId = segNext.id;
-      this.onSegmentCreated?.(segNext);
+      if (!promotedLeft) this.recordSpineDirtyRect(segNext.spine);
+      this.curr.spine.setHasDownstreamChildren(true);
     }
 
-    // Build 1-level deeper lightweight horizon TrailSpines (never firing onSegmentCreated)
+    // Tier 1: Build/promote 1-level deeper horizon TrailSpines in symmetric CENTER-OUTWARD order
+    // (LR -> RL -> LL -> RR) so left wings fan left and right wings fan right with zero rightward domino pileup!
+    // Stored in _horizonSpines in canonical [LL, LR, RL, RR] order.
     this._horizonSpines.length = 0;
-    if (this.nextLeft && this.nextLeft.fork.hasFork) {
-      const nEnd = this.nextLeft.getEndPose();
+    const spawnTier1Child = (
+      parent: TrailSegment,
+      side: 'left' | 'right',
+      promoted: TrailSpine | null,
+      avoid: readonly TrailSpine[],
+      maxBranchYawRad: number,
+      targetBranchYawRad: number,
+      bisectorYawRad: number,
+    ): TrailSpine => {
+      if (promoted) return promoted;
+      const nEnd = parent.getEndPose();
       const bhw = 0.5 * nEnd.halfWidth;
       const r0X = Math.cos(nEnd.yawRad);
       const r0Z = -Math.sin(nEnd.yawRad);
-      const lStage = this.requireStage(this.nextLeft.fork.leftStageId ?? this.nextLeft.stageId);
-      const rStage = this.requireStage(this.nextLeft.fork.rightStageId ?? this.nextLeft.stageId);
+      const sign = side === 'left' ? -1 : 1;
+      const stageId =
+        side === 'left'
+          ? (parent.fork.leftStageId ?? parent.stageId)
+          : (parent.fork.rightStageId ?? parent.stageId);
+      const stage = this.requireStage(stageId);
+      const sp = this.createHorizonSpine({
+        stage,
+        parentSeed: parent.seed,
+        parentId: parent.id,
+        startPosX: nEnd.posX + sign * bhw * r0X,
+        startPosY: nEnd.posY,
+        startPosZ: nEnd.posZ + sign * bhw * r0Z,
+        startYawRad: nEnd.yawRad,
+        startPitchRad: nEnd.pitchRad,
+        startHalfWidth: bhw,
+        hasFork: true,
+        isForkChild: true,
+        forkSide: side,
+        seamWorldX: nEnd.posX,
+        seamWorldY: nEnd.posY,
+        seamWorldZ: nEnd.posZ,
+        seamYawRad: nEnd.yawRad,
+        hasUpstreamParent: true,
+        maxBranchYawRad,
+        targetBranchYawRad,
+        bisectorYawRad,
+        avoidSpines: avoid,
+      });
+      this.recordSpineDirtyRect(sp);
+      return sp;
+    };
 
-      if (!this.horizonLL) {
-        this.horizonLL = this.createHorizonSpine({
-          stage: lStage,
-          parentSeed: this.nextLeft.seed,
-          startPosX: nEnd.posX - bhw * r0X,
-          startPosY: nEnd.posY,
-          startPosZ: nEnd.posZ - bhw * r0Z,
-          startYawRad: nEnd.yawRad,
-          startPitchRad: nEnd.pitchRad,
-          startHalfWidth: bhw,
-          hasFork: true,
-          isForkChild: true,
-          forkSide: 'left',
-          seamWorldX: nEnd.posX,
-          seamWorldY: nEnd.posY,
-          seamWorldZ: nEnd.posZ,
-          seamYawRad: nEnd.yawRad,
-        });
-      }
-      if (!this.horizonLR) {
-        this.horizonLR = this.createHorizonSpine({
-          stage: rStage,
-          parentSeed: this.nextLeft.seed,
-          startPosX: nEnd.posX + bhw * r0X,
-          startPosY: nEnd.posY,
-          startPosZ: nEnd.posZ + bhw * r0Z,
-          startYawRad: nEnd.yawRad,
-          startPitchRad: nEnd.pitchRad,
-          startHalfWidth: bhw,
-          hasFork: true,
-          isForkChild: true,
-          forkSide: 'right',
-          seamWorldX: nEnd.posX,
-          seamWorldY: nEnd.posY,
-          seamWorldZ: nEnd.posZ,
-          seamYawRad: nEnd.yawRad,
-        });
-      }
+    const hasNextLFork = this.nextLeft !== null && this.nextLeft.fork.hasFork;
+    const hasNextRFork = this.nextRight !== null && this.nextRight.fork.hasFork;
+    const t1CenterYaw = clamp(
+      0.25 *
+        ((this.nextLeft ? this.nextLeft.getEndPose().yawRad : 0) +
+          (this.nextRight ? this.nextRight.getEndPose().yawRad : 0)),
+      -degToRad(5),
+      degToRad(5),
+    );
+
+    if (hasNextLFork && !this.horizonLR) {
+      this.avoidSpinesScratch.length = 0;
+      if (this.nextRight) this.avoidSpinesScratch.push(this.nextRight.spine);
+      this.horizonLR = spawnTier1Child(
+        this.nextLeft!,
+        'right',
+        promotedHLR,
+        this.avoidSpinesScratch,
+        degToRad(36),
+        t1CenterYaw + degToRad(14),
+        t1CenterYaw + degToRad(24.5),
+      );
+    }
+    if (hasNextRFork && !this.horizonRL) {
+      this.avoidSpinesScratch.length = 0;
+      if (this.horizonLR) this.avoidSpinesScratch.push(this.horizonLR);
+      if (this.nextLeft) this.avoidSpinesScratch.push(this.nextLeft.spine);
+      this.horizonRL = spawnTier1Child(
+        this.nextRight!,
+        'left',
+        promotedHRL,
+        this.avoidSpinesScratch,
+        degToRad(36),
+        t1CenterYaw - degToRad(14),
+        t1CenterYaw - degToRad(24.5),
+      );
+    }
+    if (hasNextLFork && !this.horizonLL) {
+      this.avoidSpinesScratch.length = 0;
+      if (this.horizonLR) this.avoidSpinesScratch.push(this.horizonLR);
+      if (this.horizonRL) this.avoidSpinesScratch.push(this.horizonRL);
+      if (this.nextRight) this.avoidSpinesScratch.push(this.nextRight.spine);
+      this.horizonLL = spawnTier1Child(
+        this.nextLeft!,
+        'left',
+        promotedHLL,
+        this.avoidSpinesScratch,
+        degToRad(54),
+        t1CenterYaw + degToRad(35),
+        t1CenterYaw + degToRad(24.5),
+      );
+    }
+    if (hasNextRFork && !this.horizonRR) {
+      this.avoidSpinesScratch.length = 0;
+      if (this.horizonRL) this.avoidSpinesScratch.push(this.horizonRL);
+      if (this.horizonLR) this.avoidSpinesScratch.push(this.horizonLR);
+      if (this.horizonLL) this.avoidSpinesScratch.push(this.horizonLL);
+      if (this.nextLeft) this.avoidSpinesScratch.push(this.nextLeft.spine);
+      this.horizonRR = spawnTier1Child(
+        this.nextRight!,
+        'right',
+        promotedHRR,
+        this.avoidSpinesScratch,
+        degToRad(54),
+        t1CenterYaw - degToRad(35),
+        t1CenterYaw - degToRad(24.5),
+      );
+    }
+
+    if (hasNextLFork && this.horizonLL && this.horizonLR) {
+      this.nextLeft!.spine.setHasDownstreamChildren(true);
       this._horizonSpines.push(this.horizonLL, this.horizonLR);
     }
-
-    if (this.nextRight && this.nextRight.fork.hasFork) {
-      const nEnd = this.nextRight.getEndPose();
-      const bhw = 0.5 * nEnd.halfWidth;
-      const r0X = Math.cos(nEnd.yawRad);
-      const r0Z = -Math.sin(nEnd.yawRad);
-      const lStage = this.requireStage(this.nextRight.fork.leftStageId ?? this.nextRight.stageId);
-      const rStage = this.requireStage(this.nextRight.fork.rightStageId ?? this.nextRight.stageId);
-
-      if (!this.horizonRL) {
-        this.horizonRL = this.createHorizonSpine({
-          stage: lStage,
-          parentSeed: this.nextRight.seed,
-          startPosX: nEnd.posX - bhw * r0X,
-          startPosY: nEnd.posY,
-          startPosZ: nEnd.posZ - bhw * r0Z,
-          startYawRad: nEnd.yawRad,
-          startPitchRad: nEnd.pitchRad,
-          startHalfWidth: bhw,
-          hasFork: true,
-          isForkChild: true,
-          forkSide: 'left',
-          seamWorldX: nEnd.posX,
-          seamWorldY: nEnd.posY,
-          seamWorldZ: nEnd.posZ,
-          seamYawRad: nEnd.yawRad,
-        });
-      }
-      if (!this.horizonRR) {
-        this.horizonRR = this.createHorizonSpine({
-          stage: rStage,
-          parentSeed: this.nextRight.seed,
-          startPosX: nEnd.posX + bhw * r0X,
-          startPosY: nEnd.posY,
-          startPosZ: nEnd.posZ + bhw * r0Z,
-          startYawRad: nEnd.yawRad,
-          startPitchRad: nEnd.pitchRad,
-          startHalfWidth: bhw,
-          hasFork: true,
-          isForkChild: true,
-          forkSide: 'right',
-          seamWorldX: nEnd.posX,
-          seamWorldY: nEnd.posY,
-          seamWorldZ: nEnd.posZ,
-          seamYawRad: nEnd.yawRad,
-        });
-      }
+    if (hasNextRFork && this.horizonRL && this.horizonRR) {
+      this.nextRight!.spine.setHasDownstreamChildren(true);
       this._horizonSpines.push(this.horizonRL, this.horizonRR);
     }
+
+    // Tier 2: Symmetric center-outward 8-rib umbrella fan with ghost-boundary anti-collision shift.
+    // Guarantees strictly decreasing left-to-right targets (+45 > +26 > +22 > +5 > -5 > -22 > -26 > -45 deg),
+    // wide 10 deg center gap (LRR-RLL) with +/-14 deg dodge room, zero twin overlaps, and zero ghost crashes!
+    this._horizon2Spines.length = 0;
+    const builtH2: TrailSpine[] = [];
+    const spawnTier2Child = (
+      parent: TrailSpine | null,
+      side: 'left' | 'right',
+      existing: TrailSpine | null,
+      twin: TrailSpine | null,
+      maxBranchYawRad: number,
+      targetBranchYawRad: number,
+      bisectorYawRad: number,
+    ): TrailSpine | null => {
+      if (!parent || !parent.fork.hasFork) return null;
+      if (existing) {
+        builtH2.push(existing);
+        return existing;
+      }
+      this.avoidSpinesScratch.length = 0;
+      if (twin) {
+        this.avoidSpinesScratch.push(twin);
+      }
+      for (let i = 0; i < builtH2.length; i++) {
+        const sp = builtH2[i]!;
+        if (sp !== twin) this.avoidSpinesScratch.push(sp);
+      }
+      for (let i = 0; i < this._horizonSpines.length; i++) {
+        const sp = this._horizonSpines[i]!;
+        if (sp !== parent) this.avoidSpinesScratch.push(sp);
+      }
+      for (let i = 0; i < this._ghostSpines.length; i++) {
+        this.avoidSpinesScratch.push(this._ghostSpines[i]!);
+      }
+
+      const pEnd = parent.getEndPose();
+      const bhw = 0.5 * pEnd.halfWidth;
+      const r0X = Math.cos(pEnd.yawRad);
+      const r0Z = -Math.sin(pEnd.yawRad);
+      const sign = side === 'left' ? -1 : 1;
+      const stageId =
+        side === 'left'
+          ? (parent.fork.leftStageId ?? parent.stageId)
+          : (parent.fork.rightStageId ?? parent.stageId);
+      const stage = this.requireStage(stageId);
+
+      const child = this.createHorizonSpine({
+        stage,
+        parentSeed: parent.seed,
+        parentId: parent.id,
+        startPosX: pEnd.posX + sign * bhw * r0X,
+        startPosY: pEnd.posY,
+        startPosZ: pEnd.posZ + sign * bhw * r0Z,
+        startYawRad: pEnd.yawRad,
+        startPitchRad: pEnd.pitchRad,
+        startHalfWidth: bhw,
+        hasFork: true,
+        isForkChild: true,
+        forkSide: side,
+        seamWorldX: pEnd.posX,
+        seamWorldY: pEnd.posY,
+        seamWorldZ: pEnd.posZ,
+        seamYawRad: pEnd.yawRad,
+        hasUpstreamParent: true,
+        maxBranchYawRad,
+        targetBranchYawRad,
+        bisectorYawRad,
+        avoidSpines: this.avoidSpinesScratch,
+      });
+      this.recordSpineDirtyRect(child);
+      builtH2.push(child);
+      return child;
+    };
+
+    let parentYawSum = 0;
+    let parentYawCount = 0;
+    if (this.horizonLL) {
+      parentYawSum += this.horizonLL.getEndPose().yawRad;
+      parentYawCount++;
+    }
+    if (this.horizonLR) {
+      parentYawSum += this.horizonLR.getEndPose().yawRad;
+      parentYawCount++;
+    }
+    if (this.horizonRL) {
+      parentYawSum += this.horizonRL.getEndPose().yawRad;
+      parentYawCount++;
+    }
+    if (this.horizonRR) {
+      parentYawSum += this.horizonRR.getEndPose().yawRad;
+      parentYawCount++;
+    }
+    const t2Shift =
+      parentYawCount > 0 ? clamp((parentYawSum / parentYawCount) * 0.22, -degToRad(4), degToRad(4)) : 0;
+
+    // 8-rib umbrella targets: strictly ordered left-to-right (+47 > +34 > +17 > +5 > -5 > -17 > -34 > -47 deg)
+    // Wide 17 deg cousin gaps (LLR-LRL, RLR-RRL) + 10 deg center gap (LRR-RLL) + 12-13 deg twin splits.
+    const lllT = clamp(t2Shift + degToRad(47), -degToRad(49), degToRad(49));
+    const llrT = clamp(t2Shift + degToRad(34), -degToRad(38), degToRad(38));
+    const lrlT = clamp(t2Shift + degToRad(17), -degToRad(22), degToRad(22));
+    const lrrT = clamp(t2Shift + degToRad(5), -degToRad(16), degToRad(16));
+    const rllT = clamp(t2Shift - degToRad(5), -degToRad(16), degToRad(16));
+    const rlrT = clamp(t2Shift - degToRad(17), -degToRad(22), degToRad(22));
+    const rrlT = clamp(t2Shift - degToRad(34), -degToRad(38), degToRad(38));
+    const rrrT = clamp(t2Shift - degToRad(47), -degToRad(49), degToRad(49));
+
+    // Strictly center-outward build order: LRR -> RLL -> LRL -> RLR -> LLR -> RRL -> LLL -> RRR.
+    // Every inner cousin (LRR, RLL, LLR, RRL) avoids its adjacent already-built cousin freely,
+    // and every outer twin (LRL, RLR, LLL, RRR) sees its exact twin in avoidSpines and fans outward!
+    this.horizon2LRR = spawnTier2Child(this.horizonLR, 'right', this.horizon2LRR, null, degToRad(36), lrrT, 0.5 * (lrlT + lrrT));
+    this.horizon2RLL = spawnTier2Child(this.horizonRL, 'left', this.horizon2RLL, null, degToRad(36), rllT, 0.5 * (rllT + rlrT));
+    this.horizon2LRL = spawnTier2Child(this.horizonLR, 'left', this.horizon2LRL, this.horizon2LRR, degToRad(42), lrlT, 0.5 * (lrlT + lrrT));
+    this.horizon2RLR = spawnTier2Child(this.horizonRL, 'right', this.horizon2RLR, this.horizon2RLL, degToRad(42), rlrT, 0.5 * (rllT + rlrT));
+    this.horizon2LLR = spawnTier2Child(this.horizonLL, 'right', this.horizon2LLR, null, degToRad(46), llrT, 0.5 * (lllT + llrT));
+    this.horizon2RRL = spawnTier2Child(this.horizonRR, 'left', this.horizon2RRL, null, degToRad(46), rrlT, 0.5 * (rrlT + rrrT));
+    this.horizon2LLL = spawnTier2Child(this.horizonLL, 'left', this.horizon2LLL, this.horizon2LLR, degToRad(55), lllT, 0.5 * (lllT + llrT));
+    this.horizon2RRR = spawnTier2Child(this.horizonRR, 'right', this.horizon2RRR, this.horizon2RRL, degToRad(55), rrrT, 0.5 * (rrlT + rrrT));
+
+    for (let i = 0; i < this._horizonSpines.length; i++) {
+      const parent = this._horizonSpines[i]!;
+      if (parent.fork.hasFork) {
+        if (parent.macroNodes.useDownstreamExt) {
+          this.recordDownstreamExtDirtyRect(parent);
+        }
+        parent.setHasDownstreamChildren(true);
+      }
+    }
+
+    if (this.horizon2LLL) this._horizon2Spines.push(this.horizon2LLL);
+    if (this.horizon2LLR) this._horizon2Spines.push(this.horizon2LLR);
+    if (this.horizon2LRL) this._horizon2Spines.push(this.horizon2LRL);
+    if (this.horizon2LRR) this._horizon2Spines.push(this.horizon2LRR);
+    if (this.horizon2RLL) this._horizon2Spines.push(this.horizon2RLL);
+    if (this.horizon2RLR) this._horizon2Spines.push(this.horizon2RLR);
+    if (this.horizon2RRL) this._horizon2Spines.push(this.horizon2RRL);
+    if (this.horizon2RRR) this._horizon2Spines.push(this.horizon2RRR);
   }
 
   private segmentConfigFromSpine(
@@ -745,6 +1036,7 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
   private buildSpineConfig(params: {
     stage: StageDef;
     parentSeed: number | null;
+    parentId?: number | null;
     startPosX: number;
     startPosY: number;
     startPosZ: number;
@@ -759,6 +1051,11 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
     seamWorldZ: number;
     seamYawRad: number;
     allowIslandDivider?: boolean;
+    hasUpstreamParent?: boolean;
+    maxBranchYawRad?: number;
+    targetBranchYawRad?: number;
+    bisectorYawRad?: number;
+    avoidSpines?: readonly TrailSpine[];
   }): TrailSpineConfig & { readonly endHalfWidth: number } {
     const id = this.nextSegmentId++;
     let segRng: SeededRng;
@@ -817,12 +1114,19 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
       seamWorldZ: params.seamWorldZ,
       seamYawRad: params.seamYawRad,
       allowIslandDivider: params.allowIslandDivider,
+      hasUpstreamParent: params.hasUpstreamParent,
+      parentId: params.parentId ?? null,
+      maxBranchYawRad: params.maxBranchYawRad,
+      targetBranchYawRad: params.targetBranchYawRad,
+      bisectorYawRad: params.bisectorYawRad,
+      avoidSpines: params.avoidSpines,
     };
   }
 
   private createHorizonSpine(params: {
     stage: StageDef;
     parentSeed: number;
+    parentId?: number | null;
     startPosX: number;
     startPosY: number;
     startPosZ: number;
@@ -836,6 +1140,11 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
     seamWorldY: number;
     seamWorldZ: number;
     seamYawRad: number;
+    hasUpstreamParent?: boolean;
+    maxBranchYawRad?: number;
+    targetBranchYawRad?: number;
+    bisectorYawRad?: number;
+    avoidSpines?: readonly TrailSpine[];
   }): TrailSpine {
     const cfg = this.buildSpineConfig(params);
     return new TrailSpine(cfg);
@@ -861,8 +1170,12 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
     seamYawRad: number;
     initialSafeX?: number;
     allowIslandDivider?: boolean;
+    hasUpstreamParent?: boolean;
+    targetBranchYawRad?: number;
+    bisectorYawRad?: number;
+    avoidSpines?: readonly TrailSpine[];
   }): TrailSegment {
-    const cfg = this.buildSpineConfig(params);
+    const cfg = this.buildSpineConfig({ ...params, parentId: params.prevSegmentId });
     const segConfig: TrailSegmentConfig = {
       ...cfg,
       slot: params.slot,
@@ -942,11 +1255,15 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
 
   private pruneGhostSpines(skierX: number, skierZ: number): void {
     const maxDistSq = GHOST_SPINE_PRUNE_DISTANCE_M * GHOST_SPINE_PRUNE_DISTANCE_M;
+    this.prunedParentIdsScratch.clear();
     let writeIdx = 0;
     for (let i = 0; i < this._ghostSpines.length; i++) {
       const sp = this._ghostSpines[i]!;
       if (this.computeAabbDistSq(sp, skierX, skierZ) <= maxDistSq) {
         this._ghostSpines[writeIdx++] = sp;
+      } else {
+        this.recordSpineDirtyRect(sp);
+        if (sp.parentId !== null) this.prunedParentIdsScratch.add(sp.parentId);
       }
     }
     this._ghostSpines.length = writeIdx;
@@ -961,10 +1278,95 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
           maxIdx = i;
         }
       }
+      const removed = this._ghostSpines[maxIdx]!;
+      this.recordSpineDirtyRect(removed);
+      if (removed.parentId !== null) this.prunedParentIdsScratch.add(removed.parentId);
       const last = this._ghostSpines.pop()!;
       if (maxIdx < this._ghostSpines.length) {
         this._ghostSpines[maxIdx] = last;
       }
+    }
+
+    // If any surviving ghost lost all downstream children via pruning, restore its open-leaf extension
+    // so no ghost spine ever remains a truncated uphill macro stub.
+    if (this.prunedParentIdsScratch.size > 0) {
+      for (let i = 0; i < this._ghostSpines.length; i++) {
+        const g = this._ghostSpines[i]!;
+        if (!this.prunedParentIdsScratch.has(g.id) || g.macroNodes.useDownstreamExt) continue;
+        let hasSurvivingChild =
+          (this.prev !== null && this.prev.spine.parentId === g.id) ||
+          this.curr.spine.parentId === g.id ||
+          (this.nextLeft !== null && this.nextLeft.spine.parentId === g.id) ||
+          (this.nextRight !== null && this.nextRight.spine.parentId === g.id);
+        if (!hasSurvivingChild) {
+          for (let j = 0; j < this._ghostSpines.length; j++) {
+            if (this._ghostSpines[j]!.parentId === g.id) {
+              hasSurvivingChild = true;
+              break;
+            }
+          }
+        }
+        if (!hasSurvivingChild) {
+          g.setHasDownstreamChildren(false);
+          this.recordDownstreamExtDirtyRect(g);
+        }
+      }
+    }
+  }
+
+  private recordSpineDirtyRect(sp: TrailSpine): void {
+    const mn = sp.macroNodes;
+    let minX = sp.boundsMinX;
+    let maxX = sp.boundsMaxX;
+    let minZ = sp.boundsMinZ;
+    let maxZ = sp.boundsMaxZ;
+    if (mn.useUpstreamExt && mn.upBoundsMinX <= mn.upBoundsMaxX) {
+      if (mn.upBoundsMinX < minX) minX = mn.upBoundsMinX;
+      if (mn.upBoundsMaxX > maxX) maxX = mn.upBoundsMaxX;
+      if (mn.upBoundsMinZ < minZ) minZ = mn.upBoundsMinZ;
+      if (mn.upBoundsMaxZ > maxZ) maxZ = mn.upBoundsMaxZ;
+    }
+    if (mn.useDownstreamExt && mn.downBoundsMinX <= mn.downBoundsMaxX) {
+      if (mn.downBoundsMinX < minX) minX = mn.downBoundsMinX;
+      if (mn.downBoundsMaxX > maxX) maxX = mn.downBoundsMaxX;
+      if (mn.downBoundsMinZ < minZ) minZ = mn.downBoundsMinZ;
+      if (mn.downBoundsMaxZ > maxZ) maxZ = mn.downBoundsMaxZ;
+    }
+    const cl = sp.corridorLeft;
+    if (cl.boundsMinX <= cl.boundsMaxX) {
+      if (cl.boundsMinX < minX) minX = cl.boundsMinX;
+      if (cl.boundsMaxX > maxX) maxX = cl.boundsMaxX;
+      if (cl.boundsMinZ < minZ) minZ = cl.boundsMinZ;
+      if (cl.boundsMaxZ > maxZ) maxZ = cl.boundsMaxZ;
+    }
+    const cr = sp.corridorRight;
+    if (cr.boundsMinX <= cr.boundsMaxX) {
+      if (cr.boundsMinX < minX) minX = cr.boundsMinX;
+      if (cr.boundsMaxX > maxX) maxX = cr.boundsMaxX;
+      if (cr.boundsMinZ < minZ) minZ = cr.boundsMinZ;
+      if (cr.boundsMaxZ > maxZ) maxZ = cr.boundsMaxZ;
+    }
+    this.dirtyRectScratch.push({
+      minX: minX - TOPOLOGY_DIRTY_PAD_M,
+      maxX: maxX + TOPOLOGY_DIRTY_PAD_M,
+      minZ: minZ - TOPOLOGY_DIRTY_PAD_M,
+      maxZ: maxZ + TOPOLOGY_DIRTY_PAD_M,
+    });
+  }
+
+  private recordDownstreamExtDirtyRect(sp: TrailSpine): void {
+    const mn = sp.macroNodes;
+    this.dirtyRectScratch.push({
+      minX: mn.downBoundsMinX - TOPOLOGY_DIRTY_PAD_M,
+      maxX: mn.downBoundsMaxX + TOPOLOGY_DIRTY_PAD_M,
+      minZ: mn.downBoundsMinZ - TOPOLOGY_DIRTY_PAD_M,
+      maxZ: mn.downBoundsMaxZ + TOPOLOGY_DIRTY_PAD_M,
+    });
+  }
+
+  private notifyTopologyChanged(isReset: boolean): void {
+    for (let i = 0; i < this.topologyListeners.length; i++) {
+      this.topologyListeners[i]!(isReset, this.dirtyRectScratch);
     }
   }
 
@@ -985,6 +1387,9 @@ export class TrailWindow implements TrailWindowView, MountainSpineSource, Active
     if (this.nextRight) this._elevationSpines.push(this.nextRight);
     for (let i = 0; i < this._horizonSpines.length; i++) {
       this._elevationSpines.push(this._horizonSpines[i]!);
+    }
+    for (let i = 0; i < this._horizon2Spines.length; i++) {
+      this._elevationSpines.push(this._horizon2Spines[i]!);
     }
   }
 

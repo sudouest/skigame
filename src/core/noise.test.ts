@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fbm2D, gradientNoise2D, ridgedNoise2D } from './noise';
+import { fbm2D, gradientNoise2D, ridgedNoise2D, smoothRidgedNoise2D } from './noise';
 
 describe('2D deterministic noise', () => {
   it('is deterministic for identical coordinates and seeds, and sensitive to seed changes', () => {
@@ -189,6 +189,87 @@ describe('2D deterministic noise', () => {
     expect(ridgedNoise2D(x, z, 9, 3, -2, -0.5)).toBe(ridgedNoise2D(x, z, 9, 3, 2.0, 0.5));
     expect(ridgedNoise2D(x, z, 9, 3, Number.NaN, Number.POSITIVE_INFINITY)).toBe(
       ridgedNoise2D(x, z, 9, 3, 2.0, 0.5),
+    );
+  });
+
+  it('smoothRidgedNoise2D is deterministic, bounded in [0, 1], C^1/C^2 smooth across ridge crests, and sanitizes inputs', () => {
+    const coords: readonly [number, number][] = [
+      [0.37, 0.81],
+      [-4.12, 9.64],
+      [123.45, -67.89],
+      [-50000.25, -120000.75],
+    ];
+    for (const [x, z] of coords) {
+      expect(smoothRidgedNoise2D(x, z, 42, 4, 2.1, 0.5)).toBe(
+        smoothRidgedNoise2D(x, z, 42, 4, 2.1, 0.5),
+      );
+    }
+    const seedA = coords.map(([x, z]) => smoothRidgedNoise2D(x, z, 11));
+    const seedB = coords.map(([x, z]) => smoothRidgedNoise2D(x, z, 99));
+    expect(seedA).not.toEqual(seedB);
+
+    let minVal = 1;
+    let maxVal = 0;
+    let maxSecondDiff = 0;
+    const h = 0.002;
+    for (let ix = -20; ix <= 20; ix++) {
+      for (let iz = -20; iz <= 20; iz++) {
+        const x = ix * 0.27 + 0.11;
+        const z = iz * 0.29 - 0.17;
+        const v = smoothRidgedNoise2D(x, z, 31415, 3);
+        expect(Number.isFinite(v)).toBe(true);
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThanOrEqual(1);
+        minVal = Math.min(minVal, v);
+        maxVal = Math.max(maxVal, v);
+
+        // Verify finite C^1/C^2 smoothness across single-octave zero crossings (no |n| sharp cusp)
+        const c = smoothRidgedNoise2D(x, z, 31415, 1);
+        const l = smoothRidgedNoise2D(x - h, z, 31415, 1);
+        const r = smoothRidgedNoise2D(x + h, z, 31415, 1);
+        const secondDerivEst = Math.abs(l - 2 * c + r) / (h * h);
+        maxSecondDiff = Math.max(maxSecondDiff, secondDerivEst);
+      }
+    }
+    expect(minVal).toBeLessThan(0.25);
+    expect(maxVal).toBeGreaterThan(0.8);
+    // Bounded second derivative (C^0 |n| cusp would blow up like O(1/h) ~ 1000+ near zero crossings)
+    expect(maxSecondDiff).toBeLessThan(120);
+
+    // Explicitly find a zero-crossing of gradientNoise2D and verify left/right first derivatives match
+    let foundZeroCross = false;
+    for (let ix = 0; ix < 200 && !foundZeroCross; ix++) {
+      const x0 = ix * 0.05;
+      const x1 = x0 + 0.05;
+      const g0 = gradientNoise2D(x0, 0.37, 77);
+      const g1 = gradientNoise2D(x1, 0.37, 77);
+      if (g0 * g1 < 0) {
+        let lo = x0;
+        let hi = x1;
+        for (let b = 0; b < 32; b++) {
+          const mid = 0.5 * (lo + hi);
+          if (gradientNoise2D(mid, 0.37, 77) * g0 <= 0) hi = mid;
+          else lo = mid;
+        }
+        const xc = 0.5 * (lo + hi);
+        const eps = 1e-4;
+        const srL = (smoothRidgedNoise2D(xc, 0.37, 77, 1) - smoothRidgedNoise2D(xc - eps, 0.37, 77, 1)) / eps;
+        const srR = (smoothRidgedNoise2D(xc + eps, 0.37, 77, 1) - smoothRidgedNoise2D(xc, 0.37, 77, 1)) / eps;
+        const rawL = (ridgedNoise2D(xc, 0.37, 77, 1) - ridgedNoise2D(xc - eps, 0.37, 77, 1)) / eps;
+        const rawR = (ridgedNoise2D(xc + eps, 0.37, 77, 1) - ridgedNoise2D(xc, 0.37, 77, 1)) / eps;
+        expect(Math.abs(srR - srL)).toBeLessThan(0.05);
+        expect(Math.abs(rawR - rawL)).toBeGreaterThan(0.5);
+        foundZeroCross = true;
+      }
+    }
+    expect(foundZeroCross).toBe(true);
+
+    // Invalid arg sanitization
+    expect(smoothRidgedNoise2D(Number.NaN, 1.5, 1)).toBe(0);
+    expect(smoothRidgedNoise2D(1.5, Number.POSITIVE_INFINITY, 1)).toBe(0);
+    expect(smoothRidgedNoise2D(1.35, -2.72, 9, 0)).toBe(smoothRidgedNoise2D(1.35, -2.72, 9, 1));
+    expect(smoothRidgedNoise2D(1.35, -2.72, 9, 3, -1, 0)).toBe(
+      smoothRidgedNoise2D(1.35, -2.72, 9, 3, 2.0, 0.5),
     );
   });
 });

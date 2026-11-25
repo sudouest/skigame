@@ -5,13 +5,20 @@ import { SkiSimulation } from '../skiSimulation';
 import { TrailWindow } from '../trailWindow';
 
 describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
-  it('simulates carving, +/-80 deg downhill heading clamp, ice perk, and ski track ring buffer', () => {
+  it('simulates carving, continuous downhill restoring torque without heading teleports, and ski track ring buffer', () => {
     const simAlpine = new SkiSimulation({ seed: 55, skierId: 'skier_alpine' });
     const intent = createMutablePlayerIntent();
-    intent.steer = 1; // hard right carve for 50 ticks then hold downhill check
+    intent.steer = 1; // hard right carve for 60 ticks checking smooth restoring torque
+    let maxStepHeadingJump = 0;
     for (let i = 0; i < 60; i++) {
+      const preYaw = simAlpine.getState().currSkier.headingRad;
       simAlpine.savePreviousPoses();
       simAlpine.step(FIXED_DT, intent);
+      const postYaw = simAlpine.getState().currSkier.headingRad;
+      const stepDelta = Math.abs(
+        Math.atan2(Math.sin(postYaw - preYaw), Math.cos(postYaw - preYaw)),
+      );
+      if (stepDelta > maxStepHeadingJump) maxStepHeadingJump = stepDelta;
     }
 
     const s1 = simAlpine.getState();
@@ -22,9 +29,12 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
         Math.cos(s1.currSkier.headingRad - downhillYaw),
       ),
     );
-    expect(delta).toBeLessThanOrEqual((80 * Math.PI) / 180 + 1e-4);
+    // Continuous restoring torque smoothly bounds yaw within <= 115 deg with zero snap teleports
+    expect(delta).toBeLessThanOrEqual((115 * Math.PI) / 180 + 1e-4);
+    expect(maxStepHeadingJump).toBeLessThan((15 * Math.PI) / 180);
     expect(s1.currSkier.speed).toBeGreaterThan(10);
     expect(s1.entities.skiTracks.count).toBeGreaterThan(5);
+    simAlpine.dispose();
   });
 
   it('reduces lateral ice drift with skier_carver iceGrip perk vs skier_alpine and handles V-wedge bumper deflection', () => {
@@ -65,6 +75,8 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     const latAlpine = setIceAndSteer(simAlpine);
     const latCarver = setIceAndSteer(simCarver);
     expect(latCarver).toBeLessThan(latAlpine);
+    simAlpine.dispose();
+    simCarver.dispose();
 
     // Test V-wedge soft bumper nose deflection near fork seam
     const simBumper = new SkiSimulation({ seed: 10 });
@@ -90,6 +102,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
       simBumper.getState().currSkier.posZ - fork.seamWorldZ,
     );
     expect(distFromNose).toBeGreaterThanOrEqual(fork.seamNoseRadius);
+    simBumper.dispose();
   });
 
   it('supports scoreAttack lives decrement and gameOver on repeated wipeouts', () => {
@@ -133,6 +146,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
 
     expect(sim.getState().livesRemaining).toBe(0);
     expect(sim.getState().gameOver).toBe(true);
+    sim.dispose();
   });
 
   it('launches into true 3D ballistic airtime on jumps and clears low hazards when airborne', () => {
@@ -174,6 +188,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
       }
     }
     expect(sawBreak).toBe(true);
+    sim.dispose();
   });
 
   it('launches off explicit ski ramps in RampPoolView and populates pitchRad & defIds', () => {
@@ -188,6 +203,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
         rampIdx = 0;
         break;
       }
+      candidate.dispose();
     }
     expect(sim).not.toBeNull();
     const state = sim!.getState();
@@ -241,6 +257,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     }
 
     expect(maxAirClearance).toBeGreaterThan(2.2);
+    sim!.dispose();
   });
 
   it('collects presents, auto-tosses at Delivery Zones with combo, and triggers Wipeout-and-Recover onto safeX', () => {
@@ -349,6 +366,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     expect(sim.getState().skierState).toBe('skiing');
     expect(sim.getState().invulnerableTimerSec).toBeGreaterThan(0);
     expect(events).toContain('recover');
+    sim.dispose();
   });
 
   it('telegraphs and patrols Bear seamlessly in world space with normals populated', () => {
@@ -359,6 +377,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
         sim = candidate;
         break;
       }
+      candidate.dispose();
     }
     expect(sim).not.toBeNull();
     let telegraphed = false;
@@ -425,12 +444,23 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     cPool.stateCode[0] = 2; // CREATURE_PHASE_ATTACK
     cPool.patrolDir[0] = -1;
 
+    // Position skier within the 85m creature active range upstream of the fork seam
+    const skierForkX = fork.seamWorldX - fwdX * 50;
+    const skierForkZ = fork.seamWorldZ - fwdZ * 50;
+    const sNearFork = sim!.sampleSurface(skierForkX, skierForkZ, curr.id, curr.length - 50);
+    internal.currSkier.posX = skierForkX;
+    internal.currSkier.posY = sNearFork.groundY;
+    internal.currSkier.posZ = skierForkZ;
+    internal.surfaceSample.segmentId = sNearFork.segmentId;
+    internal.surfaceSample.s = sNearFork.s;
+
     for (let i = 0; i < 60; i++) {
       sim!.savePreviousPoses();
       sim!.step(FIXED_DT, intent);
     }
     expect(cPool.segmentIds[0]).toBe(state.trailWindow.nextLeft!.id);
     expect(creatures.normalY[0]!).toBeGreaterThan(0.5);
+    sim!.dispose();
   });
 
   it('performs translation-only 128m floating-origin rebase without pose discontinuity', () => {
@@ -469,6 +499,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     expect(sawRebase).toBe(true);
     expect(rebasedEvents.length).toBeGreaterThanOrEqual(1);
     expect(sim.getState().rebase.offsetZ).toBeLessThan(0); // Skied toward -Z
+    sim.dispose();
   });
 
   it('updates CameraRig with responsive minHorizontalFovDeg, speed FOV boost, and blizzard fog floor >= 65m', () => {
@@ -487,6 +518,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     expect(st.activeWeather.blizzardEnabled).toBe(true);
     expect(st.activeWeather.fogDistanceM).toBeGreaterThanOrEqual(65);
     expect(st.activeWeather.blizzardDim).toBeGreaterThan(0.2);
+    sim.dispose();
   });
 
   it('keeps chase camera above terrain with front-facing normals on both sunny-blue and icy-black slopes', () => {
@@ -518,6 +550,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
         const dot = (sk.normalX * toCamX + sk.normalY * toCamY + sk.normalZ * toCamZ) / len;
         expect(dot).toBeGreaterThan(0.1);
       }
+      sim.dispose();
     }
   });
 
@@ -544,6 +577,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     // Legacy corridor wall clamped at halfWidth + skirtWidth (~28m); open-mountain allows free travel
     expect(maxAbsX).toBeGreaterThan(35);
     expect(sawOffPiste).toBe(true);
+    sim.dispose();
 
     // Pre-commit fork branch switching & progression while far off-piste (no safeX rail)
     const forkSim = new SkiSimulation({ seed: 777, startStageId: 'sunny-blue' });
@@ -611,6 +645,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     forkSim.step(FIXED_DT, zeroIntent);
     expect(forkEntered).toBe(true);
     expect(forkSim.getState().trailWindow.curr.id).toBe(nextRight.id);
+    forkSim.dispose();
 
     // Explicitly verify left-branch off-piste updateProgression (activeSegmentId still curr.id) promotes horizonLL/horizonLR cleanly
     const leftWin = new TrailWindow(777, 'sunny-blue');
@@ -742,6 +777,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
       }
     }
     expect(sawRecover).toBe(true);
+    sim.dispose();
   });
 
   it('slows steep canyon uphill climbs without uphill brake thrust or zero-clamp stall, and recovers skiable off-piste wipeouts locally', () => {
@@ -753,7 +789,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     const rightX = Math.cos(frame.yawRad);
     const rightZ = -Math.sin(frame.yawRad);
 
-    // Find a steep canyon wall column on the left side facing uphill into the wall
+    // Find a steep skiable canyon wall column on the left side facing uphill into the wall
     let wallX = frame.posX - rightX * 32;
     let wallZ = frame.posZ - rightZ * 32;
     let wallSample = wallSim.sampleSurface(wallX, wallZ, wState.trailWindow.curr.id, 120);
@@ -761,15 +797,16 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
       const cx = frame.posX - rightX * d;
       const cz = frame.posZ - rightZ * d;
       const s = wallSim.sampleSurface(cx, cz, wState.trailWindow.curr.id, 120);
-      if (s.normalY < 0.78) {
+      if (s.normalY < 0.78 && s.normalY >= 0.64) {
         wallX = cx;
         wallZ = cz;
         wallSample = s;
         break;
       }
     }
-    const downhillYaw = Math.atan2(-wallSample.tangentX, -wallSample.tangentZ);
-    const wallHeading = downhillYaw + (75 * Math.PI) / 180;
+    const fallLineYaw = Math.atan2(-wallSample.fallLineX, -wallSample.fallLineZ);
+    // Point nose-up into the canyon wall (opposite to true local fall-line descent)
+    const wallHeading = Math.atan2(wallSample.fallLineX, wallSample.fallLineZ) - 0.35;
     const hFwdX = -Math.sin(wallHeading);
     const hFwdZ = -Math.cos(wallHeading);
 
@@ -807,15 +844,27 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
       wState.currSkier.velZ * -Math.cos(wState.currSkier.headingRad);
     expect(postBrakeFwd).toBeLessThan(2.0);
 
-    // Without braking, uphill stall pivots heading back toward downhillYaw instead of sticking
-    const preHeadingErr = Math.abs(wState.currSkier.headingRad - downhillYaw);
+    // Without braking, uphill stall pivots heading toward true local fallLine down the canyon wall
+    const preHeadingErr = Math.abs(
+      Math.atan2(
+        Math.sin(wState.currSkier.headingRad - fallLineYaw),
+        Math.cos(wState.currSkier.headingRad - fallLineYaw),
+      ),
+    );
     const freeIntent = createMutablePlayerIntent();
     for (let i = 0; i < 30; i++) {
       wallSim.savePreviousPoses();
       wallSim.step(FIXED_DT, freeIntent);
     }
-    const postHeadingErr = Math.abs(wState.currSkier.headingRad - downhillYaw);
+    const postFallYaw = Math.atan2(-wState.surfaceSample.fallLineX, -wState.surfaceSample.fallLineZ);
+    const postHeadingErr = Math.abs(
+      Math.atan2(
+        Math.sin(wState.currSkier.headingRad - postFallYaw),
+        Math.cos(wState.currSkier.headingRad - postFallYaw),
+      ),
+    );
     expect(postHeadingErr).toBeLessThan(preHeadingErr);
+    wallSim.dispose();
 
     // 2. Normal skiable off-piste wipeout recovers locally in place (sunny-blue, normalY >= 0.72)
     const offSim = new SkiSimulation({ seed: 12, startStageId: 'sunny-blue' });
@@ -874,5 +923,6 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     expect(oState.skierState).toBe('skiing');
     expect(oState.surfaceSample.onPiste).toBe(false);
     expect(Math.hypot(oState.currSkier.posX - offX, oState.currSkier.posZ - offZ)).toBeLessThan(3.0);
+    offSim.dispose();
   });
 });

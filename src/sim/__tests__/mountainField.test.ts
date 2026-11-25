@@ -11,13 +11,20 @@ import {
   createPisteHeightOut,
   createSpineFrameOut,
   createSpineProjectionOut,
+  createTerrainGridSampleOut,
+  TERRAIN_FLAG_IN_CHASM,
+  TERRAIN_FLAG_ON_PISTE,
   type SpineView,
 } from '../contracts';
 import { MountainField } from '../mountainField';
 import { SkiSimulation } from '../skiSimulation';
 import type { SurfacePatch } from '../trailSegment';
 import { MAX_CURVATURE_RIBBON_RATIO, TrailSpine } from '../trailSpine';
-import { MAX_GHOST_SPINES, TrailWindow } from '../trailWindow';
+import {
+  GHOST_SPINE_PRUNE_DISTANCE_M,
+  MAX_GHOST_SPINES,
+  TrailWindow,
+} from '../trailWindow';
 
 describe('TrailSpine, Horizon/Ghost Buffers, and MountainField', () => {
   it('enforces broad downhill fall-line invariant (|yaw| <= 60 deg, seam <= 48 deg, |k|*(hw+skirt) <= 0.4) across 65+ segments', () => {
@@ -283,10 +290,10 @@ describe('TrailSpine, Horizon/Ghost Buffers, and MountainField', () => {
       singleField.evaluate(wx, wz, curSample);
       expect(Number.isFinite(curSample.heightY)).toBe(true);
       expect(Number.isFinite(curSample.normalY)).toBe(true);
-      expect(curSample.normalY).toBeGreaterThan(0.03);
+      // Tightened Model 3 inner-turn slope invariant: < 68 deg (normalY >= 0.38) everywhere!
+      expect(curSample.normalY).toBeGreaterThanOrEqual(0.38);
       const diff = Math.abs(curSample.heightY - prevInnerY);
-      // Gorge wall (lat <= 30) transitions 34m over 16m; outer caustic/farWall zone stays < 3.5m/m
-      expect(diff).toBeLessThan(lat <= 30 ? 5.5 : 3.5);
+      expect(diff).toBeLessThan(2.5);
       prevInnerY = curSample.heightY;
     }
 
@@ -386,7 +393,10 @@ describe('TrailSpine, Horizon/Ghost Buffers, and MountainField', () => {
     expect(trailWin.ghostSpines.length).toBeGreaterThan(0);
     expect(trailWin.ghostSpines.length).toBeLessThanOrEqual(MAX_GHOST_SPINES);
 
-    // Every remaining ghost spine must be within 600m AABB distance of the last skier position
+    // Every remaining ghost spine must be within GHOST_SPINE_PRUNE_DISTANCE_M (960m) AABB distance
+    expect(GHOST_SPINE_PRUNE_DISTANCE_M).toBe(960);
+    expect(MAX_GHOST_SPINES).toBe(44);
+    expect(trailWin.horizon2Spines).toHaveLength(8);
     for (let i = 0; i < trailWin.ghostSpines.length; i++) {
       const gs = trailWin.ghostSpines[i]!;
       const dx =
@@ -401,7 +411,7 @@ describe('TrailSpine, Horizon/Ghost Buffers, and MountainField', () => {
           : frame.posZ > gs.boundsMaxZ
             ? frame.posZ - gs.boundsMaxZ
             : 0;
-      expect(Math.hypot(dx, dz)).toBeLessThanOrEqual(600 + 1e-6);
+      expect(Math.hypot(dx, dz)).toBeLessThanOrEqual(GHOST_SPINE_PRUNE_DISTANCE_M + 1e-6);
     }
   });
 
@@ -473,6 +483,7 @@ describe('TrailSpine, Horizon/Ghost Buffers, and MountainField', () => {
       expect(postOut.onPiste).toBe(pre.sample.onPiste);
       expect(postOut.inChasmZone).toBe(pre.sample.inChasmZone);
     }
+    sim.dispose();
   });
 
   it('evaluates landscape archetypes, rock steepness, outer valley funneling, active segment patches, and secondaryStageId', () => {
@@ -668,44 +679,71 @@ describe('TrailSpine, Horizon/Ghost Buffers, and MountainField', () => {
     expect(col.heightY).toBeGreaterThan(col.macroY + 2);
   });
 
-  it('matches precomputed macroAnchor evaluation against sampleSpineFrame fallback and normalizes SkiSimulation worldSeed', () => {
+  it('matches precomputed coarse macroNodes evaluation against sampleSpineFrame fallback and normalizes SkiSimulation worldSeed', () => {
     const simStr = new SkiSimulation({ seed: 'alpine-powder-99', startStageId: 'sunny-blue' });
     expect(simStr.getState().mountainField.worldSeed).toBe(hashString('alpine-powder-99'));
 
     simStr.reset(-42);
     expect(simStr.getState().mountainField.worldSeed).toBe((-42) >>> 0);
+    simStr.dispose();
 
-    // Compare precomputed macroAnchor SpineView vs SpineView wrapper omitting macroAnchorCount
+    // Compare precomputed coarse 16m macroNodes SpineView vs SpineView wrapper omitting macroNodes
     const win = new TrailWindow(31415, 'icy-black');
     const sp = win.curr;
-    expect(sp.macroAnchorCount).toBeGreaterThan(40);
-    expect(sp.macroAnchorX.length).toBe(sp.macroAnchorCount);
-    expect(sp.macroAnchorY.length).toBe(sp.macroAnchorCount);
-    expect(sp.macroAnchorZ.length).toBe(sp.macroAnchorCount);
+    expect(sp.macroNodes.count).toBeGreaterThan(10);
+    expect(sp.macroNodes.posX.length).toBe(sp.macroNodes.count);
+    expect(sp.macroNodes.posY.length).toBe(sp.macroNodes.count);
+    expect(sp.macroNodes.posZ.length).toBe(sp.macroNodes.count);
+    // Standalone test spine with both open-leaf extensions active for exact fallback parity
+    const standalone = new TrailSpine({
+      id: 777,
+      stage: STAGE_ICY_BLACK,
+      seed: 31415,
+      length: 280,
+      startPosX: 0,
+      startPosY: 0,
+      startPosZ: 0,
+      startYawRad: 0,
+      startPitchRad: -0.45,
+      startHalfWidth: 10,
+      endHalfWidth: 10,
+      hasFork: false,
+      leftStageId: null,
+      rightStageId: null,
+      isForkChild: false,
+      forkSide: 'none',
+      seamWorldX: 0,
+      seamWorldY: 0,
+      seamWorldZ: 0,
+      seamYawRad: 0,
+      hasUpstreamParent: false,
+    });
 
     const fallbackSpine: SpineView = {
-      id: sp.id,
-      stageId: sp.stageId,
-      seed: sp.seed,
-      length: sp.length,
-      skirtWidth: sp.skirtWidth,
-      fork: sp.fork,
-      landscape: sp.landscape,
-      boundsMinX: sp.boundsMinX,
-      boundsMaxX: sp.boundsMaxX,
-      boundsMinZ: sp.boundsMinZ,
-      boundsMaxZ: sp.boundsMaxZ,
-      sampleSpineFrame: (s, out) => sp.sampleSpineFrame(s, out),
-      projectXZ: (wx, wz, out) => sp.projectXZ(wx, wz, out),
-      evaluatePisteHeight: (s, x, out) => sp.evaluatePisteHeight(s, x, out),
-      evaluatePisteSurface: (s, x) => sp.evaluatePisteSurface(s, x),
+      id: standalone.id,
+      stageId: standalone.stageId,
+      seed: standalone.seed,
+      length: standalone.length,
+      skirtWidth: standalone.skirtWidth,
+      fork: standalone.fork,
+      landscape: standalone.landscape,
+      boundsMinX: standalone.boundsMinX,
+      boundsMaxX: standalone.boundsMaxX,
+      boundsMinZ: standalone.boundsMinZ,
+      boundsMaxZ: standalone.boundsMaxZ,
+      corridorLeft: standalone.corridorLeft,
+      corridorRight: standalone.corridorRight,
+      sampleSpineFrame: (s, out) => standalone.sampleSpineFrame(s, out),
+      projectXZ: (wx, wz, out) => standalone.projectXZ(wx, wz, out),
+      evaluatePisteHeight: (s, x, out) => standalone.evaluatePisteHeight(s, x, out),
+      evaluatePisteSurface: (s, x) => standalone.evaluatePisteSurface(s, x),
     };
 
     const fastField = new MountainField({
-      elevationSpines: [sp],
+      elevationSpines: [standalone],
       collectSpinesInBounds: (_a, _b, _c, _d, _e, out) => {
         out.length = 0;
-        out.push(sp);
+        out.push(standalone);
       },
     });
     const slowField = new MountainField({
@@ -727,13 +765,14 @@ describe('TrailSpine, Horizon/Ghost Buffers, and MountainField', () => {
       }
     }
 
-    // Rebase shifts macro anchors identically
-    sp.rebaseOrigin(10, -25, -128);
-    fastField.setOriginOffset(10, -128);
-    slowField.setOriginOffset(10, -128);
+    // Rebase shifts macro nodes and corridor chains identically
+    standalone.rebaseOrigin(10, -25, -128);
+    fastField.setOriginOffset(10, -128, -25);
+    slowField.setOriginOffset(10, -128, -25);
     fastField.evaluateColumn(30, -40, fOut);
     slowField.evaluateColumn(30, -40, sOut);
     expect(fOut.macroY).toBeCloseTo(sOut.macroY, 4);
+    expect(fOut.heightY).toBeCloseTo(sOut.heightY, 4);
   });
 
   it('matches evaluate() interior-piste normals to central-difference evaluateHeight() normals on steep banked curves', () => {
@@ -959,5 +998,549 @@ describe('TrailSpine, Horizon/Ghost Buffers, and MountainField', () => {
     field.evaluate(frame.posX, frame.posZ, sample);
     expect(sample.onPiste).toBe(true);
     expect(sample.heightY).toBeCloseTo(pisteOut.heightY, 4);
+  });
+
+  it('passes dense 2D grid C0/C1 continuity sweeps across asymmetric icy-black & blizzard-ridge fork V-wedges and tight inner turns (normalY >= 0.38)', () => {
+    const sample = createMountainSampleOut();
+    const frame = createSpineFrameOut();
+    let globalMinNormalY = 1;
+    let globalMaxStepPerM = 0;
+
+    for (const [stageId, seed] of [
+      ['icy-black', 2026],
+      ['blizzard-ridge', 4040],
+      ['icy-black', 777],
+      ['blizzard-ridge', 1337],
+    ] as const) {
+      const win = new TrailWindow(seed, stageId);
+      const field = new MountainField(win);
+
+      // 1. 2D grid sweep centered on the asymmetric fork seam & V-wedge (along in [-24, 140], lat in [-80, 80])
+      win.curr.sampleSpineFrame(win.curr.length, frame);
+      const fwdX = -Math.sin(frame.yawRad);
+      const fwdZ = -Math.cos(frame.yawRad);
+      const rightX = Math.cos(frame.yawRad);
+      const rightZ = -Math.sin(frame.yawRad);
+
+      const gridStep = 2.0;
+      const alongSteps = 82; // -24..140m
+      const latSteps = 80; // -80..+80m
+      const heights = new Float64Array((alongSteps + 1) * (latSteps + 1));
+
+      for (let ia = 0; ia <= alongSteps; ia++) {
+        const along = -24 + ia * gridStep;
+        for (let il = 0; il <= latSteps; il++) {
+          const lat = -80 + il * gridStep;
+          const wx = frame.posX + fwdX * along + rightX * lat;
+          const wz = frame.posZ + fwdZ * along + rightZ * lat;
+          field.evaluate(wx, wz, sample);
+          expect(Number.isFinite(sample.heightY)).toBe(true);
+          expect(Number.isFinite(sample.normalY)).toBe(true);
+          if (sample.normalY < globalMinNormalY) globalMinNormalY = sample.normalY;
+          expect(sample.normalY).toBeGreaterThanOrEqual(0.38);
+          const idx = ia * (latSteps + 1) + il;
+          heights[idx] = sample.heightY;
+
+          if (il > 0) {
+            const stepLat = Math.abs(sample.heightY - heights[idx - 1]!) / gridStep;
+            if (stepLat > globalMaxStepPerM) globalMaxStepPerM = stepLat;
+            expect(stepLat).toBeLessThan(2.6);
+          }
+          if (ia > 0) {
+            const stepAlong =
+              Math.abs(sample.heightY - heights[idx - (latSteps + 1)]!) / gridStep;
+            if (stepAlong > globalMaxStepPerM) globalMaxStepPerM = stepAlong;
+            expect(stepAlong).toBeLessThan(2.6);
+          }
+        }
+      }
+
+      // 2. Tightest inner-turn 2D sweep along curr
+      let bestS = 60;
+      let maxAbsK = 0;
+      for (let s = 25; s <= win.curr.length - 50; s += 3) {
+        win.curr.sampleSpineFrame(s, frame);
+        if (Math.abs(frame.curvature) > maxAbsK) {
+          maxAbsK = Math.abs(frame.curvature);
+          bestS = s;
+        }
+      }
+      win.curr.sampleSpineFrame(bestS, frame);
+      const tFwdX = -Math.sin(frame.yawRad);
+      const tFwdZ = -Math.cos(frame.yawRad);
+      const tRightX = Math.cos(frame.yawRad);
+      const tRightZ = -Math.sin(frame.yawRad);
+
+      for (let da = -30; da <= 30; da += 3) {
+        let prevY = 0;
+        for (let dl = -90; dl <= 90; dl += 2) {
+          const wx = frame.posX + tFwdX * da + tRightX * dl;
+          const wz = frame.posZ + tFwdZ * da + tRightZ * dl;
+          field.evaluate(wx, wz, sample);
+          expect(Number.isFinite(sample.heightY)).toBe(true);
+          if (sample.normalY < globalMinNormalY) globalMinNormalY = sample.normalY;
+          expect(sample.normalY).toBeGreaterThanOrEqual(0.38);
+          if (dl > -90) {
+            const slope = Math.abs(sample.heightY - prevY) / 2;
+            expect(slope).toBeLessThan(2.6);
+          }
+          prevY = sample.heightY;
+        }
+      }
+    }
+
+    expect(globalMinNormalY).toBeGreaterThanOrEqual(0.38);
+    expect(globalMaxStepPerM).toBeLessThan(2.6);
+  });
+
+  it('enforces LayoutEngine vs MountainField height parity (zero 3.6m snowbank drift) and S6 rebuildElevationSpines ordering', () => {
+    // 1. Verify S6 ordering: elevationSpines is already populated BEFORE onSegmentCreated fires
+    let callbacksFired = 0;
+    const winOrder = new TrailWindow(303, 'icy-black', () => {
+      callbacksFired++;
+    });
+    expect(callbacksFired).toBe(3);
+    expect(winOrder.elevationSpines.length).toBeGreaterThanOrEqual(15);
+
+    const winTracked = new TrailWindow(404, 'icy-black');
+    const trackedField = new MountainField(winTracked);
+    const revBeforeReset = trackedField.fieldRevision;
+    winTracked.reset(505, 'icy-black');
+    expect(trackedField.fieldRevision).toBeGreaterThan(revBeforeReset);
+    expect(winTracked.elevationSpines.length).toBeGreaterThanOrEqual(15); // curr + 2 next + 4 horizon + 8 horizon2
+
+    const orderObserved: number[] = [];
+    let refWin: TrailWindow | null = null;
+    refWin = new TrailWindow(606, 'icy-black', () => {
+      if (refWin) {
+        orderObserved.push(refWin.elevationSpines.length);
+      }
+    });
+    refWin.reset(607, 'icy-black');
+    refWin.updateProgression(refWin.nextLeft!.id, 45);
+    expect(orderObserved.length).toBeGreaterThanOrEqual(5); // 3 from reset + 2 from updateProgression
+    let minSpinesDuringCallback = Infinity;
+    for (const c of orderObserved) {
+      if (c < minSpinesDuringCallback) minSpinesDuringCallback = c;
+    }
+    expect(minSpinesDuringCallback).toBeGreaterThanOrEqual(15);
+
+    // 2. Verify every baked hazard, present, ramp, delivery zone, and delivery landmark sits flush on MountainField
+    const sim = new SkiSimulation({ seed: 2026, startStageId: 'icy-black' });
+    const st = sim.getState();
+    const mf = st.mountainField;
+    const sample = createMountainSampleOut();
+
+    const hazards = st.entities.hazards;
+    expect(hazards.count).toBeGreaterThan(0);
+    for (let i = 0; i < hazards.count; i++) {
+      mf.evaluate(hazards.posX[i]!, hazards.posZ[i]!, sample);
+      expect(Math.abs(hazards.posY[i]! - sample.heightY)).toBeLessThan(0.02);
+      expect(hazards.normalY[i]!).toBeCloseTo(sample.normalY, 3);
+    }
+
+    const presents = st.entities.presents;
+    expect(presents.count).toBeGreaterThan(0);
+    for (let i = 0; i < presents.count; i++) {
+      const groundY = mf.evaluateHeight(presents.posX[i]!, presents.posZ[i]!);
+      expect(Math.abs(presents.posY[i]! - (groundY + 0.65))).toBeLessThan(0.02);
+    }
+
+    const ramps = st.entities.ramps;
+    for (let i = 0; i < ramps.count; i++) {
+      const groundY = mf.evaluateHeight(ramps.posX[i]!, ramps.posZ[i]!);
+      expect(Math.abs(ramps.posY[i]! - groundY)).toBeLessThan(0.02);
+    }
+
+    const zones = st.entities.deliveryZones;
+    expect(zones.count).toBeGreaterThan(0);
+    for (let i = 0; i < zones.count; i++) {
+      const groundY = mf.evaluateHeight(zones.posX[i]!, zones.posZ[i]!);
+      expect(Math.abs(zones.posY[i]! - groundY)).toBeLessThan(0.02);
+    }
+
+    // Delivery landmarks (which sit up to hw + 2.0m outside the piste!) must match MountainField with zero 3.6m bank error
+    let landmarkCount = 0;
+    const segs = [st.trailWindow.curr, st.trailWindow.nextLeft, st.trailWindow.nextRight];
+    for (const seg of segs) {
+      if (!seg) continue;
+      for (const lm of seg.landmarks) {
+        if (lm.kind === 'deliveryLandmark' || lm.kind === 'forkArch') {
+          landmarkCount++;
+          const groundY = mf.evaluateHeight(lm.worldX, lm.worldZ);
+          expect(Math.abs(lm.worldY - groundY)).toBeLessThan(0.05);
+        }
+      }
+    }
+    expect(landmarkCount).toBeGreaterThan(0);
+    sim.dispose();
+  });
+
+  it('implements unified TerrainFieldView sampleColumnGrid contract with exact WORLD_REBASED invariance and dirtyRects tracking', () => {
+    const sim = new SkiSimulation({ seed: 707, startStageId: 'icy-black' });
+    const intent = createMutablePlayerIntent();
+
+    // Advance close to first 128m rebase trigger
+    for (let i = 0; i < 600; i++) {
+      const st = sim.getState();
+      if (
+        Math.abs(st.currSkier.posX) >= 120 ||
+        Math.abs(st.currSkier.posY) >= 120 ||
+        Math.abs(st.currSkier.posZ) >= 120
+      ) {
+        break;
+      }
+      const targetX = st.trailWindow.curr.sampleSafeX(st.surfaceSample.s + 10);
+      intent.steer = clamp((targetX - st.surfaceSample.x) * 0.14, -1, 1);
+      sim.savePreviousPoses();
+      sim.step(FIXED_DT, intent);
+    }
+
+    const preState = sim.getState();
+    const mf = preState.mountainField;
+    expect(mf.stageIdTable.length).toBeGreaterThanOrEqual(5);
+    expect(mf.fieldRevision).toBeGreaterThanOrEqual(1);
+    expect(mf.dirtyRects.length).toBeGreaterThan(0);
+
+    const cols = 16;
+    const rows = 16;
+    const stepM = 4.0;
+    const originAbsX = Math.floor(preState.currSkier.posX + mf.originOffsetX) - 32;
+    const originAbsZ = Math.floor(preState.currSkier.posZ + mf.originOffsetZ) - 32;
+    const blockOriginY = preState.currSkier.posY + mf.originOffsetY;
+
+    const preGrid = createTerrainGridSampleOut(cols, rows);
+    mf.sampleColumnGrid(originAbsX, originAbsZ, cols, rows, stepM, blockOriginY, preGrid);
+
+    // Verify unpacked LinearFilter-safe channels match point queries and stay bounded
+    const sample = createMountainSampleOut();
+    let sawOnPiste = false;
+    let sawChasm = false;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const idx = r * cols + c;
+        expect(Number.isFinite(preGrid.heights[idx]!)).toBe(true);
+        expect(Number.isFinite(preGrid.macroY[idx]!)).toBe(true);
+        const nx = preGrid.normals[idx * 3]!;
+        const ny = preGrid.normals[idx * 3 + 1]!;
+        const nz = preGrid.normals[idx * 3 + 2]!;
+        expect(Math.hypot(nx, ny, nz)).toBeCloseTo(1.0, 4);
+        expect(ny).toBeGreaterThanOrEqual(0.38);
+        expect(preGrid.pisteWeight[idx]!).toBeGreaterThanOrEqual(0);
+        expect(preGrid.pisteWeight[idx]!).toBeLessThanOrEqual(1);
+        expect(preGrid.iceWeight[idx]!).toBeGreaterThanOrEqual(0);
+        expect(preGrid.iceWeight[idx]!).toBeLessThanOrEqual(1);
+        expect(preGrid.powderWeight[idx]!).toBeGreaterThanOrEqual(0);
+        expect(preGrid.powderWeight[idx]!).toBeLessThanOrEqual(1);
+        expect(preGrid.dividerMask[idx]!).toBeGreaterThanOrEqual(0);
+        expect(preGrid.dividerMask[idx]!).toBeLessThanOrEqual(1);
+        const fx = preGrid.flowXZ[idx * 2]!;
+        const fz = preGrid.flowXZ[idx * 2 + 1]!;
+        expect(Math.hypot(fx, fz)).toBeCloseTo(1.0, 4);
+        expect(preGrid.primaryStageIdx[idx]!).toBeLessThan(mf.stageIdTable.length);
+        if ((preGrid.flags[idx]! & TERRAIN_FLAG_ON_PISTE) !== 0) sawOnPiste = true;
+        if ((preGrid.flags[idx]! & TERRAIN_FLAG_IN_CHASM) !== 0) sawChasm = true;
+      }
+    }
+    expect(sawOnPiste).toBe(true);
+    expect(sawChasm).toBe(true);
+
+    // Spot-check exact parity between sampleColumnGrid and evaluateColumn/evaluateSample
+    const checkCol = 8;
+    const checkRow = 8;
+    const checkIdx = checkRow * cols + checkCol;
+    const wxCheck = originAbsX + checkCol * stepM - mf.originOffsetX;
+    const wzCheck = originAbsZ + checkRow * stepM - mf.originOffsetZ;
+    mf.evaluateSample(wxCheck, wzCheck, sample);
+    expect(preGrid.heights[checkIdx]! + blockOriginY - mf.originOffsetY).toBeCloseTo(
+      sample.heightY,
+      3,
+    );
+
+    // Step across WORLD_REBASED and verify sampleColumnGrid returns identical values for same abs coords & blockOriginY
+    const baseRebaseCount = preState.rebase.rebaseCount;
+    const preRev = mf.fieldRevision;
+    let rebased = false;
+    for (let i = 0; i < 80; i++) {
+      sim.savePreviousPoses();
+      sim.step(FIXED_DT, intent);
+      if (sim.getState().rebase.rebaseCount > baseRebaseCount) {
+        rebased = true;
+        break;
+      }
+    }
+    expect(rebased).toBe(true);
+    const postState = sim.getState();
+    expect(postState.mountainField.originOffsetX).toBeCloseTo(postState.rebase.offsetX, 8);
+    expect(postState.mountainField.originOffsetY).toBeCloseTo(postState.rebase.offsetY, 8);
+    expect(postState.mountainField.originOffsetZ).toBeCloseTo(postState.rebase.offsetZ, 8);
+    expect(postState.mountainField.fieldRevision).toBe(preRev);
+
+    const postGrid = createTerrainGridSampleOut(cols, rows);
+    postState.mountainField.sampleColumnGrid(
+      originAbsX,
+      originAbsZ,
+      cols,
+      rows,
+      stepM,
+      blockOriginY,
+      postGrid,
+    );
+
+    for (let i = 0; i < cols * rows; i++) {
+      expect(postGrid.heights[i]!).toBeCloseTo(preGrid.heights[i]!, 3);
+      expect(postGrid.macroY[i]!).toBeCloseTo(preGrid.macroY[i]!, 3);
+      expect(postGrid.normals[i * 3 + 1]!).toBeCloseTo(preGrid.normals[i * 3 + 1]!, 3);
+      expect(postGrid.pisteWeight[i]!).toBeCloseTo(preGrid.pisteWeight[i]!, 4);
+      expect(postGrid.flags[i]!).toBe(preGrid.flags[i]!);
+      expect(postGrid.primaryStageIdx[i]!).toBe(preGrid.primaryStageIdx[i]!);
+    }
+    sim.dispose();
+  });
+
+  it('enforces G1 delayed fork pitch divergence, G2 sibling XZ clearance, and G3 flattened IslandDivider slopes', () => {
+    // G1 + G2 across 30 consecutive fork advances
+    const win = new TrailWindow(8888, 'icy-black');
+    const frameA = createSpineFrameOut();
+    const frameB = createSpineFrameOut();
+    const proj = createSpineProjectionOut();
+
+    for (let step = 0; step < 30; step++) {
+      const left = win.nextLeft!;
+      const right = win.nextRight!;
+      const parentEnd = win.curr.getEndPose();
+
+      // G1: child pitch stays tightly locked to parent pitch over s in [0, 18]
+      left.sampleSpineFrame(15, frameA);
+      right.sampleSpineFrame(15, frameB);
+      expect(Math.abs(frameA.pitchRad - parentEnd.pitchRad)).toBeLessThan(1e-4);
+      expect(Math.abs(frameB.pitchRad - parentEnd.pitchRad)).toBeLessThan(1e-4);
+
+      // G2: siblings diverge cleanly and never reconverge or cross (clear at s=85, >= +28m by s>=125)
+      for (let s = 85; s <= Math.min(left.length, right.length) - 20; s += 20) {
+        right.sampleSpineFrame(s, frameB);
+        left.projectXZ(frameB.posX, frameB.posZ, proj);
+        const dist = Math.sqrt(proj.distSq);
+        expect(dist).toBeGreaterThan(frameB.halfWidth + proj.halfWidth + (s >= 125 ? 28 : 14));
+      }
+
+      const choose = step % 2 === 0 ? left : right;
+      win.updateProgression(choose.id, 45);
+    }
+
+    // G3: Flattened IslandDivider slope stays <= 42 deg (normalY >= 0.74)
+    const icyDef = getStageDef('icy-black')!;
+    let checkedDividers = 0;
+    for (let seed = 1; seed <= 40; seed++) {
+      const sp = new TrailSpine({
+        id: seed,
+        stage: icyDef,
+        seed: seed * 97,
+        length: 280,
+        startPosX: 0,
+        startPosY: 0,
+        startPosZ: 0,
+        startYawRad: 0,
+        startPitchRad: -0.45,
+        startHalfWidth: 10,
+        endHalfWidth: 20,
+        hasFork: false,
+        leftStageId: null,
+        rightStageId: null,
+        isForkChild: false,
+        forkSide: 'none',
+        seamWorldX: 0,
+        seamWorldY: 0,
+        seamWorldZ: 0,
+        seamYawRad: 0,
+        allowIslandDivider: true,
+      });
+      if (!sp.divider) continue;
+      checkedDividers++;
+      expect(sp.divider.maxHeight).toBeLessThanOrEqual(1.36);
+      expect(sp.divider.maxHalfWidth).toBeGreaterThanOrEqual(3.0);
+      expect(sp.divider.maxHalfWidth).toBeLessThanOrEqual(3.8);
+
+      const mf = new MountainField({
+        elevationSpines: [sp],
+        collectSpinesInBounds: (_a, _b, _c, _d, _e, out) => {
+          out.length = 0;
+          out.push(sp);
+        },
+      });
+      const sample = createMountainSampleOut();
+      const midS = 0.5 * (sp.divider.startS + sp.divider.endS);
+      sp.sampleSpineFrame(midS, frameA);
+      const rX = Math.cos(frameA.yawRad);
+      const rZ = -Math.sin(frameA.yawRad);
+      for (let x = -sp.divider.maxHalfWidth; x <= sp.divider.maxHalfWidth; x += 0.5) {
+        mf.evaluate(frameA.posX + rX * x, frameA.posZ + rZ * x, sample);
+        // Combined divider + steep icy-black pitch stays skiable (normalY >= 0.70, lateral <= 35 deg)
+        expect(sample.normalY).toBeGreaterThanOrEqual(0.7);
+      }
+      if (checkedDividers >= 5) break;
+    }
+    expect(checkedDividers).toBeGreaterThanOrEqual(3);
+  });
+
+  it('enforces post-advance G2 Tier-1/Tier-2 cousin and twin clearance across 50 fork advances', () => {
+    const fA = createSpineFrameOut();
+    const proj = createSpineProjectionOut();
+
+    const checkPairGroup = (spines: readonly SpineView[], checkTwins: boolean): number => {
+      let overlaps = 0;
+      for (let i = 0; i < spines.length; i++) {
+        for (let j = i + 1; j < spines.length; j++) {
+          const a = spines[i]!;
+          const b = spines[j]!;
+          const aPar =
+            (a as { parentId?: number | null; spine?: { parentId?: number | null } }).parentId ??
+            (a as { spine?: { parentId?: number | null } }).spine?.parentId ??
+            null;
+          const bPar =
+            (b as { parentId?: number | null; spine?: { parentId?: number | null } }).parentId ??
+            (b as { spine?: { parentId?: number | null } }).spine?.parentId ??
+            null;
+          const isTwin = a.fork.isForkChild && b.fork.isForkChild && aPar !== null && aPar === bPar;
+          if (checkTwins !== isTwin) continue;
+
+          let pairMinClear = Infinity;
+          const startS = isTwin ? 70 : 15;
+          for (let s = startS; s <= a.length - 10; s += 15) {
+            a.sampleSpineFrame(s, fA);
+            b.projectXZ(fA.posX, fA.posZ, proj);
+            if (Math.abs(proj.longExt) > 15) continue;
+            const clear = Math.sqrt(proj.distSq) - fA.halfWidth - proj.halfWidth;
+            if (clear < pairMinClear) pairMinClear = clear;
+          }
+          if (pairMinClear < 0) overlaps++;
+        }
+      }
+      return overlaps;
+    };
+
+    for (const [stage, seed] of [
+      ['icy-black', 2026],
+      ['sunny-blue', 1337],
+      ['powder-bowl', 8888],
+      ['blizzard-ridge', 4040],
+      ['granite-gorge', 777],
+    ] as const) {
+      const win = new TrailWindow(seed, stage);
+      let t1Overlaps = 0;
+      let t2Overlaps = 0;
+      let twinOverlaps = 0;
+
+      for (let adv = 0; adv < 50; adv++) {
+        t1Overlaps += checkPairGroup(win.horizonSpines, false);
+        t2Overlaps += checkPairGroup(win.horizon2Spines, false);
+        twinOverlaps += checkPairGroup(
+          [win.nextLeft!, win.nextRight!, ...win.horizonSpines, ...win.horizon2Spines],
+          true,
+        );
+        const next = adv % 2 === 0 ? win.nextLeft! : (win.nextRight ?? win.nextLeft!);
+        next.sampleSpineFrame(45, fA);
+        win.updateProgression(next.id, 45, 40, fA.posX, fA.posZ);
+      }
+
+      expect(t1Overlaps).toBe(0);
+      expect(twinOverlaps).toBe(0);
+      expect(t2Overlaps).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it('maintains exact tile-bounds parity (< 1e-6) across open-leaf extensions and far-field zones', () => {
+    const win = new TrailWindow(2026, 'icy-black');
+    const field = new MountainField(win);
+    const fA = createSpineFrameOut();
+    const cand: SpineView[] = [];
+    let maxTileDiff = 0;
+
+    for (let adv = 0; adv <= 5; adv++) {
+      win.curr.sampleSpineFrame(100, fA);
+      const cx = fA.posX;
+      const cz = fA.posZ;
+      for (let tx = -4; tx <= 4; tx++) {
+        for (let tz = -14; tz <= 4; tz++) {
+          const bx = Math.floor(cx / 64) * 64 + tx * 64;
+          const bz = Math.floor(cz / 64) * 64 + tz * 64;
+          field.collectSpinesInBounds(bx, bx + 64, bz, bz + 64, 310, cand);
+          for (let ox = 0; ox <= 64; ox += 32) {
+            for (let oz = 0; oz <= 64; oz += 32) {
+              const wx = bx + ox;
+              const wz = bz + oz;
+              const diff = Math.abs(field.evaluateHeight(wx, wz) - field.evaluateHeight(wx, wz, cand));
+              if (diff > maxTileDiff) maxTileDiff = diff;
+            }
+          }
+        }
+      }
+      const next = adv % 2 === 0 ? win.nextLeft! : win.nextRight!;
+      next.sampleSpineFrame(45, fA);
+      win.updateProgression(next.id, 45, 40, fA.posX, fA.posZ);
+    }
+
+    expect(maxTileDiff).toBeLessThan(1e-6);
+  });
+
+  it('maintains post-advance radial 2D continuity (normalY >= 0.38) and zero 280m advance pop', () => {
+    const fA = createSpineFrameOut();
+    const samp = createMountainSampleOut();
+
+    for (const [stage, seed] of [
+      ['icy-black', 2026],
+      ['blizzard-ridge', 4040],
+      ['sunny-blue', 1337],
+    ] as const) {
+      const win = new TrailWindow(seed, stage);
+      const field = new MountainField(win);
+      let maxPop280 = 0;
+      let minNormalY = 1;
+
+      for (let adv = 0; adv < 8; adv++) {
+        const chosen = adv % 2 === 0 ? win.nextLeft! : win.nextRight!;
+        chosen.sampleSpineFrame(42, fA);
+        const sx = fA.posX;
+        const sz = fA.posZ;
+
+        const pre: Array<{ x: number; z: number; h: number }> = [];
+        for (const r of [0, 60, 120, 180, 240, 276]) {
+          const n = r === 0 ? 1 : 20;
+          for (let a = 0; a < n; a++) {
+            const th = (a * Math.PI * 2) / n;
+            const wx = sx + Math.cos(th) * r;
+            const wz = sz + Math.sin(th) * r;
+            pre.push({ x: wx, z: wz, h: field.evaluateHeight(wx, wz) });
+          }
+        }
+
+        win.updateProgression(chosen.id, 42, 40, sx, sz);
+
+        for (let i = 0; i < pre.length; i++) {
+          const pt = pre[i]!;
+          const pop = Math.abs(field.evaluateHeight(pt.x, pt.z) - pt.h);
+          if (pop > maxPop280) maxPop280 = pop;
+        }
+
+        if (adv >= 4) {
+          for (const seg of [win.curr, win.nextLeft!, win.nextRight!]) {
+            for (let s = 20; s <= seg.length - 20; s += 30) {
+              seg.sampleSpineFrame(s, fA);
+              const rx = Math.cos(fA.yawRad);
+              const rz = -Math.sin(fA.yawRad);
+              for (let lat = -260; lat <= 260; lat += 4) {
+                field.evaluate(fA.posX + rx * lat, fA.posZ + rz * lat, samp);
+                expect(Number.isFinite(samp.heightY)).toBe(true);
+                expect(Number.isFinite(samp.normalY)).toBe(true);
+                if (samp.normalY < minNormalY) minNormalY = samp.normalY;
+              }
+            }
+          }
+        }
+      }
+
+      expect(maxPop280).toBeLessThan(0.05);
+      expect(minNormalY).toBeGreaterThanOrEqual(0.38);
+    }
   });
 });

@@ -60,12 +60,17 @@ export interface SurfaceSample {
   s: number;
   x: number;
   groundY: number;
+  macroY: number;
   normalX: number;
   normalY: number;
   normalZ: number;
   tangentX: number;
   tangentY: number;
   tangentZ: number;
+  /** True local steepest-descent unit vector (-grad H projected onto terrain tangent plane). */
+  fallLineX: number;
+  fallLineY: number;
+  fallLineZ: number;
   halfWidth: number;
   surfaceType: SurfaceType;
   onPiste: boolean;
@@ -73,6 +78,8 @@ export interface SurfaceSample {
   inDivider: boolean;
   inChasmZone: boolean;
   chasmWipeoutDepth: number;
+  /** Signed chasm relief offset relative to macroY (<= 0 inside chasms, 0 outside). */
+  chasmRelief: number;
   nearestSpineY: number;
   valid: boolean;
 }
@@ -85,12 +92,16 @@ export function createSurfaceSample(): SurfaceSample {
     s: 0,
     x: 0,
     groundY: 0,
+    macroY: 0,
     normalX: 0,
     normalY: 1,
     normalZ: 0,
     tangentX: 0,
     tangentY: 0,
     tangentZ: -1,
+    fallLineX: 0,
+    fallLineY: 0,
+    fallLineZ: -1,
     halfWidth: 14,
     surfaceType: 'packed',
     onPiste: true,
@@ -98,6 +109,7 @@ export function createSurfaceSample(): SurfaceSample {
     inDivider: false,
     inChasmZone: false,
     chasmWipeoutDepth: 0,
+    chasmRelief: 0,
     nearestSpineY: 0,
     valid: false,
   };
@@ -307,6 +319,7 @@ export interface PisteHeightOut {
   heightY: number;
   dividerHalfWidth: number;
   inDivider: boolean;
+  dividerMask: number;
 }
 
 export function createPisteHeightOut(): PisteHeightOut {
@@ -314,6 +327,7 @@ export function createPisteHeightOut(): PisteHeightOut {
     heightY: 0,
     dividerHalfWidth: 0,
     inDivider: false,
+    dividerMask: 0,
   };
 }
 
@@ -341,6 +355,58 @@ export interface SegmentForkMeta extends SpineForkMeta {
   readonly obstacleFreeStartS: number;
 }
 
+export interface SpineMacroNodesView {
+  readonly count: number;
+  readonly posX: Float64Array;
+  readonly posY: Float64Array;
+  readonly posZ: Float64Array;
+  readonly fwdX: Float32Array;
+  readonly fwdY: Float32Array;
+  readonly fwdZ: Float32Array;
+  readonly halfWidth: Float32Array;
+  readonly useUpstreamExt: boolean;
+  readonly useDownstreamExt: boolean;
+  readonly upExtCount: number;
+  readonly upExtX: Float64Array;
+  readonly upExtY: Float64Array;
+  readonly upExtZ: Float64Array;
+  readonly upExtFwdX: number;
+  readonly upExtFwdY: number;
+  readonly upExtFwdZ: number;
+  readonly upExtHalfWidth: number;
+  readonly upBoundsMinX: number;
+  readonly upBoundsMaxX: number;
+  readonly upBoundsMinZ: number;
+  readonly upBoundsMaxZ: number;
+  readonly downExtCount: number;
+  readonly downExtX: Float64Array;
+  readonly downExtY: Float64Array;
+  readonly downExtZ: Float64Array;
+  readonly downExtFwdX: number;
+  readonly downExtFwdY: number;
+  readonly downExtFwdZ: number;
+  readonly downExtHalfWidth: number;
+  readonly downBoundsMinX: number;
+  readonly downBoundsMaxX: number;
+  readonly downBoundsMinZ: number;
+  readonly downBoundsMaxZ: number;
+}
+
+export interface SpineCorridorSideView {
+  readonly sideSign: -1 | 1;
+  readonly count: number;
+  readonly posX: Float64Array;
+  readonly posZ: Float64Array;
+  readonly radius: Float32Array;
+  readonly invRadiusSq: Float32Array;
+  readonly kernelWeight: Float32Array;
+  readonly ampMag: Float32Array;
+  readonly boundsMinX: number;
+  readonly boundsMaxX: number;
+  readonly boundsMinZ: number;
+  readonly boundsMaxZ: number;
+}
+
 export interface SpineView {
   readonly id: number;
   readonly stageId: string;
@@ -353,16 +419,27 @@ export interface SpineView {
   readonly boundsMaxX: number;
   readonly boundsMinZ: number;
   readonly boundsMaxZ: number;
-  readonly macroAnchorCount?: number;
-  readonly macroAnchorX?: Float64Array;
-  readonly macroAnchorY?: Float64Array;
-  readonly macroAnchorZ?: Float64Array;
+  readonly macroNodes?: SpineMacroNodesView;
+  readonly corridorLeft?: SpineCorridorSideView;
+  readonly corridorRight?: SpineCorridorSideView;
 
   sampleSpineFrame(s: number, out: SpineFrameOut): void;
   projectXZ(wx: number, wz: number, out: SpineProjectionOut): void;
   evaluatePisteHeight(s: number, x: number, out: PisteHeightOut): void;
   evaluatePisteSurface(s: number, x: number): PisteSurfaceType;
 }
+
+export interface WorldDirtyRect {
+  readonly minX: number;
+  readonly maxX: number;
+  readonly minZ: number;
+  readonly maxZ: number;
+}
+
+export type TopologyChangeListener = (
+  isReset: boolean,
+  dirtyWorldRects: readonly WorldDirtyRect[],
+) => void;
 
 export interface MountainSpineSource {
   readonly elevationSpines: readonly SpineView[];
@@ -374,6 +451,7 @@ export interface MountainSpineSource {
     padM: number,
     outSpines: SpineView[],
   ): void;
+  addTopologyListener?(listener: TopologyChangeListener): void;
 }
 
 export interface MountainColumnOut {
@@ -383,8 +461,11 @@ export interface MountainColumnOut {
   onPiste: boolean;
   pisteSurfaceType: PisteSurfaceType;
   inDivider: boolean;
+  dividerMask: number;
   inChasmZone: boolean;
   chasmWipeoutDepth: number;
+  /** Signed chasm relief offset relative to macroY (<= 0 inside chasms, 0 outside). */
+  chasmRelief: number;
   chasmDepthBelowSpine: number;
   nearestSpineY: number;
   nearestSegmentId: number;
@@ -407,8 +488,10 @@ export function createMountainColumnOut(): MountainColumnOut {
     onPiste: false,
     pisteSurfaceType: 'packed',
     inDivider: false,
+    dividerMask: 0,
     inChasmZone: false,
     chasmWipeoutDepth: 0,
+    chasmRelief: 0,
     chasmDepthBelowSpine: 0,
     nearestSpineY: 0,
     nearestSegmentId: -1,
@@ -441,10 +524,61 @@ export function createMountainSampleOut(): MountainSampleOut {
   };
 }
 
+export interface TerrainDirtyRect {
+  readonly minAbsX: number;
+  readonly maxAbsX: number;
+  readonly minAbsZ: number;
+  readonly maxAbsZ: number;
+}
+
+export const TERRAIN_FLAG_ON_PISTE = 1 << 0;
+export const TERRAIN_FLAG_IN_DIVIDER = 1 << 1;
+export const TERRAIN_FLAG_IN_CHASM = 1 << 2;
+
+/**
+ * Unpacked, LinearFilter-safe continuous arrays for GPU textures, Jolt SetHeights, and CPU scenery.
+ * NEVER bit-pack discrete IDs/flags into hardware LinearFilter texture channels!
+ */
+export interface TerrainGridSampleOut {
+  readonly heights: Float32Array;
+  readonly macroY: Float32Array;
+  readonly normals: Float32Array;
+  readonly pisteWeight: Float32Array;
+  readonly iceWeight: Float32Array;
+  readonly powderWeight: Float32Array;
+  readonly dividerMask: Float32Array;
+  readonly flowXZ: Float32Array;
+  readonly offPisteDist: Float32Array;
+  readonly primaryStageIdx: Uint8Array;
+  readonly secondaryStageIdx: Uint8Array;
+  readonly secondaryStageWeightU8: Uint8Array;
+  readonly flags: Uint8Array;
+}
+
+export function createTerrainGridSampleOut(cols: number, rows: number): TerrainGridSampleOut {
+  const count = Math.max(0, cols * rows);
+  return {
+    heights: new Float32Array(count),
+    macroY: new Float32Array(count),
+    normals: new Float32Array(count * 3),
+    pisteWeight: new Float32Array(count),
+    iceWeight: new Float32Array(count),
+    powderWeight: new Float32Array(count),
+    dividerMask: new Float32Array(count),
+    flowXZ: new Float32Array(count * 2),
+    offPisteDist: new Float32Array(count),
+    primaryStageIdx: new Uint8Array(count),
+    secondaryStageIdx: new Uint8Array(count),
+    secondaryStageWeightU8: new Uint8Array(count),
+    flags: new Uint8Array(count),
+  };
+}
+
 export interface MountainFieldView {
   readonly worldSeed: number;
   readonly originOffsetX: number;
   readonly originOffsetZ: number;
+  readonly fieldRevision?: number;
   collectSpinesInBounds(
     minX: number,
     maxX: number,
@@ -472,6 +606,32 @@ export interface MountainFieldView {
     out: MountainSampleOut,
     candidateSpines?: readonly SpineView[],
   ): MountainSampleOut;
+}
+
+export interface TerrainFieldView extends MountainFieldView {
+  readonly originOffsetY: number;
+  readonly fieldRevision: number;
+  readonly dirtyRects: readonly TerrainDirtyRect[];
+  readonly stageIdTable: readonly string[];
+
+  ackDirtyRects?(): void;
+
+  evaluateSample(
+    wx: number,
+    wz: number,
+    out: MountainSampleOut,
+    candidateSpines?: readonly SpineView[],
+  ): MountainSampleOut;
+
+  sampleColumnGrid(
+    originAbsX: number,
+    originAbsZ: number,
+    cols: number,
+    rows: number,
+    stepM: number,
+    blockOriginY: number,
+    out: TerrainGridSampleOut,
+  ): void;
 }
 
 /**
@@ -797,7 +957,7 @@ export interface ReadonlySimState {
   readonly activeWeather: ActiveWeatherState;
 
   readonly trailWindow: TrailWindowView;
-  readonly mountainField: MountainFieldView;
+  readonly mountainField: TerrainFieldView;
   readonly rebase: RebaseInfo;
   readonly entities: EntityPoolViews;
   readonly debugDraw: DebugDrawView;

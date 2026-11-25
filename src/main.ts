@@ -1,3 +1,6 @@
+/// <reference types="vite/client" />
+import initJolt from 'jolt-physics/wasm';
+import joltWasmUrl from 'jolt-physics/jolt-physics.wasm.wasm?url';
 import { EventBus } from './core/eventBus';
 import { FIXED_DT, FixedLoop } from './core/fixedLoop';
 import {
@@ -12,6 +15,7 @@ import {
   type MutablePlayerIntent,
   type SimEventMap,
 } from './sim/contracts';
+import { JoltRuntime, type JoltModule } from './sim/physics/joltRuntime';
 import { SkiSimulation } from './sim/skiSimulation';
 import {
   GameUI,
@@ -50,13 +54,21 @@ export interface SkiGameAppHandle {
   dispose(): void;
 }
 
+export async function bootPhysicsRuntime(): Promise<JoltRuntime> {
+  const jolt = (await initJolt({
+    locateFile: () => joltWasmUrl,
+  })) as unknown as JoltModule;
+  return new JoltRuntime(jolt);
+}
+
 /**
- * Composition root wiring core plumbing, headless simulation, Three.js renderer,
- * and responsive cartoon HUD via strict dependency injection (zero singletons).
+ * Composition root wiring core plumbing, headless simulation, Jolt WASM physics runtime,
+ * Three.js renderer, and responsive cartoon HUD via strict dependency injection (zero singletons).
  */
 export function mountSkiGame(
   viewportEl: HTMLElement,
   hudRootEl: HTMLElement,
+  physicsRuntime?: JoltRuntime,
 ): SkiGameAppHandle {
   const isDevBuild = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
 
@@ -74,6 +86,7 @@ export function mountSkiGame(
     eventBus,
     debugDrawEnabled: false,
     blizzardEnabled: false,
+    physicsRuntime,
   });
   const renderer = new ThreeRenderer(viewportEl, eventBus, profiler);
 
@@ -410,6 +423,7 @@ export function mountSkiGame(
       input.detach();
       ui.dispose();
       renderer.dispose();
+      sim.dispose();
       eventBus.clear();
     },
   };
@@ -419,13 +433,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const viewportEl = document.getElementById('viewport');
   const hudRootEl = document.getElementById('hud-root');
   if (viewportEl && hudRootEl) {
-    const app = mountSkiGame(viewportEl, hudRootEl);
-    window.addEventListener(
-      'pagehide',
-      () => {
-        app.dispose();
-      },
-      { once: true },
-    );
+    void bootPhysicsRuntime().then((physicsRuntime) => {
+      const app = mountSkiGame(viewportEl, hudRootEl, physicsRuntime);
+      window.addEventListener(
+        'pagehide',
+        () => {
+          app.dispose();
+          physicsRuntime.dispose();
+        },
+        { once: true },
+      );
+    });
   }
 }

@@ -2,10 +2,14 @@ import * as THREE from 'three';
 import { getCreatureDef } from '../../content/creatures';
 import { getHazardDef } from '../../content/hazards';
 import { clamp, lerp } from '../../core/math';
-import type { ReadonlySimState } from '../../sim/contracts';
+import {
+  createMountainSampleOut,
+  type MountainFieldView,
+  type ReadonlySimState,
+} from '../../sim/contracts';
 import type { GraphicsUtils } from './graphicsUtils';
 
-const MAX_SHADOWS = 384;
+const MAX_SHADOWS = 512;
 const SHADOW_TEX_SIZE = 64;
 
 const _mat4 = new THREE.Matrix4();
@@ -14,6 +18,7 @@ const _quat = new THREE.Quaternion();
 const _scale = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
 const _normal = new THREE.Vector3();
+const _mountainScratch = createMountainSampleOut();
 
 function createShadowBlobTexture(gfx: GraphicsUtils): THREE.DataTexture {
   const size = SHADOW_TEX_SIZE;
@@ -57,6 +62,13 @@ export class ContactShadows {
   readonly shadowTexture: THREE.DataTexture;
   private readonly shadowAlphas: Float32Array;
   private readonly shadowAlphaAttr: THREE.InstancedBufferAttribute;
+  private readonly presentCacheValid = new Uint8Array(MAX_SHADOWS);
+  private readonly presentCacheX = new Float32Array(MAX_SHADOWS);
+  private readonly presentCacheZ = new Float32Array(MAX_SHADOWS);
+  private readonly presentCacheNx = new Float32Array(MAX_SHADOWS);
+  private readonly presentCacheNy = new Float32Array(MAX_SHADOWS);
+  private readonly presentCacheNz = new Float32Array(MAX_SHADOWS);
+  private lastMountainField: MountainFieldView | null = null;
   private activeCount = 0;
 
   constructor(gfx: GraphicsUtils) {
@@ -168,7 +180,7 @@ diffuseColor.a *= vShadowAlpha;`,
     const t = clamp(alpha, 0, 1);
     this.activeCount = 0;
 
-    // 1. Skier shadow
+    // 1. Skier shadow (toned down to complement directional shadow as airborne height cue)
     const prevS = simState.prevSkier;
     const currS = simState.currSkier;
     const skX = lerp(prevS.posX, currS.posX, t);
@@ -184,7 +196,7 @@ diffuseColor.a *= vShadowAlpha;`,
       currS.normalZ,
       0.95,
       skY - skGroundY,
-      0.62,
+      0.32,
     );
 
     // 2. Hazards (normal-aligned from HazardPoolView)
@@ -229,18 +241,52 @@ diffuseColor.a *= vShadowAlpha;`,
       );
     }
 
-    // 4. Uncollected presents
+    // 4. Uncollected presents (terrain-normal aligned)
+    const mountainField = simState.mountainField;
+    if (this.lastMountainField !== mountainField) {
+      this.presentCacheValid.fill(0);
+      this.lastMountainField = mountainField;
+    }
     const presents = simState.entities.presents;
     for (let i = 0; i < presents.count; i++) {
       if (this.activeCount >= MAX_SHADOWS) break;
       if (presents.collected[i]! !== 0) continue;
+      const px = presents.posX[i]!;
+      const py = presents.posY[i]!;
+      const pz = presents.posZ[i]!;
+      let nx = 0;
+      let ny = 1;
+      let nz = 0;
+      if (
+        i < MAX_SHADOWS &&
+        this.presentCacheValid[i] === 1 &&
+        this.presentCacheX[i] === px &&
+        this.presentCacheZ[i] === pz
+      ) {
+        nx = this.presentCacheNx[i]!;
+        ny = this.presentCacheNy[i]!;
+        nz = this.presentCacheNz[i]!;
+      } else if (mountainField) {
+        mountainField.evaluate(px, pz, _mountainScratch);
+        nx = _mountainScratch.normalX;
+        ny = _mountainScratch.normalY;
+        nz = _mountainScratch.normalZ;
+        if (i < MAX_SHADOWS) {
+          this.presentCacheValid[i] = 1;
+          this.presentCacheX[i] = px;
+          this.presentCacheZ[i] = pz;
+          this.presentCacheNx[i] = nx;
+          this.presentCacheNy[i] = ny;
+          this.presentCacheNz[i] = nz;
+        }
+      }
       this.pushShadow(
-        presents.posX[i]!,
-        presents.posY[i]!,
-        presents.posZ[i]!,
-        0,
-        1,
-        0,
+        px,
+        py,
+        pz,
+        nx,
+        ny,
+        nz,
         presents.defIds[i] === 'gift_golden' ? 0.78 : 0.65,
         0.35,
         0.44,

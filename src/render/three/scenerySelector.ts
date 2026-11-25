@@ -5,7 +5,8 @@ import type {
 } from '../../content/types';
 import { clamp, smoothstep } from '../../core/math';
 import type { BillboardFrameName } from './spriteAtlas';
-import type { TerrainLodTier } from './terrainTilePool';
+
+export type TerrainLodTier = 0 | 1;
 
 export interface SceneryEnvSignal {
   minNormalY: number;
@@ -167,6 +168,9 @@ export function computeScenerySlopeSinkY(
 ): number {
   if (species === 'alpine_rock' || species === 'rock_crag') {
     return Math.max(0, 1 - minNormalY) * width * 0.45;
+  }
+  if (species === 'pine_green' || species === 'pine_frosted') {
+    return Math.max(0, 1 - minNormalY) * width * 0.25;
   }
   return 0;
 }

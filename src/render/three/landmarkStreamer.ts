@@ -145,10 +145,19 @@ export class LandmarkStreamer {
     for (let i = 0; i < 12; i++) {
       const group = new THREE.Group();
       group.name = `PooledDeliveryLantern_${i}`;
-      group.add(
-        gfx.createMesh(meshAssets.lanternPostGeo, materials.propToonMaterial, `LanternPost_${i}`),
-        gfx.createMesh(meshAssets.lanternGlowGeo, materials.beaconGlowMaterial, `LanternGlow_${i}`),
+      const postMesh = gfx.createMesh(
+        meshAssets.lanternPostGeo,
+        materials.propToonMaterial,
+        `LanternPost_${i}`,
       );
+      postMesh.castShadow = true;
+      const glowMesh = gfx.createMesh(
+        meshAssets.lanternGlowGeo,
+        materials.beaconGlowMaterial,
+        `LanternGlow_${i}`,
+      );
+      glowMesh.castShadow = false;
+      group.add(postMesh, glowMesh);
       gfx.markAsCache(group, group.name);
       this.lanternPool.push(group);
     }
@@ -156,14 +165,19 @@ export class LandmarkStreamer {
     for (let i = 0; i < 8; i++) {
       const group = new THREE.Group();
       group.name = `PooledDeliveryArch_${i}`;
-      group.add(
-        gfx.createMesh(meshAssets.deliveryArchGeo, materials.propToonMaterial, `DeliveryArch_${i}`),
-        gfx.createMesh(
-          meshAssets.deliveryArchGlowGeo,
-          materials.beaconGlowMaterial,
-          `DeliveryArchGlow_${i}`,
-        ),
+      const archMesh = gfx.createMesh(
+        meshAssets.deliveryArchGeo,
+        materials.propToonMaterial,
+        `DeliveryArch_${i}`,
       );
+      archMesh.castShadow = true;
+      const glowMesh = gfx.createMesh(
+        meshAssets.deliveryArchGlowGeo,
+        materials.beaconGlowMaterial,
+        `DeliveryArchGlow_${i}`,
+      );
+      glowMesh.castShadow = false;
+      group.add(archMesh, glowMesh);
       gfx.markAsCache(group, group.name);
       this.deliveryArchPool.push(group);
     }
@@ -171,10 +185,19 @@ export class LandmarkStreamer {
     for (let i = 0; i < 8; i++) {
       const group = new THREE.Group();
       group.name = `PooledDeliveryCabin_${i}`;
-      group.add(
-        gfx.createMesh(meshAssets.cabinGeo, materials.propToonMaterial, `DeliveryCabin_${i}`),
-        gfx.createMesh(meshAssets.cabinGlowGeo, materials.beaconGlowMaterial, `DeliveryCabinGlow_${i}`),
+      const cabinMesh = gfx.createMesh(
+        meshAssets.cabinGeo,
+        materials.propToonMaterial,
+        `DeliveryCabin_${i}`,
       );
+      cabinMesh.castShadow = true;
+      const glowMesh = gfx.createMesh(
+        meshAssets.cabinGlowGeo,
+        materials.beaconGlowMaterial,
+        `DeliveryCabinGlow_${i}`,
+      );
+      glowMesh.castShadow = false;
+      group.add(cabinMesh, glowMesh);
       gfx.markAsCache(group, group.name);
       this.cabinPool.push(group);
     }

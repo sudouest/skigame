@@ -8,7 +8,9 @@ import {
   type RibbonPointOut,
   type SegmentForkMeta,
   type SegmentLandmarkRequirement,
+  type SpineCorridorSideView,
   type SpineFrameOut,
+  type SpineMacroNodesView,
   type SpineProjectionOut,
   type SpineView,
   type TerrainSegmentView,
@@ -72,6 +74,9 @@ export interface TrailSegmentConfig {
   readonly seamYawRad: number;
   readonly initialSafeX?: number;
   readonly allowIslandDivider?: boolean;
+  readonly hasUpstreamParent?: boolean;
+  readonly parentId?: number | null;
+  readonly avoidSpines?: readonly TrailSpine[];
   /** Optional pre-computed horizon spine adopted directly with zero geometry recomputation. */
   readonly existingSpine?: TrailSpine;
 }
@@ -315,20 +320,16 @@ export class TrailSegment implements TerrainSegmentView, SpineView {
     return this.spine.polyZ;
   }
 
-  get macroAnchorCount(): number {
-    return this.spine.macroAnchorCount;
+  get macroNodes(): SpineMacroNodesView {
+    return this.spine.macroNodes;
   }
 
-  get macroAnchorX(): Float64Array {
-    return this.spine.macroAnchorX;
+  get corridorLeft(): SpineCorridorSideView {
+    return this.spine.corridorLeft;
   }
 
-  get macroAnchorY(): Float64Array {
-    return this.spine.macroAnchorY;
-  }
-
-  get macroAnchorZ(): Float64Array {
-    return this.spine.macroAnchorZ;
+  get corridorRight(): SpineCorridorSideView {
+    return this.spine.corridorRight;
   }
 
   get boundsMinX(): number {

@@ -21,10 +21,15 @@ const _streakUp = new THREE.Vector3();
 const _camForward = new THREE.Vector3();
 const _stageFog = new THREE.Color();
 const _stageSky = new THREE.Color();
+const _stageSkyTop = new THREE.Color();
+const _stageShadowSnow = new THREE.Color();
+const _stageCliff = new THREE.Color();
 const _stageSun = new THREE.Color();
 const _stageAmbient = new THREE.Color();
 const _stormFogTint = new THREE.Color('#9db4c8');
 const _stormSkyTint = new THREE.Color('#647b94');
+const _stormSkyTopTint = new THREE.Color('#354861');
+const _stormShadowSnowTint = new THREE.Color('#7a95b3');
 const _biomeTarget = new THREE.Color();
 
 function wrapModulo(val: number, span: number): number {
@@ -40,6 +45,8 @@ function wrapModulo(val: number, span: number): number {
 export class SnowVfx {
   readonly instancedMesh: THREE.InstancedMesh;
   readonly fog: THREE.FogExp2;
+  readonly skyBottomColor: THREE.Color;
+  readonly skyTopColor: THREE.Color;
 
   private readonly px = new Float32Array(MAX_SNOW_PARTICLES);
   private readonly py = new Float32Array(MAX_SNOW_PARTICLES);
@@ -66,6 +73,8 @@ export class SnowVfx {
     this.sharedUniforms = sharedUniforms;
 
     this.backgroundColor = new THREE.Color(STAGE_SUNNY_BLUE.palette.skyBottom);
+    this.skyBottomColor = this.backgroundColor;
+    this.skyTopColor = this.sharedUniforms.uSkyTopColor.value;
     this.scene.background = this.backgroundColor;
 
     this.fog = new THREE.FogExp2(STAGE_SUNNY_BLUE.palette.fogColor, 0.006);
@@ -135,8 +144,14 @@ export class SnowVfx {
 
     _stageFog.set(palette.fogColor).lerp(_stormFogTint, blizzardDim * 0.65);
     _stageSky.set(palette.skyBottom).lerp(_stormSkyTint, blizzardDim * 0.7);
+    _stageSkyTop.set(palette.skyTop).lerp(_stormSkyTopTint, blizzardDim * 0.72);
+    _stageShadowSnow.set(palette.shadowSnowTint).lerp(_stormShadowSnowTint, blizzardDim * 0.45);
+    _stageCliff.set(palette.cliffColor);
     this.fog.color.lerp(_stageFog, 0.15);
     this.backgroundColor.lerp(_stageSky, 0.15);
+    this.sharedUniforms.uSkyTopColor.value.lerp(_stageSkyTop, 0.15);
+    this.sharedUniforms.uShadowSnowTint.value.lerp(_stageShadowSnow, 0.15);
+    this.sharedUniforms.uCliffColor.value.lerp(_stageCliff, 0.15);
 
     _stageSun.set(palette.sunColor);
     _stageAmbient.set(palette.ambientColor);

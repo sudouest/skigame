@@ -24,6 +24,9 @@ describe('50 km Headless PCG & Simulation Soak Test', () => {
     let maxActivePresents = 0;
     let maxActiveZones = 0;
     let maxActiveCreatures = 0;
+    let maxAbsVelY = 0;
+    let maxUpwardVelY = 0;
+    let maxSpeed3d = 0;
 
     sim.eventBus.on('FORK_ENTERED', () => {
       forkCount++;
@@ -213,6 +216,11 @@ describe('50 km Headless PCG & Simulation Soak Test', () => {
         throw new Error(`Non-finite simulation value at tick ${tick}`);
       }
 
+      const absVy = Math.abs(post.currSkier.velY);
+      if (absVy > maxAbsVelY) maxAbsVelY = absVy;
+      if (post.currSkier.velY > maxUpwardVelY) maxUpwardVelY = post.currSkier.velY;
+      if (post.currSkier.speed > maxSpeed3d) maxSpeed3d = post.currSkier.speed;
+
       if (post.entities.hazards.count > maxActiveHazards) maxActiveHazards = post.entities.hazards.count;
       if (post.entities.presents.count > maxActivePresents) maxActivePresents = post.entities.presents.count;
       if (post.entities.deliveryZones.count > maxActiveZones) maxActiveZones = post.entities.deliveryZones.count;
@@ -240,5 +248,12 @@ describe('50 km Headless PCG & Simulation Soak Test', () => {
       expect(deliveryCadences[i]!).toBeGreaterThanOrEqual(70);
       expect(deliveryCadences[i]!).toBeLessThanOrEqual(250);
     }
+
+    // Physics sanity guards: no fabricated vertical velY spikes (legacy bug hit +85 m/s) or speed blowups
+    expect(maxAbsVelY).toBeLessThan(40);
+    expect(maxUpwardVelY).toBeLessThan(20);
+    expect(maxSpeed3d).toBeLessThan(48);
+
+    sim.dispose();
   }, 20_000);
 });

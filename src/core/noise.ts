@@ -83,6 +83,53 @@ export function fbm2D(
   return clamp(sum / ampSum, -1, 1);
 }
 
+const SMOOTH_RIDGE_EPS = 0.08;
+const SMOOTH_RIDGE_EPS_SQ = SMOOTH_RIDGE_EPS * SMOOTH_RIDGE_EPS;
+const SMOOTH_RIDGE_MIN_RAW =
+  (1 - Math.sqrt(1 + SMOOTH_RIDGE_EPS_SQ) + SMOOTH_RIDGE_EPS) *
+  (1 - Math.sqrt(1 + SMOOTH_RIDGE_EPS_SQ) + SMOOTH_RIDGE_EPS);
+const SMOOTH_RIDGE_INV_SPAN = 1 / (1 - SMOOTH_RIDGE_MIN_RAW);
+
+/**
+ * Multi-octave C^2 smooth ridged 2D noise normalized cleanly to [0, 1].
+ * Replaces the C^0 |n| cusp with `r_smooth(n) = (1 - sqrt(n^2 + eps^2) + eps)^2` (eps = 0.08),
+ * rescaled affinely from [r_smooth(1), 1] to [0, 1].
+ */
+export function smoothRidgedNoise2D(
+  x: number,
+  z: number,
+  seed = 0,
+  octaves = 3,
+  lacunarity = 2.0,
+  gain = 0.5,
+): number {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return 0;
+
+  const oct = Math.max(1, Math.floor(Number.isFinite(octaves) ? octaves : 1));
+  const lac = Number.isFinite(lacunarity) && lacunarity > 0 ? lacunarity : 2.0;
+  const g = Number.isFinite(gain) && gain > 0 ? gain : 0.5;
+  const baseSeed = seed | 0;
+
+  let freq = 1;
+  let amp = 1;
+  let sum = 0;
+  let ampSum = 0;
+
+  for (let i = 0; i < oct; i++) {
+    const octSeed = (baseSeed + Math.imul(i, 1013904223)) | 0;
+    const n = gradientNoise2D(x * freq, z * freq, octSeed);
+    const t = 1 - Math.sqrt(n * n + SMOOTH_RIDGE_EPS_SQ) + SMOOTH_RIDGE_EPS;
+    const r = (t * t - SMOOTH_RIDGE_MIN_RAW) * SMOOTH_RIDGE_INV_SPAN;
+    sum += amp * r;
+    ampSum += amp;
+    freq *= lac;
+    amp *= g;
+  }
+
+  if (ampSum <= 0 || !Number.isFinite(ampSum)) return 0;
+  return clamp(sum / ampSum, 0, 1);
+}
+
 /**
  * Multi-octave ridged 2D noise normalized to [0, 1].
  * Uses squared ridge shaping: `r = (1 - Math.abs(n)) * (1 - Math.abs(n))` in [0, 1].

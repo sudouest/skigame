@@ -37,6 +37,7 @@ export class BackpackStack {
       'BackpackStackStd',
     );
     this.stdMesh.frustumCulled = false;
+    this.stdMesh.castShadow = true;
     this.stdMesh.count = 0;
 
     this.goldMesh = gfx.createInstancedMesh(
@@ -46,6 +47,7 @@ export class BackpackStack {
       'BackpackStackGold',
     );
     this.goldMesh.frustumCulled = false;
+    this.goldMesh.castShadow = true;
     this.goldMesh.count = 0;
 
     backpackAnchor.add(this.stdMesh, this.goldMesh);

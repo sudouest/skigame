@@ -278,6 +278,8 @@ describe('TrailSegment & TrailWindow invariants', () => {
 
     expect(outCenter.inDivider).toBe(true);
     expect(outCenter.localHeight).toBeGreaterThan(1.0);
+    expect(div.maxHeight).toBeLessThanOrEqual(1.35);
+    expect(div.maxHalfWidth).toBeGreaterThanOrEqual(3.0);
     expect(outLeft.inDivider).toBe(false);
     expect(outLeft.surfaceType).toBe(div.leftLaneSurface);
     expect(outRight.surfaceType).toBe(div.rightLaneSurface);
@@ -318,5 +320,6 @@ describe('TrailSegment & TrailWindow invariants', () => {
     sim.savePreviousPoses();
     sim.step(1 / 60, intent);
     expect(sim.getState().tickCount).toBe(1);
+    sim.dispose();
   });
 });

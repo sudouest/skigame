@@ -17,7 +17,6 @@ import {
   type CameraPose,
   type DebugDrawView,
   type EntityPoolViews,
-  type MountainFieldView,
   type PlayerIntent,
   type ReadonlySimState,
   type RebaseInfo,
@@ -26,6 +25,7 @@ import {
   type SpineForkMeta,
   type SpineFrameOut,
   type SurfaceSample,
+  type TerrainFieldView,
   type TrailWindowView,
 } from './contracts';
 import { CreatureSystem } from './creatureSystem';
@@ -33,12 +33,16 @@ import { DebugDrawBuffer } from './debugDrawBuffer';
 import { EntityPools } from './entityPools';
 import { LayoutEngine, PacingDirector } from './layoutEngine';
 import { MountainField } from './mountainField';
+import { JoltContactSolver } from './physics/joltContactSolver';
+import { resolveDefaultPhysicsRuntime, type JoltRuntime } from './physics/joltRuntime';
+import type { WorldContactSolver } from './physics/worldContactSolver';
 import {
   copySkierPose,
   createMutableSkierPose,
-  SKI_GRAVITY,
+  createPhysicsStepOutcome,
   SkiPhysics,
   type MutableSkierPose,
+  type PhysicsStepOutcome,
 } from './skiPhysics';
 import { MountainSurfaceSampler } from './surfaceSampler';
 import type { TrailSegment } from './trailSegment';
@@ -56,6 +60,10 @@ export interface SkiSimulationOptions {
   readonly eventBus?: EventBus<SimEventMap>;
   readonly debugDrawEnabled?: boolean;
   readonly blizzardEnabled?: boolean;
+  /** Dependency-injected Jolt physics runtime (zero singletons). */
+  readonly physicsRuntime?: JoltRuntime;
+  /** Optional custom Layer B WorldContactSolver override. */
+  readonly contactSolver?: WorldContactSolver;
 }
 
 interface MutableSimState {
@@ -103,7 +111,7 @@ interface MutableSimState {
   };
 
   readonly trailWindow: TrailWindowView;
-  readonly mountainField: MountainFieldView;
+  readonly mountainField: TerrainFieldView;
   readonly rebase: {
     rebaseCount: number;
     offsetX: number;
@@ -133,9 +141,25 @@ export class SkiSimulation {
   private readonly surfaceSampler: MountainSurfaceSampler;
   private readonly pools: EntityPools;
   private readonly physics: SkiPhysics;
+  private readonly contactSolver: WorldContactSolver;
+  private readonly ownsContactSolver: boolean;
   private readonly creatureSystem: CreatureSystem;
   private readonly cameraRig: CameraRig;
   private readonly debugDrawBuffer: DebugDrawBuffer;
+  private disposed = false;
+  private readonly stepOutcomeScratch: PhysicsStepOutcome = createPhysicsStepOutcome();
+  private readonly physicsStepCtx: {
+    skierDef: SkierDef;
+    readonly surfaceQuery: MountainSurfaceSampler;
+    readonly terrain: MountainField;
+    readonly pools: EntityPools;
+    readonly contactSolver: WorldContactSolver;
+    forkBumper: SpineForkMeta | null;
+    readonly surface: SurfaceSample;
+    readonly ramps: EntityPools['ramps'];
+    readonly skiTracks: EntityPools['skiTracks'];
+    invulnerable: boolean;
+  };
 
   private readonly hazardGrid = new SpatialGrid<number>(16);
   private readonly presentGrid = new SpatialGrid<number>(16);
@@ -147,6 +171,7 @@ export class SkiSimulation {
   private startStageId: string;
   private scatterRng: SeededRng;
   private wipeoutRecoveryMode: 'local' | 'safeX' = 'local';
+  private chasmTrapTimerSec = 0;
   private readonly recoverFrameScratch: SpineFrameOut = createSpineFrameOut();
 
   // Pre-allocated synchronous EventBus payloads (zero hot-loop heap allocations)
@@ -282,6 +307,22 @@ export class SkiSimulation {
     this.layoutEngine = new LayoutEngine(this.seed, this.pacingDirector);
     this.pools = new EntityPools();
     this.physics = new SkiPhysics();
+    if (options.contactSolver) {
+      this.contactSolver = options.contactSolver;
+      this.ownsContactSolver = false;
+    } else {
+      const runtime = options.physicsRuntime ?? resolveDefaultPhysicsRuntime();
+      if (!runtime) {
+        throw new Error(
+          'SkiSimulation requires options.physicsRuntime (JoltRuntime) or setDefaultPhysicsRuntime(runtime)',
+        );
+      }
+      this.contactSolver = new JoltContactSolver(runtime, {
+        skierRadius: this.skierDef.stats.collisionRadius,
+        skierHeight: this.skierDef.stats.skierHeight,
+      });
+      this.ownsContactSolver = true;
+    }
     this.creatureSystem = new CreatureSystem();
     this.cameraRig = new CameraRig();
     this.debugDrawBuffer = new DebugDrawBuffer();
@@ -296,6 +337,18 @@ export class SkiSimulation {
     });
     this.mountainField = new MountainField(this.trailWindow);
     this.surfaceSampler = new MountainSurfaceSampler(this.trailWindow, this.mountainField);
+    this.physicsStepCtx = {
+      skierDef: this.skierDef,
+      surfaceQuery: this.surfaceSampler,
+      terrain: this.mountainField,
+      pools: this.pools,
+      contactSolver: this.contactSolver,
+      forkBumper: null,
+      surface: surfaceSample,
+      ramps: this.pools.ramps,
+      skiTracks: this.pools.skiTracks,
+      invulnerable: false,
+    };
 
     this.state = {
       tickCount: 0,
@@ -363,6 +416,14 @@ export class SkiSimulation {
     return this.state;
   }
 
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    if (this.ownsContactSolver) {
+      this.contactSolver.dispose();
+    }
+  }
+
   setPaused(paused: boolean): void {
     this.state.paused = paused;
   }
@@ -426,6 +487,7 @@ export class SkiSimulation {
     this.presentGrid.clear();
     this.deliveryGrid.clear();
     this.physics.reset();
+    this.contactSolver.reset();
     this.layoutEngine.reset(seed);
 
     this.state.tickCount = 0;
@@ -436,6 +498,7 @@ export class SkiSimulation {
     this.state.gameOver = false;
     this.state.skierState = 'skiing';
     this.wipeoutRecoveryMode = 'local';
+    this.chasmTrapTimerSec = 0;
     this.state.wipeoutTimerSec = 0;
     this.state.invulnerableTimerSec = 0;
     this.state.score = 0;
@@ -455,7 +518,7 @@ export class SkiSimulation {
     this.state.rebase.lastDeltaY = 0;
     this.state.rebase.lastDeltaZ = 0;
     this.mountainField.setWorldSeed(normalizeSeedUint(this.seed));
-    this.mountainField.setOriginOffset(0, 0);
+    this.mountainField.setOriginOffset(0, 0, 0);
 
     // Reset trail window after clearing pools so segment creation bakes cleanly into empty pools
     this.trailWindow.reset(seed, this.startStageId);
@@ -486,6 +549,26 @@ export class SkiSimulation {
     curr.braking = false;
     copySkierPose(curr, this.state.prevSkier);
 
+    this.contactSolver.syncWorld(
+      curr.posX,
+      curr.posY,
+      curr.posZ,
+      1 / 60,
+      this.mountainField,
+      this.pools,
+      this.selectNearestForkBumper(curr.posX, curr.posZ),
+      true,
+    );
+    this.contactSolver.teleportCharacter(
+      curr.posX,
+      curr.posY,
+      curr.posZ,
+      curr.velX,
+      curr.velY,
+      curr.velZ,
+    );
+    this.physics.syncSolverPose(curr.posX, curr.posY, curr.posZ);
+
     this.state.activeStageId = this.trailWindow.curr.stageId;
     this.syncWeatherImmediate(this.trailWindow.curr.stage.weather);
     this.cameraRig.reset(curr, this.state.surfaceSample, this.surfaceSampler);
@@ -493,7 +576,7 @@ export class SkiSimulation {
   }
 
   step(fixedDt: number, intent: PlayerIntent): void {
-    if (this.state.paused || this.state.gameOver) return;
+    if (this.disposed || this.state.paused || this.state.gameOver) return;
     const dt = clamp(fixedDt, 0, 0.05);
     if (dt <= 0) return;
 
@@ -514,60 +597,67 @@ export class SkiSimulation {
     const curr = this.state.currSkier;
     const prevX = curr.posX;
     const prevZ = curr.posZ;
+    this.resetStepOutcome();
+
+    this.physicsStepCtx.skierDef = this.skierDef;
+    this.physicsStepCtx.forkBumper = this.selectNearestForkBumper(curr.posX, curr.posZ);
+    this.physicsStepCtx.invulnerable = this.state.invulnerableTimerSec > 0;
 
     // 1. Skier physics / wipeout state machine
     if (this.state.skierState === 'skiing' || this.state.skierState === 'recovering') {
-      this.physics.stepSkiing(dt, intent, curr, {
-        skierDef: this.skierDef,
-        surfaceQuery: this.surfaceSampler,
-        forkBumper: this.selectNearestForkBumper(curr.posX, curr.posZ),
-        surface: this.state.surfaceSample,
-        ramps: this.pools.ramps,
-        skiTracks: this.pools.skiTracks,
-      });
+      this.physics.stepSkiing(dt, intent, curr, this.physicsStepCtx, this.stepOutcomeScratch);
       if (this.state.skierState === 'recovering' && this.state.invulnerableTimerSec <= 1.2) {
         this.state.skierState = 'skiing';
       }
 
-      // Chasm fall hazard bypasses invulnerability and triggers safeX recovery
+      // Apply physical wall-crash / wall-scrape / hard-landing impacts (gated by invulnerability)
+      const outcome = this.stepOutcomeScratch;
+      let triggeredWipeout = false;
+      if (this.state.invulnerableTimerSec <= 0) {
+        if (outcome.wallImpactKind === 'wall_crash') {
+          this.wipeoutRecoveryMode = 'safeX';
+          this.triggerImpact('wall_crash', 'wipeout', 2, 0.15);
+          triggeredWipeout = true;
+        } else if (outcome.wallImpactKind === 'wall_scrape') {
+          this.triggerImpact('wall_scrape', 'stumble', 1, 0.6);
+        } else if (outcome.landingImpactKind === 'hard_landing_wipeout') {
+          this.wipeoutRecoveryMode = 'local';
+          this.triggerImpact('hard_landing', 'wipeout', 2, 0.15);
+          triggeredWipeout = true;
+        } else if (outcome.landingImpactKind === 'hard_landing_stumble') {
+          this.triggerImpact('hard_landing', 'stumble', 1, 0.58);
+        }
+      }
+
+      // Relative-relief chasm fall hazard bypasses invulnerability and triggers safeX recovery.
+      // Also guard against stalling deep inside a macro-blended chasm bowl (prevents soft-locks!).
       const surf = this.state.surfaceSample;
+      const chasmDrop = surf.macroY - curr.posY;
       if (
+        !triggeredWipeout &&
         surf.inChasmZone &&
         surf.chasmWipeoutDepth > 0 &&
-        curr.posY < surf.nearestSpineY - surf.chasmWipeoutDepth
+        chasmDrop >= surf.chasmWipeoutDepth * 0.5 &&
+        curr.speed < 2.5
       ) {
+        this.chasmTrapTimerSec += dt;
+      } else {
+        this.chasmTrapTimerSec = 0;
+      }
+
+      if (
+        !triggeredWipeout &&
+        surf.inChasmZone &&
+        surf.chasmWipeoutDepth > 0 &&
+        (chasmDrop >= surf.chasmWipeoutDepth || this.chasmTrapTimerSec >= 1.0)
+      ) {
+        this.chasmTrapTimerSec = 0;
         this.wipeoutRecoveryMode = 'safeX';
         this.triggerImpact('chasm_fall', 'wipeout', 2, 0.0);
       }
     } else if (this.state.skierState === 'wipeout') {
-      // Slide & tumble (integrating gravity if falling into a chasm), then recover
-      const dampFactor = Math.exp(-4.5 * dt);
-      curr.velX *= dampFactor;
-      curr.velZ *= dampFactor;
-      curr.posX += curr.velX * dt;
-      curr.posZ += curr.velZ * dt;
-      this.surfaceSampler.sampleSurface(
-        curr.posX,
-        curr.posZ,
-        this.state.surfaceSample.segmentId,
-        this.state.surfaceSample.s,
-        this.state.surfaceSample,
-      );
-      curr.groundY = this.state.surfaceSample.groundY;
-      if (curr.posY > curr.groundY) {
-        curr.velY -= SKI_GRAVITY * dt;
-        curr.posY = Math.max(curr.groundY, curr.posY + curr.velY * dt);
-        if (curr.posY <= curr.groundY) {
-          curr.velY = 0;
-        }
-      } else {
-        curr.posY = curr.groundY;
-        curr.velY = 0;
-      }
-      curr.normalX = this.state.surfaceSample.normalX;
-      curr.normalY = this.state.surfaceSample.normalY;
-      curr.normalZ = this.state.surfaceSample.normalZ;
-      curr.speed = Math.hypot(curr.velX, curr.velY, curr.velZ);
+      // Solid 3D wipeout tumble through Jolt (3D tangential gravity + tumble friction + solid deflection)
+      this.physics.stepWipeout(dt, curr, this.physicsStepCtx);
 
       this.state.wipeoutTimerSec = Math.max(0, this.state.wipeoutTimerSec - dt);
       if (this.state.wipeoutTimerSec <= 0) {
@@ -623,6 +713,7 @@ export class SkiSimulation {
         this.layoutEngine.pruneSegment(prunedId);
       }
       this.rebuildSpatialGrids();
+      this.contactSolver.onPoolsPruned();
       this.surfaceSampler.sampleSurface(
         curr.posX,
         curr.posZ,
@@ -663,6 +754,17 @@ export class SkiSimulation {
     );
   }
 
+  private resetStepOutcome(): void {
+    this.stepOutcomeScratch.wallImpactKind = 'none';
+    this.stepOutcomeScratch.wallImpactSpeed = 0;
+    this.stepOutcomeScratch.landingImpactKind = 'none';
+    this.stepOutcomeScratch.landingImpactSpeed = 0;
+    this.stepOutcomeScratch.hitHazardIndex = -1;
+    this.stepOutcomeScratch.hitCreatureIndex = -1;
+    this.stepOutcomeScratch.hitForkBumper = false;
+    this.stepOutcomeScratch.rampLaunched = false;
+  }
+
   private onSegmentCreated(segment: TrailSegment): void {
     if (!this.state) return;
     const startHazard = this.pools.hazards.count;
@@ -673,7 +775,7 @@ export class SkiSimulation {
       this.state.maxCarryCapacity > 0
         ? this.state.carriedCount / this.state.maxCarryCapacity
         : 0;
-    this.layoutEngine.bakeSegment(segment, this.pools, fillRatio);
+    this.layoutEngine.bakeSegment(segment, this.pools, fillRatio, this.mountainField);
 
     for (let i = startHazard; i < this.pools.hazards.count; i++) {
       this.hazardGrid.insert(
@@ -852,14 +954,24 @@ export class SkiSimulation {
   private checkObstacleAndCreatureCollisions(): void {
     const curr = this.state.currSkier;
 
-    // 1. World-space Hazards via SpatialGrid
+    // 1. Prefer swept Jolt CharacterVirtual hazard contact (anti-tunneling at 36 m/s),
+    // falling back to SpatialGrid overlap for direct test teleports
     this.hitHazardIndex = -1;
-    this.hazardGrid.forEachInRadius(
-      curr.posX,
-      curr.posZ,
-      this.skierDef.stats.collisionRadius + 2.5,
-      this.visitHazardCollision,
-    );
+    const sweptHazIdx = this.stepOutcomeScratch.hitHazardIndex;
+    if (
+      sweptHazIdx >= 0 &&
+      sweptHazIdx < this.pools.hazards.count &&
+      this.pools.hazards.triggered[sweptHazIdx] === 0
+    ) {
+      this.hitHazardIndex = sweptHazIdx;
+    } else {
+      this.hazardGrid.forEachInRadius(
+        curr.posX,
+        curr.posZ,
+        this.skierDef.stats.collisionRadius + 2.5,
+        this.visitHazardCollision,
+      );
+    }
 
     if (this.hitHazardIndex >= 0) {
       const idx = this.hitHazardIndex;
@@ -878,8 +990,23 @@ export class SkiSimulation {
       }
     }
 
-    // 2. World-space Patrolling Creatures
+    // 2. World-space Patrolling Creatures (swept Jolt contact + overlap fallback)
     const creatures = this.pools.creatures;
+    const sweptCrIdx = this.stepOutcomeScratch.hitCreatureIndex;
+    if (sweptCrIdx >= 0 && sweptCrIdx < creatures.count) {
+      const defId = creatures.defIds[sweptCrIdx];
+      const def = defId ? getCreatureDef(defId) : undefined;
+      if (def) {
+        this.wipeoutRecoveryMode = 'local';
+        this.triggerImpact(
+          def.id,
+          def.impact.effect === 'stumble' ? 'stumble' : 'wipeout',
+          def.impact.presentsDropped,
+          def.impact.speedRetention,
+        );
+        return;
+      }
+    }
     for (let i = 0; i < creatures.count; i++) {
       const cx = creatures.posX[i]!;
       const cz = creatures.posZ[i]!;
@@ -938,9 +1065,19 @@ export class SkiSimulation {
       );
     }
 
+    // Scale ALL THREE 3D velocity components together (#23 M2: prevents unscaled velY slams after stumble)
     curr.velX *= speedRetention;
+    curr.velY *= speedRetention;
     curr.velZ *= speedRetention;
     curr.speed = Math.hypot(curr.velX, curr.velY, curr.velZ);
+    this.contactSolver.teleportCharacter(
+      curr.posX,
+      curr.posY,
+      curr.posZ,
+      curr.velX,
+      curr.velY,
+      curr.velZ,
+    );
 
     if (effect === 'stumble') {
       this.state.invulnerableTimerSec = 0.55;
@@ -1001,6 +1138,7 @@ export class SkiSimulation {
   }
 
   private recoverFromWipeout(): void {
+    this.chasmTrapTimerSec = 0;
     const curr = this.state.currSkier;
     const oldX = curr.posX;
     const oldY = curr.posY;
@@ -1057,6 +1195,25 @@ export class SkiSimulation {
     curr.grounded = true;
     curr.braking = false;
     this.physics.reset();
+    this.contactSolver.syncWorld(
+      curr.posX,
+      curr.posY,
+      curr.posZ,
+      1 / 60,
+      this.mountainField,
+      this.pools,
+      this.selectNearestForkBumper(curr.posX, curr.posZ),
+      false,
+    );
+    this.contactSolver.teleportCharacter(
+      curr.posX,
+      curr.posY,
+      curr.posZ,
+      curr.velX,
+      curr.velY,
+      curr.velZ,
+    );
+    this.physics.syncSolverPose(curr.posX, curr.posY, curr.posZ);
     this.wipeoutRecoveryMode = 'local';
 
     this.state.skierState = 'skiing';
@@ -1100,14 +1257,21 @@ export class SkiSimulation {
 
     // Refresh surfaceSample elevation references so they match the shifted coordinate frame
     this.state.surfaceSample.groundY -= dy;
+    this.state.surfaceSample.macroY -= dy;
     this.state.surfaceSample.nearestSpineY -= dy;
+    this.contactSolver.shiftOrigin(dx, dy, dz);
+    this.physics.shiftOrigin(dx, dy, dz);
     this.physics.invalidateSurfaceCache();
 
     this.state.rebase.rebaseCount += 1;
     this.state.rebase.offsetX += dx;
     this.state.rebase.offsetY += dy;
     this.state.rebase.offsetZ += dz;
-    this.mountainField.setOriginOffset(this.state.rebase.offsetX, this.state.rebase.offsetZ);
+    this.mountainField.setOriginOffset(
+      this.state.rebase.offsetX,
+      this.state.rebase.offsetZ,
+      this.state.rebase.offsetY,
+    );
     this.state.rebase.lastDeltaX = dx;
     this.state.rebase.lastDeltaY = dy;
     this.state.rebase.lastDeltaZ = dz;
