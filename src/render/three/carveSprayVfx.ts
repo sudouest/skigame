@@ -370,8 +370,8 @@ diffuseColor.a *= vParticleAlpha;`,
     this.wasGrounded = skierPose.grounded;
     this.hasPrevPose = true;
 
-    // 2. Continuous outside-ski carve & snowplow spray while grounded
-    if (skierPose.grounded && skierPose.speed > 2.2 && safeDt > 0) {
+    // 2. Continuous outside-ski carve & snowplow spray while grounded (suppressed while walking)
+    if (skierPose.grounded && !skierPose.walking && skierPose.speed > 2.2 && safeDt > 0) {
       const absCarve = Math.abs(skierPose.carveAngleRad);
       const brakeTerm = skierPose.braking ? 0.8 : 0;
       const intensity = skierPose.speed * (absCarve + brakeTerm);

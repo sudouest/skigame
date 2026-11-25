@@ -443,7 +443,7 @@ export class ThreeRenderer {
       simState.prevSkier.posZ + (simState.currSkier.posZ - simState.prevSkier.posZ) * t;
     this.updateDirectionalShadowFrustum(interpSkierX, interpSkierY, interpSkierZ, camFwdX, camFwdZ);
 
-    this.skierRig.sync(simState, alpha);
+    this.skierRig.sync(simState, alpha, simState.paused ? 0 : frameDtSec);
     this.backpackStack.sync(simState, frameDtSec);
 
     this.tossedPresents.sync(simState, alpha);

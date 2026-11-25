@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FIXED_DT } from '../../core/fixedLoop';
+import { CameraRig } from '../cameraRig';
 import { createMutablePlayerIntent, createSpineFrameOut, createSurfaceSample } from '../contracts';
 import { SkiSimulation } from '../skiSimulation';
 import { TrailWindow } from '../trailWindow';
@@ -924,5 +925,131 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     expect(oState.surfaceSample.onPiste).toBe(false);
     expect(Math.hypot(oState.currSkier.posX - offX, oState.currSkier.posZ - offZ)).toBeLessThan(3.0);
     offSim.dispose();
+  });
+
+  it('tracks uphill walking heading in CameraRig and keeps chasm_fall trap active if walking in a chasm', () => {
+    // 1. CameraRig smoothly rotates behind skier.headingRad while walking (even facing away from downhill)
+    const sim = new SkiSimulation({ seed: 22, startStageId: 'sunny-blue' });
+    const baseState = sim.getState();
+    const camRig = new CameraRig();
+    const walkingPose = {
+      ...baseState.currSkier,
+      headingRad: Math.PI * 0.85,
+      speed: 2.2,
+      walking: true,
+      walkPhaseRad: 1.0,
+    };
+    const surface = { ...baseState.surfaceSample };
+    const surfaceQuery = {
+      sampleSurface: (
+        px: number,
+        pz: number,
+        hintSegId: number,
+        hintS: number,
+        out: ReturnType<typeof createSurfaceSample>,
+      ) => {
+        const s = sim.sampleSurface(px, pz, hintSegId, hintS);
+        Object.assign(out, s);
+        return out;
+      },
+      evaluateHeight: (wx: number, wz: number) => baseState.mountainField.evaluateHeight(wx, wz),
+    };
+    camRig.reset({ ...baseState.currSkier, headingRad: 0 }, surface, surfaceQuery);
+    for (let i = 0; i < 60; i++) {
+      camRig.capturePrevious();
+      camRig.update(FIXED_DT, walkingPose, surface, surfaceQuery);
+    }
+    const camPose = camRig.getReadonlyCurr();
+    const camFwdX = camPose.lookAtX - camPose.posX;
+    const camFwdZ = camPose.lookAtZ - camPose.posZ;
+    const camYaw = Math.atan2(-camFwdX, -camFwdZ);
+    const yawErr = Math.abs(
+      Math.atan2(
+        Math.sin(camYaw - walkingPose.headingRad),
+        Math.cos(camYaw - walkingPose.headingRad),
+      ),
+    );
+    expect(yawErr).toBeLessThan(0.35);
+
+    // Crossing downhillYaw +/- pi while walking dead-uphill must be smooth (zero ~29 deg antipodal whip)
+    let prevCamYaw = camYaw;
+    let maxWalkYawJump = 0;
+    for (let i = 0; i < 40; i++) {
+      const h = Math.atan2(Math.sin(Math.PI - 0.15 + i * 0.008), Math.cos(Math.PI - 0.15 + i * 0.008));
+      camRig.capturePrevious();
+      camRig.update(FIXED_DT, { ...walkingPose, headingRad: h }, surface, surfaceQuery);
+      const cp = camRig.getReadonlyCurr();
+      const cy = Math.atan2(-(cp.lookAtX - cp.posX), -(cp.lookAtZ - cp.posZ));
+      const dYaw = Math.abs(Math.atan2(Math.sin(cy - prevCamYaw), Math.cos(cy - prevCamYaw)));
+      if (dYaw > maxWalkYawJump) maxWalkYawJump = dYaw;
+      prevCamYaw = cy;
+    }
+    expect(maxWalkYawJump).toBeLessThan(0.12);
+    sim.dispose();
+
+    // 2. Deep chasm trap still triggers chasm_fall wipeout even if currSkier.walking === true
+    let chasmWipeout = false;
+    const chasmSim = new SkiSimulation({ seed: 100, startStageId: 'icy-black' });
+    const cState = chasmSim.getState();
+    chasmSim.eventBus.on('PLAYER_WIPEOUT', (ev) => {
+      if (ev.hazardId === 'chasm_fall') chasmWipeout = true;
+    });
+    const cf = createSpineFrameOut();
+    let chasmX = 0;
+    let chasmZ = 0;
+    let chasmSample = createSurfaceSample();
+    let foundChasm = false;
+    for (let s = 40; s <= 220 && !foundChasm; s += 20) {
+      cState.trailWindow.curr.sampleSpineFrame(s, cf);
+      const cRightX = Math.cos(cf.yawRad);
+      const cRightZ = -Math.sin(cf.yawRad);
+      for (let off = 24; off <= 56; off += 8) {
+        const cx = cf.posX + cRightX * (cf.halfWidth + off);
+        const cz = cf.posZ + cRightZ * (cf.halfWidth + off);
+        const sample = chasmSim.sampleSurface(cx, cz, cState.trailWindow.curr.id, s);
+        if (
+          sample.inChasmZone &&
+          sample.chasmWipeoutDepth > 0 &&
+          sample.macroY - sample.groundY >= sample.chasmWipeoutDepth * 0.75
+        ) {
+          chasmX = cx;
+          chasmZ = cz;
+          chasmSample = sample;
+          foundChasm = true;
+          break;
+        }
+      }
+    }
+    expect(foundChasm).toBe(true);
+
+    const cInternal = cState as unknown as {
+      currSkier: {
+        posX: number;
+        posY: number;
+        posZ: number;
+        velX: number;
+        velY: number;
+        velZ: number;
+        walking: boolean;
+      };
+      surfaceSample: ReturnType<typeof createSurfaceSample>;
+    };
+    cInternal.currSkier.posX = chasmX;
+    cInternal.currSkier.posZ = chasmZ;
+    cInternal.currSkier.posY = chasmSample.groundY;
+    cInternal.currSkier.velX = 0;
+    cInternal.currSkier.velY = 0;
+    cInternal.currSkier.velZ = 0;
+    cInternal.currSkier.walking = true;
+    cInternal.surfaceSample.segmentId = chasmSample.segmentId;
+    cInternal.surfaceSample.s = chasmSample.s;
+
+    const zeroIntent = createMutablePlayerIntent();
+    for (let t = 0; t < 150 && !chasmWipeout; t++) {
+      chasmSim.savePreviousPoses();
+      chasmSim.step(FIXED_DT, zeroIntent);
+    }
+    expect(chasmWipeout).toBe(true);
+    chasmSim.dispose();
   });
 });

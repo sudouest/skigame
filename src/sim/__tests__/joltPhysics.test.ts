@@ -1128,4 +1128,233 @@ describe('Jolt Physics WASM (M3) — Zero-Leak, 3D Dynamics, Ramps, Crests & Sol
       solver.dispose();
     }
   });
+
+  it('walks uphill over a crest when stalled anywhere (off-piste and on-piste), respects gentle vs steep rock, brake, and jump exits', () => {
+    const runtime = resolveDefaultPhysicsRuntime()!;
+    const skierDef = getSkierDef('skier_alpine')!;
+
+    // 1. Off-piste ridge profile: rises 10 deg uphill from z=0 to z=-8, then drops 14 deg downhill past z=-8
+    const upTan = Math.tan(degToRad(10));
+    const downTan = Math.tan(degToRad(14));
+    let onPisteMode = false;
+    const ridgeHarness = createAnalyticHarness({
+      heightAt: (_x, z) => (z >= -8 ? -z * upTan : 8 * upTan + (z + 8) * downTan),
+      surfaceTypeAt: () => (onPisteMode ? 'packed' : 'powder'),
+      onPisteAt: () => onPisteMode,
+    });
+
+    const pools = new EntityPools();
+    const solver = new JoltContactSolver(runtime);
+    const physics = new SkiPhysics();
+    const pose = createMutableSkierPose();
+    const surf = createSurfaceSample();
+    const outcome = createPhysicsStepOutcome();
+    const intent = createMutablePlayerIntent();
+    const ctx: PhysicsStepContext = {
+      skierDef,
+      surfaceQuery: ridgeHarness.surfaceQuery,
+      terrain: ridgeHarness.terrain,
+      pools,
+      contactSolver: solver,
+      forkBumper: null,
+      surface: surf,
+      ramps: pools.ramps,
+      skiTracks: pools.skiTracks,
+      invulnerable: false,
+    };
+
+    try {
+      // Off-piste stall at z = -1 facing uphill (-Z)
+      pose.posX = 0;
+      pose.posZ = -1;
+      pose.posY = ridgeHarness.terrain.evaluateHeight(0, -1);
+      pose.velX = 0;
+      pose.velY = 0;
+      pose.velZ = 0;
+      pose.headingRad = 0;
+      pose.grounded = true;
+      pose.walking = false;
+      pose.walkPhaseRad = 0;
+      physics.reset();
+      solver.reset();
+
+      let enteredWalk = false;
+      let trackCountDuringWalkStart = -1;
+      let trackCountDuringWalkEnd = -1;
+      let maxPhase = 0;
+      let resumedSkiingAfterCrest = false;
+      for (let t = 0; t < 420; t++) {
+        physics.stepSkiing(FIXED_DT, intent, pose, ctx, outcome);
+        if (pose.walking && !enteredWalk) {
+          enteredWalk = true;
+          trackCountDuringWalkStart = pools.skiTracks.count;
+        }
+        if (pose.walking) {
+          if (pose.walkPhaseRad > maxPhase) maxPhase = pose.walkPhaseRad;
+          trackCountDuringWalkEnd = pools.skiTracks.count;
+        } else if (enteredWalk && pose.posZ < -8.5 && pose.speed > 3.5) {
+          resumedSkiingAfterCrest = true;
+          break;
+        }
+      }
+
+      expect(enteredWalk).toBe(true);
+      expect(maxPhase).toBeGreaterThan(Math.PI * 2);
+      expect(pose.posZ).toBeLessThan(-8.5);
+      expect(resumedSkiingAfterCrest).toBe(true);
+      // Only at most the clean track-break sample pushed when walk starts
+      expect(trackCountDuringWalkEnd - trackCountDuringWalkStart).toBeLessThanOrEqual(1);
+
+      // 2. Trigger anywhere: flat on-piste stall enters walking, brake cancels walking, jump exits walking
+      onPisteMode = true;
+      const flatHarness = createAnalyticHarness({
+        heightAt: () => 0,
+        surfaceTypeAt: () => 'packed',
+        onPisteAt: () => true,
+      });
+      const flatCtx: PhysicsStepContext = {
+        ...ctx,
+        surfaceQuery: flatHarness.surfaceQuery,
+        terrain: flatHarness.terrain,
+      };
+      pose.posX = 0;
+      pose.posY = 0;
+      pose.posZ = 0;
+      pose.velX = 0;
+      pose.velY = 0;
+      pose.velZ = 0;
+      pose.headingRad = 0;
+      pose.grounded = true;
+      pose.walking = false;
+      pose.walkPhaseRad = 0;
+      physics.reset();
+      solver.reset();
+
+      for (let t = 0; t < 30; t++) {
+        physics.stepSkiing(FIXED_DT, intent, pose, flatCtx, outcome);
+      }
+      expect(pose.walking).toBe(true);
+      expect(pose.speed).toBeGreaterThan(2.5);
+
+      // Brake stops walking and brings skier to a halt -> releasing brake re-enters walking -> jump exits walking into air
+      const brakeIntent = createMutablePlayerIntent();
+      brakeIntent.brake = true;
+      for (let t = 0; t < 15; t++) {
+        physics.stepSkiing(FIXED_DT, brakeIntent, pose, flatCtx, outcome);
+      }
+      expect(pose.walking).toBe(false);
+      expect(pose.speed).toBeLessThan(0.5);
+
+      for (let t = 0; t < 30; t++) {
+        physics.stepSkiing(FIXED_DT, intent, pose, flatCtx, outcome);
+      }
+      expect(pose.walking).toBe(true);
+      const jumpIntent = createMutablePlayerIntent();
+      jumpIntent.jumpPressed = true;
+      physics.stepSkiing(FIXED_DT, jumpIntent, pose, flatCtx, outcome);
+      expect(pose.walking).toBe(false);
+      expect(pose.grounded).toBe(false);
+    } finally {
+      solver.dispose();
+    }
+
+    // 3. Gentle rock (20 deg) allows slower walking; steep rock (45 deg) blocks walking
+    const testRockSlope = (slopeDeg: number): { walking: boolean; speed: number } => {
+      const slopeTan = Math.tan(degToRad(slopeDeg));
+      const rockH = createAnalyticHarness({
+        heightAt: (_x, z) => -z * slopeTan,
+        surfaceTypeAt: () => 'rock',
+        onPisteAt: () => false,
+      });
+      const rSolver = new JoltContactSolver(runtime);
+      const rPhysics = new SkiPhysics();
+      const rPose = createMutableSkierPose();
+      const rSurf = createSurfaceSample();
+      const rOut = createPhysicsStepOutcome();
+      const rPools = new EntityPools();
+      const rCtx: PhysicsStepContext = {
+        skierDef,
+        surfaceQuery: rockH.surfaceQuery,
+        terrain: rockH.terrain,
+        pools: rPools,
+        contactSolver: rSolver,
+        forkBumper: null,
+        surface: rSurf,
+        ramps: rPools.ramps,
+        skiTracks: rPools.skiTracks,
+        invulnerable: false,
+      };
+      try {
+        rPose.posX = 0;
+        rPose.posY = 0;
+        rPose.posZ = 0;
+        rPose.velX = 0;
+        rPose.velY = 0;
+        rPose.velZ = 0;
+        rPose.headingRad = 0;
+        rPose.grounded = true;
+        rPose.walking = false;
+        rPose.walkPhaseRad = 0;
+        for (let t = 0; t < 40; t++) {
+          rPhysics.stepSkiing(FIXED_DT, intent, rPose, rCtx, rOut);
+        }
+        return { walking: rPose.walking, speed: rPose.speed };
+      } finally {
+        rSolver.dispose();
+      }
+    };
+
+    const gentleRock = testRockSlope(20);
+    expect(gentleRock.walking).toBe(true);
+    expect(gentleRock.speed).toBeGreaterThan(0.8);
+    expect(gentleRock.speed).toBeLessThan(2.5);
+
+    const steepRock = testRockSlope(45);
+    expect(steepRock.walking).toBe(false);
+
+    // 4. Gliding onto flat on-piste snow ('packed' and 'ice') from positive speed decelerates cleanly into walk
+    for (const flatSurface of ['packed', 'ice'] as const) {
+      const flatIceHarness = createAnalyticHarness({
+        heightAt: () => 0,
+        surfaceTypeAt: () => flatSurface,
+        onPisteAt: () => true,
+      });
+      const fSolver = new JoltContactSolver(runtime);
+      const fPhysics = new SkiPhysics();
+      const fPose = createMutableSkierPose();
+      const fSurf = createSurfaceSample();
+      const fOut = createPhysicsStepOutcome();
+      const fPools = new EntityPools();
+      const fCtx: PhysicsStepContext = {
+        skierDef,
+        surfaceQuery: flatIceHarness.surfaceQuery,
+        terrain: flatIceHarness.terrain,
+        pools: fPools,
+        contactSolver: fSolver,
+        forkBumper: null,
+        surface: fSurf,
+        ramps: fPools.ramps,
+        skiTracks: fPools.skiTracks,
+        invulnerable: false,
+      };
+      try {
+        fPose.posX = 0;
+        fPose.posY = 0;
+        fPose.posZ = 0;
+        fPose.velX = 0;
+        fPose.velY = 0;
+        fPose.velZ = -1.6;
+        fPose.headingRad = 0;
+        fPose.grounded = true;
+        fPose.walking = false;
+        fPose.walkPhaseRad = 0;
+        for (let t = 0; t < 300 && !fPose.walking; t++) {
+          fPhysics.stepSkiing(FIXED_DT, intent, fPose, fCtx, fOut);
+        }
+        expect(fPose.walking, `flat ${flatSurface} transitions from glide into walking`).toBe(true);
+      } finally {
+        fSolver.dispose();
+      }
+    }
+  });
 });

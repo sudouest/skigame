@@ -19,6 +19,8 @@ export class SkierRig {
   private readonly leanGroup: THREE.Group;
   private readonly bodyGroup: THREE.Group;
   private readonly upperBodyGroup: THREE.Group;
+  private readonly leftLegGroup: THREE.Group;
+  private readonly rightLegGroup: THREE.Group;
   private readonly leftSkiGroup: THREE.Group;
   private readonly rightSkiGroup: THREE.Group;
   private readonly leftArmGroup: THREE.Group;
@@ -26,6 +28,7 @@ export class SkierRig {
 
   private activeSkierId = '';
   private skiBankRad = 0;
+  private walkBlend = 0;
   private readonly gfx: GraphicsUtils;
   private readonly materials: SharedToonMaterials;
   private readonly outlineMat: THREE.Material;
@@ -53,18 +56,35 @@ export class SkierRig {
     this.leanGroup.add(this.bodyGroup);
 
     this.leftSkiGroup = new THREE.Group();
+    this.leftSkiGroup.name = 'SkierLeftSkiGroup';
+    this.leftSkiGroup.rotation.order = 'YXZ';
     this.leftSkiGroup.position.set(-0.22, 0.04, 0);
     this.rightSkiGroup = new THREE.Group();
+    this.rightSkiGroup.name = 'SkierRightSkiGroup';
+    this.rightSkiGroup.rotation.order = 'YXZ';
     this.rightSkiGroup.position.set(0.22, 0.04, 0);
     this.bodyGroup.add(this.leftSkiGroup, this.rightSkiGroup);
 
+    this.leftLegGroup = new THREE.Group();
+    this.leftLegGroup.name = 'SkierLeftLegGroup';
+    this.leftLegGroup.rotation.order = 'YXZ';
+    this.leftLegGroup.position.set(-0.15, 0.47, 0);
+    this.rightLegGroup = new THREE.Group();
+    this.rightLegGroup.name = 'SkierRightLegGroup';
+    this.rightLegGroup.rotation.order = 'YXZ';
+    this.rightLegGroup.position.set(0.15, 0.47, 0);
+    this.bodyGroup.add(this.leftLegGroup, this.rightLegGroup);
+
     this.upperBodyGroup = new THREE.Group();
+    this.upperBodyGroup.name = 'SkierUpperBodyGroup';
     this.upperBodyGroup.position.set(0, 0.42, 0);
     this.bodyGroup.add(this.upperBodyGroup);
 
     this.leftArmGroup = new THREE.Group();
+    this.leftArmGroup.name = 'SkierLeftArmGroup';
     this.leftArmGroup.position.set(-0.34, 0.62, 0);
     this.rightArmGroup = new THREE.Group();
+    this.rightArmGroup.name = 'SkierRightArmGroup';
     this.rightArmGroup.position.set(0.34, 0.62, 0);
     this.upperBodyGroup.add(this.leftArmGroup, this.rightArmGroup);
 
@@ -93,10 +113,12 @@ export class SkierRig {
 
     this.clearChildren(this.leftSkiGroup);
     this.clearChildren(this.rightSkiGroup);
+    this.clearChildren(this.leftLegGroup);
+    this.clearChildren(this.rightLegGroup);
     this.clearChildren(this.leftArmGroup);
     this.clearChildren(this.rightArmGroup);
 
-    // Remove previous torso/head/leg meshes in upperBodyGroup & bodyGroup except arm/backpack anchors
+    // Remove previous torso/head meshes in upperBodyGroup except arm/backpack anchors
     for (let i = this.upperBodyGroup.children.length - 1; i >= 0; i--) {
       const child = this.upperBodyGroup.children[i]!;
       if (child !== this.leftArmGroup && child !== this.rightArmGroup && child !== this.backpackAnchor) {
@@ -126,12 +148,30 @@ export class SkierRig {
     this.leftSkiGroup.add(makeSki('L'));
     this.rightSkiGroup.add(makeSki('R'));
 
-    // Torso, legs, scarf, helmet, goggles
+    // Articulated hip-pivoted legs + ski boot cuffs
+    const makeLeg = (side: string): THREE.Mesh => {
+      const geo = buildMergedColoredGeometry(
+        [
+          { geometry: new THREE.BoxGeometry(0.18, 0.32, 0.21), color: pantsColor, ty: -0.16 },
+          { geometry: new THREE.BoxGeometry(0.17, 0.14, 0.24), color: '#1e293b', ty: -0.35, tz: -0.02 },
+        ],
+        `SkierLegGeo_${skierId}_${side}`,
+        true,
+      );
+      const legMesh = this.gfx.createMesh(geo, this.materials.propToonMaterial, `SkierLeg_${side}`);
+      legMesh.castShadow = true;
+      const legOutline = this.gfx.createMesh(geo, this.outlineMat, `SkierLegOutline_${side}`);
+      legOutline.castShadow = false;
+      legMesh.add(legOutline);
+      return legMesh;
+    };
+
+    this.leftLegGroup.add(makeLeg('L'));
+    this.rightLegGroup.add(makeLeg('R'));
+
+    // Torso, scarf, helmet, goggles
     const bodyGeo = buildMergedColoredGeometry(
       [
-        // Legs
-        { geometry: new THREE.BoxGeometry(0.18, 0.42, 0.22), color: pantsColor, tx: -0.15, ty: -0.14 },
-        { geometry: new THREE.BoxGeometry(0.18, 0.42, 0.22), color: pantsColor, tx: 0.15, ty: -0.14 },
         // Jacket torso
         { geometry: new THREE.BoxGeometry(0.56, 0.62, 0.36), color: jacketColor, ty: 0.36 },
         // Scarf collar
@@ -186,7 +226,7 @@ export class SkierRig {
     }
   }
 
-  sync(simState: ReadonlySimState, alpha: number): void {
+  sync(simState: ReadonlySimState, alpha: number, frameDtSec = 1 / 60): void {
     if (simState.skierId !== this.activeSkierId) {
       this.buildMeshes(simState.skierId);
     }
@@ -216,22 +256,27 @@ export class SkierRig {
       this.rootGroup.visible = true;
     }
 
-    // Wipeout tumble vs normal skiing / braking / airborne pose
+    // Wipeout tumble vs normal skiing / braking / walking / airborne pose
     if (simState.skierState === 'wipeout') {
       const duration = Math.max(0.1, simState.wipeoutDurationSec);
       const progress = clamp(1 - simState.wipeoutTimerSec / duration, 0, 1);
       const tumbleSpin = progress * Math.PI * 4;
       this.skiBankRad = 0;
+      this.walkBlend = 0;
       this.bodyGroup.position.set(0, Math.sin(progress * Math.PI) * 0.45 + 0.25, 0);
       this.bodyGroup.rotation.set(tumbleSpin, progress * Math.PI * 2.5, Math.sin(progress * Math.PI * 3) * 0.9);
-      this.leftSkiGroup.position.y = 0.04;
-      this.rightSkiGroup.position.y = 0.04;
-      this.leftSkiGroup.rotation.y = -0.5;
-      this.rightSkiGroup.rotation.y = 0.5;
-      this.leftSkiGroup.rotation.z = 0;
-      this.rightSkiGroup.rotation.z = 0;
+      this.leftLegGroup.position.set(-0.15, 0.47, 0);
+      this.rightLegGroup.position.set(0.15, 0.47, 0);
+      this.leftLegGroup.rotation.set(0.35, 0, -0.2);
+      this.rightLegGroup.rotation.set(-0.25, 0, 0.2);
+      this.leftSkiGroup.position.set(-0.22, 0.04, 0);
+      this.rightSkiGroup.position.set(0.22, 0.04, 0);
+      this.leftSkiGroup.rotation.set(0, -0.5, 0);
+      this.rightSkiGroup.rotation.set(0, 0.5, 0);
       this.upperBodyGroup.position.y = 0.42;
-      this.upperBodyGroup.rotation.x = 0;
+      this.upperBodyGroup.rotation.set(0, 0, 0);
+      this.leftArmGroup.rotation.set(-0.4, 0, -0.45);
+      this.rightArmGroup.rotation.set(-0.4, 0, 0.45);
       return;
     }
 
@@ -241,6 +286,20 @@ export class SkierRig {
     const braking = curr.braking;
     const grounded = curr.grounded;
     const speedNorm = clamp(speed / 35, 0, 1);
+    const safeDt = clamp(frameDtSec, 0, 0.1);
+    const targetWalk = curr.walking && grounded ? 1 : 0;
+    if (simState.tickCount === 0) {
+      this.walkBlend = targetWalk;
+    } else if (safeDt > 0) {
+      this.walkBlend = lerp(this.walkBlend, targetWalk, 1 - Math.exp(-12 * safeDt));
+    }
+
+    const walkPhase = lerp(prev.walkPhaseRad, curr.walkPhaseRad, t);
+    const legSin = Math.sin(walkPhase);
+    const legCos = Math.cos(walkPhase);
+    const leftLift = Math.max(0, legCos);
+    const rightLift = Math.max(0, -legCos);
+    const wb = this.walkBlend;
 
     // Align grounded skis smoothly to cross-slope terrain bank (normal projected onto right axis)
     let targetBankRad = 0;
@@ -255,28 +314,57 @@ export class SkierRig {
     }
     this.skiBankRad = lerp(this.skiBankRad, targetBankRad, grounded ? 0.28 : 0.14);
 
-    // Snowplow V-wedge skis when braking (`yaw = -0.3` toes left ski inward toward +X, `+0.3` toes right ski inward toward -X).
+    // Snowplow V-wedge on brake (`yaw = -0.34` toes left ski inward), blended to diagonal stride /
+    // uphill herringbone V-splay when walking (`+yaw` toes left ski outward).
     const wedgeYaw = braking ? 0.34 : 0;
+    const uphillRatio = clamp((pitchRad - 0.03) / 0.35, 0, 1);
+    const herringboneYaw = lerp(0.06, 0.34, uphillRatio);
     const skiYOffset = 0.22 * Math.sin(this.skiBankRad);
-    this.leftSkiGroup.position.y = 0.04 - skiYOffset;
-    this.rightSkiGroup.position.y = 0.04 + skiYOffset;
-    this.leftSkiGroup.rotation.y = -wedgeYaw;
-    this.rightSkiGroup.rotation.y = wedgeYaw;
-    this.leftSkiGroup.rotation.z = this.skiBankRad - carveAngleRad * 0.25;
-    this.rightSkiGroup.rotation.z = this.skiBankRad - carveAngleRad * 0.25;
+    this.leftSkiGroup.position.set(
+      -0.22,
+      0.04 - skiYOffset + wb * leftLift * 0.13,
+      -wb * legSin * 0.24,
+    );
+    this.rightSkiGroup.position.set(
+      0.22,
+      0.04 + skiYOffset + wb * rightLift * 0.13,
+      wb * legSin * 0.24,
+    );
+    this.leftSkiGroup.rotation.set(
+      wb * leftLift * 0.16,
+      lerp(-wedgeYaw, herringboneYaw, wb),
+      this.skiBankRad - carveAngleRad * 0.25,
+    );
+    this.rightSkiGroup.rotation.set(
+      wb * rightLift * 0.16,
+      lerp(wedgeYaw, -herringboneYaw, wb),
+      this.skiBankRad - carveAngleRad * 0.25,
+    );
 
-    // Tuck crouch when braking, carving hard, or airborne
-    const crouchY = !grounded ? 0.31 : braking ? 0.28 : 0.42 - speedNorm * 0.08;
-    const forwardLeanX = !grounded ? -0.35 : braking ? 0.12 : -0.18 - speedNorm * 0.16;
-    this.upperBodyGroup.position.y = crouchY;
-    this.upperBodyGroup.rotation.x = forwardLeanX;
+    // Torso crouch / upright walking posture + weight shift & stride bob
+    const skiCrouchY = !grounded ? 0.31 : braking ? 0.28 : 0.42 - speedNorm * 0.08;
+    const skiLeanX = !grounded ? -0.35 : braking ? 0.12 : -0.18 - speedNorm * 0.16;
+    const walkTorsoY = 0.44 + Math.abs(legSin) * 0.045;
+    const walkLeanX = -0.06 - uphillRatio * 0.16;
+    const upperY = lerp(skiCrouchY, walkTorsoY, wb);
+    this.upperBodyGroup.position.y = upperY;
+    this.upperBodyGroup.rotation.x = lerp(skiLeanX, walkLeanX, wb);
+    this.upperBodyGroup.rotation.z = wb * legSin * 0.065;
 
-    // Rhythmic pole/arm motion
-    const armSwing = grounded ? Math.sin(simState.elapsedSec * 7.5) * 0.12 * speedNorm : -0.35;
-    this.leftArmGroup.rotation.x = armSwing;
-    this.rightArmGroup.rotation.x = -armSwing;
-    this.leftArmGroup.rotation.z = !grounded ? -0.45 : -0.15;
-    this.rightArmGroup.rotation.z = !grounded ? 0.45 : 0.15;
+    // Articulated hip-pivoted legs synced to stride (+rx swings downward leg forward toward -Z)
+    const hipY = upperY + 0.05;
+    this.leftLegGroup.position.set(-0.15, hipY, 0);
+    this.rightLegGroup.position.set(0.15, hipY, 0);
+    this.leftLegGroup.rotation.set(wb * legSin * 0.50, lerp(0, herringboneYaw * 0.4, wb), 0);
+    this.rightLegGroup.rotation.set(-wb * legSin * 0.50, lerp(0, -herringboneYaw * 0.4, wb), 0);
+
+    // Rhythmic pole/arm motion (diagonal stride opposite to leg swing when walking)
+    const skiArmSwing = grounded ? Math.sin(simState.elapsedSec * 7.5) * 0.12 * speedNorm : -0.35;
+    const skiArmZ = !grounded ? -0.45 : -0.15;
+    this.leftArmGroup.rotation.x = lerp(skiArmSwing, -legSin * 0.45 + 0.15, wb);
+    this.rightArmGroup.rotation.x = lerp(-skiArmSwing, legSin * 0.45 + 0.15, wb);
+    this.leftArmGroup.rotation.z = lerp(skiArmZ, -0.18, wb);
+    this.rightArmGroup.rotation.z = lerp(-skiArmZ, 0.18, wb);
   }
 
   dispose(): void {

@@ -49,7 +49,10 @@ import { GraphicsUtils } from '../graphicsUtils';
 import { InstancePools, MAX_STATIC_BILLBOARDS } from '../instancePools';
 import { LandmarkStreamer } from '../landmarkStreamer';
 import { createForkArchObject, createProceduralMeshAssets } from '../meshFactory';
+import { createSmoothOutlineMaterial } from '../outlineShader';
 import { CAMERA_FAR_M, ThreeRenderer } from '../renderer';
+import { SkierRig } from '../skierRig';
+import { CarveSprayVfx } from '../carveSprayVfx';
 import {
   SceneryCellStreamer,
   type TileSceneryItem,
@@ -393,6 +396,8 @@ function createMockSimState(fieldOverride?: TerrainFieldView): ReadonlySimState 
       normalZ: 0.24,
       grounded: true,
       braking: false,
+      walking: false,
+      walkPhaseRad: 0,
     },
     currSkier: {
       posX: 0.4,
@@ -411,6 +416,8 @@ function createMockSimState(fieldOverride?: TerrainFieldView): ReadonlySimState 
       normalZ: 0.24,
       grounded: true,
       braking: false,
+      walking: false,
+      walkPhaseRad: 0,
     },
     surfaceSample: {
       ...createSurfaceSample(),
@@ -2390,4 +2397,110 @@ describe('CDLOD TerrainClipmap, ClipmapDataStore, SceneryCellStreamer, LandmarkS
       }
     },
   );
+
+  it('animates SkierRig articulated legs, ski stride/herringbone V, suppresses carve spray while walking, and disposes with 0 GPU leaks', () => {
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const scene = new THREE.Scene();
+    const shared = createSharedToonMaterials(gfx);
+    const outlineMat = createSmoothOutlineMaterial(gfx);
+    const rig = new SkierRig(gfx, shared, outlineMat, 'skier_alpine');
+    const sprayVfx = new CarveSprayVfx(gfx, scene);
+    scene.add(rig.rootGroup);
+
+    const leftLeg = rig.rootGroup.getObjectByName('SkierLeftLegGroup') as THREE.Group;
+    const rightLeg = rig.rootGroup.getObjectByName('SkierRightLegGroup') as THREE.Group;
+    const leftSki = rig.rootGroup.getObjectByName('SkierLeftSkiGroup') as THREE.Group;
+    const rightSki = rig.rootGroup.getObjectByName('SkierRightSkiGroup') as THREE.Group;
+    const leftArm = rig.rootGroup.getObjectByName('SkierLeftArmGroup') as THREE.Group;
+    const rightArm = rig.rootGroup.getObjectByName('SkierRightArmGroup') as THREE.Group;
+    expect(leftLeg).toBeDefined();
+    expect(rightLeg).toBeDefined();
+    expect(leftSki).toBeDefined();
+    expect(rightSki).toBeDefined();
+    expect(leftArm).toBeDefined();
+    expect(rightArm).toBeDefined();
+
+    const baseSim = createMockSimState();
+    const walkState = (phaseRad: number, pitchRad: number): ReadonlySimState => ({
+      ...baseSim,
+      tickCount: 10,
+      skierState: 'skiing',
+      currSkier: {
+        ...baseSim.currSkier,
+        speed: 2.2,
+        carveAngleRad: 0,
+        pitchRad,
+        grounded: true,
+        braking: false,
+        walking: true,
+        walkPhaseRad: phaseRad,
+      },
+      prevSkier: {
+        ...baseSim.prevSkier,
+        speed: 2.2,
+        carveAngleRad: 0,
+        pitchRad,
+        grounded: true,
+        braking: false,
+        walking: true,
+        walkPhaseRad: phaseRad,
+      },
+    });
+
+    // Advance walkBlend up to ~1 on flat ground at peak stride phase (pi/2)
+    for (let i = 0; i < 30; i++) {
+      rig.sync(walkState(Math.PI * 0.5, 0), 1, 1 / 30);
+    }
+    expect(leftLeg.rotation.x).toBeGreaterThan(0.35);
+    expect(rightLeg.rotation.x).toBeLessThan(-0.35);
+    expect(leftLeg.rotation.x).toBeCloseTo(-rightLeg.rotation.x, 4);
+    expect(leftSki.position.z).toBeLessThan(-0.15);
+    expect(rightSki.position.z).toBeGreaterThan(0.15);
+    // Diagonal arm stride opposes leg swing
+    expect(leftArm.rotation.x).toBeLessThan(rightArm.rotation.x - 0.5);
+
+    // At phase 0 (cos = +1), left ski lifts while right ski stays planted
+    rig.sync(walkState(0, 0), 1, 1 / 30);
+    expect(leftSki.position.y).toBeGreaterThan(rightSki.position.y + 0.08);
+    expect(leftSki.rotation.x).toBeGreaterThan(0.1);
+
+    // Uphill herringbone V-splay (left ski +yaw outward, right ski -yaw outward)
+    rig.sync(walkState(Math.PI * 0.25, 0.3), 1, 1 / 30);
+    expect(leftSki.rotation.y).toBeGreaterThan(0.2);
+    expect(rightSki.rotation.y).toBeLessThan(-0.2);
+
+    // Wipeout resets walking offsets cleanly
+    rig.sync({ ...walkState(Math.PI * 0.5, 0.3), skierState: 'wipeout' }, 1, 1 / 30);
+    expect(leftSki.position.z).toBe(0);
+    expect(rightSki.position.z).toBe(0);
+    expect(leftSki.rotation.x).toBe(0);
+
+    // CarveSprayVfx suppresses continuous spray emission while walking
+    const walkingPose = {
+      ...baseSim.currSkier,
+      grounded: true,
+      walking: true,
+      speed: 4.0,
+      carveAngleRad: 0.4,
+      braking: false,
+    };
+    for (let i = 0; i < 10; i++) {
+      sprayVfx.update(1 / 30, walkingPose, 'powder', 0);
+    }
+    expect(sprayVfx.instancedMesh.count).toBe(0);
+
+    // Skin swap disposes previous leg/body/ski geometries cleanly with zero GPU leaks
+    rig.sync({ ...walkState(0, 0), skierId: 'skier_carver' }, 1, 1 / 30);
+    expect(tracker.checkLeaks(0, true, scene).totalLeaks).toBe(0);
+
+    rig.dispose();
+    sprayVfx.dispose();
+    tracker.disposeAll();
+    const stats = tracker.getStats();
+    expect(stats.activeObjects).toBe(0);
+    expect(stats.activeGeometries).toBe(0);
+    expect(stats.activeMaterials).toBe(0);
+    expect(stats.activeTextures).toBe(0);
+  });
 });

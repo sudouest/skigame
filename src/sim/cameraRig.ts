@@ -39,6 +39,7 @@ export class CameraRig {
   private chaseHeadingRad = 0;
   private crestLiftM = 0;
   private crestLookDropM = 0;
+  private walkCameraBlend = 0;
   private initialized = false;
 
   reset(skier: SkierPose, surface: SurfaceSample, surfaceQuery?: SurfaceQueryView): void {
@@ -46,6 +47,7 @@ export class CameraRig {
     this.chaseHeadingRad = skier.headingRad;
     this.crestLiftM = 0;
     this.crestLookDropM = 0;
+    this.walkCameraBlend = skier.walking ? 1 : 0;
 
     const fwdX = -Math.sin(this.chaseHeadingRad);
     const fwdZ = -Math.cos(this.chaseHeadingRad);
@@ -134,9 +136,12 @@ export class CameraRig {
       return;
     }
 
-    // Blend chase yaw smoothly between downhill tangent and skier carving heading (more heading off-piste)
+    // Blend chase yaw smoothly between downhill tangent and skier carving heading
+    // (tracks skier heading closely while walking so uphill/sideways recovery stays framed)
+    this.walkCameraBlend = damp(this.walkCameraBlend, skier.walking ? 1 : 0, 4.0, dt);
     const downhillYaw = Math.atan2(-surface.tangentX, -surface.tangentZ);
-    const headingWeight = lerp(0.55, 0.35, clamp(surface.pisteWeight, 0, 1));
+    const baseHeadingWeight = lerp(0.55, 0.35, clamp(surface.pisteWeight, 0, 1));
+    const headingWeight = lerp(baseHeadingWeight, 1.0, this.walkCameraBlend);
     const targetYaw = lerpAngle(downhillYaw, skier.headingRad, headingWeight);
     const yawAlpha = 1 - Math.exp(-5.5 * dt);
     this.chaseHeadingRad = lerpAngle(this.chaseHeadingRad, targetYaw, yawAlpha);

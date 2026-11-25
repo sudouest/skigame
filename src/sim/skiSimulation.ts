@@ -37,6 +37,7 @@ import { JoltContactSolver } from './physics/joltContactSolver';
 import { resolveDefaultPhysicsRuntime, type JoltRuntime } from './physics/joltRuntime';
 import type { WorldContactSolver } from './physics/worldContactSolver';
 import {
+  CHASM_TRAP_DEPTH_FRACTION,
   copySkierPose,
   createMutableSkierPose,
   createPhysicsStepOutcome,
@@ -547,6 +548,8 @@ export class SkiSimulation {
     curr.normalZ = this.state.surfaceSample.normalZ;
     curr.grounded = true;
     curr.braking = false;
+    curr.walking = false;
+    curr.walkPhaseRad = 0;
     copySkierPose(curr, this.state.prevSkier);
 
     this.contactSolver.syncWorld(
@@ -637,8 +640,8 @@ export class SkiSimulation {
         !triggeredWipeout &&
         surf.inChasmZone &&
         surf.chasmWipeoutDepth > 0 &&
-        chasmDrop >= surf.chasmWipeoutDepth * 0.5 &&
-        curr.speed < 2.5
+        chasmDrop >= surf.chasmWipeoutDepth * CHASM_TRAP_DEPTH_FRACTION &&
+        (curr.speed < 2.5 || curr.walking)
       ) {
         this.chasmTrapTimerSec += dt;
       } else {
@@ -1194,6 +1197,8 @@ export class SkiSimulation {
     curr.pitchRad = Math.asin(clamp(this.state.surfaceSample.tangentY, -0.9, 0.9));
     curr.grounded = true;
     curr.braking = false;
+    curr.walking = false;
+    curr.walkPhaseRad = 0;
     this.physics.reset();
     this.contactSolver.syncWorld(
       curr.posX,

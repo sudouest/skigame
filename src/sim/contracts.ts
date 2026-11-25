@@ -907,6 +907,8 @@ export interface SkierPose {
   readonly normalZ: number;
   readonly grounded: boolean;
   readonly braking: boolean;
+  readonly walking: boolean;
+  readonly walkPhaseRad: number;
 }
 
 export interface ActiveWeatherState {

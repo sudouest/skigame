@@ -58,6 +58,19 @@ const LANDING_HARD_STUMBLE_MPS = 16.0;
 const LANDING_HARD_WIPEOUT_MPS = 24.0;
 const WIPEOUT_TUMBLE_MU = 0.65;
 
+const WALK_ENTER_FWD_SPEED_MPS = 0.25;
+const WALK_ENTER_MAX_BACK_SPEED_MPS = 1.2;
+const WALK_ENTER_MAX_LAT_SPEED_MPS = 2.5;
+const WALK_STALL_DWELL_SEC = 0.18;
+const WALK_ENTER_GRAV_MARGIN_MPS2 = 0.15;
+const WALK_EXIT_GRAV_ACCEL_MPS2 = 0.60;
+const WALK_BASE_SPEED_MPS = 3.2;
+const WALK_MIN_UPHILL_SPEED_MPS = 1.2;
+const WALK_ACCEL_MPS2 = 12.0;
+const WALK_COS_MAX_ROCK_SLOPE = Math.cos(degToRad(35));
+const WALK_STRIDE_LENGTH_M = 1.45;
+export const CHASM_TRAP_DEPTH_FRACTION = 0.5;
+
 export interface MutableSkierPose {
   posX: number;
   posY: number;
@@ -75,6 +88,8 @@ export interface MutableSkierPose {
   normalZ: number;
   grounded: boolean;
   braking: boolean;
+  walking: boolean;
+  walkPhaseRad: number;
 }
 
 export function createMutableSkierPose(): MutableSkierPose {
@@ -95,6 +110,8 @@ export function createMutableSkierPose(): MutableSkierPose {
     normalZ: 0,
     grounded: true,
     braking: false,
+    walking: false,
+    walkPhaseRad: 0,
   };
 }
 
@@ -115,6 +132,8 @@ export function copySkierPose(src: SkierPose, dst: MutableSkierPose): void {
   dst.normalZ = src.normalZ;
   dst.grounded = src.grounded;
   dst.braking = src.braking;
+  dst.walking = src.walking;
+  dst.walkPhaseRad = src.walkPhaseRad;
 }
 
 export interface PhysicsStepOutcome {
@@ -196,6 +215,8 @@ export class SkiPhysics {
   private contactNormalY = 1;
   private contactNormalZ = 0;
   private hasJoltContactNormal = false;
+  private walkingActive = false;
+  private walkStallTimerSec = 0;
 
   private readonly moveReq: WorldMoveRequest = createWorldMoveRequest();
   private readonly moveRes: WorldMoveResult = createWorldMoveResult();
@@ -224,6 +245,8 @@ export class SkiPhysics {
     this.contactNormalY = 1;
     this.contactNormalZ = 0;
     this.hasJoltContactNormal = false;
+    this.walkingActive = false;
+    this.walkStallTimerSec = 0;
     this.invalidateSurfaceCache();
     this.invalidateSolverPose();
   }
@@ -294,6 +317,8 @@ export class SkiPhysics {
       this.airborneTimeSec = skier.grounded ? 0 : AIRBORNE_HYSTERESIS_SEC;
       this.activeRampIndex = -1;
       this.hasJoltContactNormal = false;
+      this.walkingActive = skier.walking;
+      this.walkStallTimerSec = 0;
       this.invalidateSurfaceCache();
     }
 
@@ -355,6 +380,8 @@ export class SkiPhysics {
     if (!climbableHere) {
       this.physicallyGrounded = false;
       skier.grounded = false;
+      this.walkingActive = false;
+      this.walkStallTimerSec = 0;
     }
 
     const preClearance = skier.posY - surface.groundY;
@@ -370,10 +397,28 @@ export class SkiPhysics {
     const braking = intent.brake && effectiveGrounded;
     skier.braking = braking;
 
+    const rockWalkable = surfaceType !== 'rock' || ny >= WALK_COS_MAX_ROCK_SLOPE;
+    const inDeepChasm =
+      surface.inChasmZone &&
+      surface.chasmWipeoutDepth > 0 &&
+      surface.macroY - skier.posY >= surface.chasmWipeoutDepth * CHASM_TRAP_DEPTH_FRACTION;
+    const canWalkHere =
+      this.physicallyGrounded &&
+      climbableHere &&
+      this.activeRampIndex < 0 &&
+      !braking &&
+      rockWalkable &&
+      !inDeepChasm;
+    if (!canWalkHere) {
+      this.walkingActive = false;
+      this.walkStallTimerSec = 0;
+    }
+
     // 2. Steering & continuous angular restoring torque (replaces hard +/-80 deg union-clamp snaps)
     const airTurnScale = effectiveGrounded ? 1.0 : 0.42;
     const gripTurnScale = 0.55 + 0.45 * clamp(params.grip, 0.25, 1.3);
-    const turnRateRad = 2.4 * airTurnScale * gripTurnScale;
+    const walkGripScale = this.walkingActive ? Math.max(gripTurnScale, 0.85) : gripTurnScale;
+    const turnRateRad = 2.4 * airTurnScale * walkGripScale;
     skier.headingRad = wrapAngle(skier.headingRad - steerInput * turnRateRad * dt);
 
     const trailYaw = Math.atan2(-surface.tangentX, -surface.tangentZ);
@@ -381,7 +426,7 @@ export class SkiPhysics {
     const deltaTrail = angleDelta(trailYaw, skier.headingRad);
     const absDeltaTrail = Math.abs(deltaTrail);
 
-    if (absDeltaTrail > RESTORE_TORQUE_START_RAD) {
+    if (!this.walkingActive && absDeltaTrail > RESTORE_TORQUE_START_RAD) {
       const safeFallWeight =
         (1 - clamp(surface.pisteWeight, 0, 1)) * (surface.inChasmZone ? 0 : 1);
       const deltaFall = angleDelta(fallLineYaw, skier.headingRad);
@@ -400,7 +445,7 @@ export class SkiPhysics {
       }
     }
 
-    const targetCarve = steerInput * MAX_CARVE_ANGLE_RAD;
+    const targetCarve = this.walkingActive ? 0 : steerInput * MAX_CARVE_ANGLE_RAD;
     skier.carveAngleRad = lerp(skier.carveAngleRad, targetCarve, 1 - Math.exp(-12 * dt));
 
     const fwdX = -Math.sin(skier.headingRad);
@@ -464,71 +509,121 @@ export class SkiPhysics {
       let vLat = skier.velX * rHatX + skier.velY * rHatY + skier.velZ * rHatZ;
       this.coyoteSlopeVelY = vFwd * fHatY + vLat * rHatY;
 
-      // Exact 3D tangential gravity components: g . f_hat = -g * fHatY, g . r_hat = -g * rHatY
-      vFwd += -SKI_GRAVITY * fHatY * dt;
-      vLat += -SKI_GRAVITY * rHatY * dt;
-
-      // Zero-uphill poling start assist (strictly 0.0 whenever fHatY >= 0.02 or on rock)
-      if (vFwd < 6.0 && vFwd >= -0.5 && !braking && surfaceType !== 'rock' && fHatY < 0.02) {
-        const assistScale = 1 - smoothstep(-0.08, 0.02, fHatY);
-        vFwd = Math.min(6.0, vFwd + 6.5 * assistScale * dt);
-      }
-
-      // Anisotropic edge-bite saturation + strictly energy-conserving carve redirection
-      // (vFwd_new^2 + vLat_new^2 <= vFwd^2 + vLat^2 ALWAYS)
-      const lateralDamp = Math.exp(-9.5 * params.grip * dt);
-      const desiredLatDelta = vLat * (lateralDamp - 1);
-      const maxLatImpulse = params.maxLatEdgeAccel * (0.45 + 0.55 * ny) * dt;
-      const latDelta = clamp(desiredLatDelta, -maxLatImpulse, maxLatImpulse);
-      const vLatNew = vLat + latDelta;
-      const latEnergyRemoved = vLat * vLat - vLatNew * vLatNew;
-      vLat = vLatNew;
-
-      if (
-        latEnergyRemoved > 0 &&
-        vFwd >= 0 &&
-        !braking &&
-        params.carveEfficiency > 0 &&
-        fHatY <= 0.02
-      ) {
-        vFwd = Math.sqrt(vFwd * vFwd + params.carveEfficiency * latEnergyRemoved);
-      }
-
-      // Snowplow braking (never boosts speed uphill or from slow speeds)
-      if (braking) {
-        if (vFwd > 4.5 && fHatY <= 0.05) {
-          vFwd = Math.max(4.5, vFwd - 18.0 * dt);
-        } else if (vFwd > 0) {
-          vFwd = Math.max(0, vFwd - 18.0 * dt);
-        } else if (vFwd < 0) {
-          vFwd = Math.min(0, vFwd + 18.0 * dt);
-        }
-        vLat *= Math.exp(-6.0 * dt);
-      }
-
-      // Signed Coulomb + viscous plough + aerodynamic drag (strictly dissipative)
-      const speedT = Math.hypot(vFwd, vLat);
       const normalLoad = SKI_GRAVITY * ny;
-      const fwdDragDecel =
-        (params.muK * normalLoad + params.cPlough * Math.abs(vFwd) + params.cAero * speedT * Math.abs(vFwd)) *
-        dt;
-      if (vFwd > 0) {
-        vFwd = Math.max(0, vFwd - fwdDragDecel);
-      } else if (vFwd < 0) {
-        vFwd = Math.min(0, vFwd + fwdDragDecel);
+      const netGravFwdAccel = -SKI_GRAVITY * fHatY - params.muK * normalLoad;
+      if (this.walkingActive && netGravFwdAccel > WALK_EXIT_GRAV_ACCEL_MPS2) {
+        this.walkingActive = false;
+        this.walkStallTimerSec = 0;
       }
 
-      const latDragDecel = (params.muK * normalLoad * 0.65 + params.cPlough * 0.5 * Math.abs(vLat)) * dt;
-      if (vLat > 0) {
-        vLat = Math.max(0, vLat - latDragDecel);
-      } else if (vLat < 0) {
-        vLat = Math.min(0, vLat + latDragDecel);
+      if (!this.walkingActive) {
+        // Exact 3D tangential gravity components: g . f_hat = -g * fHatY, g . r_hat = -g * rHatY
+        vFwd += -SKI_GRAVITY * fHatY * dt;
+        vLat += -SKI_GRAVITY * rHatY * dt;
+
+        // Zero-uphill poling start assist (yields when flat/uphill gravity cannot overcome friction)
+        if (
+          vFwd < 6.0 &&
+          vFwd >= -0.5 &&
+          !braking &&
+          surfaceType !== 'rock' &&
+          fHatY < 0.02 &&
+          netGravFwdAccel > WALK_ENTER_GRAV_MARGIN_MPS2
+        ) {
+          const assistScale = 1 - smoothstep(-0.08, 0.02, fHatY);
+          vFwd = Math.min(6.0, vFwd + 6.5 * assistScale * dt);
+        }
+
+        // Anisotropic edge-bite saturation + strictly energy-conserving carve redirection
+        // (vFwd_new^2 + vLat_new^2 <= vFwd^2 + vLat^2 ALWAYS)
+        const lateralDamp = Math.exp(-9.5 * params.grip * dt);
+        const desiredLatDelta = vLat * (lateralDamp - 1);
+        const maxLatImpulse = params.maxLatEdgeAccel * (0.45 + 0.55 * ny) * dt;
+        const latDelta = clamp(desiredLatDelta, -maxLatImpulse, maxLatImpulse);
+        const vLatNew = vLat + latDelta;
+        const latEnergyRemoved = vLat * vLat - vLatNew * vLatNew;
+        vLat = vLatNew;
+
+        if (
+          latEnergyRemoved > 0 &&
+          vFwd >= 0 &&
+          !braking &&
+          params.carveEfficiency > 0 &&
+          fHatY <= 0.02
+        ) {
+          vFwd = Math.sqrt(vFwd * vFwd + params.carveEfficiency * latEnergyRemoved);
+        }
+
+        // Snowplow braking (never boosts speed uphill or from slow speeds)
+        if (braking) {
+          if (vFwd > 4.5 && fHatY <= 0.05) {
+            vFwd = Math.max(4.5, vFwd - 18.0 * dt);
+          } else if (vFwd > 0) {
+            vFwd = Math.max(0, vFwd - 18.0 * dt);
+          } else if (vFwd < 0) {
+            vFwd = Math.min(0, vFwd + 18.0 * dt);
+          }
+          vLat *= Math.exp(-6.0 * dt);
+        }
+
+        // Signed Coulomb + viscous plough + aerodynamic drag (strictly dissipative)
+        const speedT = Math.hypot(vFwd, vLat);
+        const fwdDragDecel =
+          (params.muK * normalLoad + params.cPlough * Math.abs(vFwd) + params.cAero * speedT * Math.abs(vFwd)) *
+          dt;
+        if (vFwd > 0) {
+          vFwd = Math.max(0, vFwd - fwdDragDecel);
+        } else if (vFwd < 0) {
+          vFwd = Math.min(0, vFwd + fwdDragDecel);
+        }
+
+        const latDragDecel = (params.muK * normalLoad * 0.65 + params.cPlough * 0.5 * Math.abs(vLat)) * dt;
+        if (vLat > 0) {
+          vLat = Math.max(0, vLat - latDragDecel);
+        } else if (vLat < 0) {
+          vLat = Math.min(0, vLat + latDragDecel);
+        }
+
+        // Soft aerodynamic top-speed governor around skierDef.stats.maxSpeed
+        if (vFwd > skierDef.stats.maxSpeed) {
+          const excess = vFwd - skierDef.stats.maxSpeed;
+          vFwd -= excess * (1 - Math.exp(-2.8 * dt));
+        }
+
+        // Enter walking fallback once momentum & gravity cannot sustain forward skiing
+        const stalledWithoutGravity =
+          canWalkHere &&
+          vFwd <= WALK_ENTER_FWD_SPEED_MPS &&
+          vFwd >= -WALK_ENTER_MAX_BACK_SPEED_MPS &&
+          Math.abs(vLat) <= WALK_ENTER_MAX_LAT_SPEED_MPS &&
+          netGravFwdAccel <= WALK_ENTER_GRAV_MARGIN_MPS2;
+        if (stalledWithoutGravity) {
+          this.walkStallTimerSec += dt;
+          if (this.walkStallTimerSec >= WALK_STALL_DWELL_SEC) {
+            this.walkingActive = true;
+            this.walkStallTimerSec = 0;
+          }
+        } else {
+          this.walkStallTimerSec = 0;
+        }
       }
 
-      // Soft aerodynamic top-speed governor around skierDef.stats.maxSpeed
-      if (vFwd > skierDef.stats.maxSpeed) {
-        const excess = vFwd - skierDef.stats.maxSpeed;
-        vFwd -= excess * (1 - Math.exp(-2.8 * dt));
+      if (this.walkingActive) {
+        const uphillFactor = clamp(fHatY, 0, 0.78);
+        const slopeScale = lerp(
+          1.0,
+          WALK_MIN_UPHILL_SPEED_MPS / WALK_BASE_SPEED_MPS,
+          smoothstep(0.05, 0.65, uphillFactor),
+        );
+        const rockScale = surfaceType === 'rock' ? 0.75 : 1.0;
+        const targetWalkSpeed = WALK_BASE_SPEED_MPS * slopeScale * rockScale;
+        const maxDelta = WALK_ACCEL_MPS2 * dt;
+        if (vFwd < targetWalkSpeed) {
+          vFwd = Math.min(targetWalkSpeed, Math.max(0, vFwd) + maxDelta);
+        } else {
+          vFwd = Math.max(targetWalkSpeed, vFwd - maxDelta);
+        }
+        vLat *= Math.exp(-16.0 * dt);
       }
 
       // Reconstruct exact 3D tangent velocity (NO velY = slopeVelY overwrite!)
@@ -549,8 +644,10 @@ export class SkiPhysics {
         }
       }
 
-      // Safe local fall-line stall pivot when stalling nose-up (disabled in chasm zones or active steering)
+      // Safe local fall-line stall pivot when stalling nose-up (disabled while walking or about to walk, in chasms, or steering)
       if (
+        !this.walkingActive &&
+        this.walkStallTimerSec <= 0 &&
         vFwd < 1.5 &&
         fHatY > 0.05 &&
         !surface.inChasmZone &&
@@ -559,6 +656,8 @@ export class SkiPhysics {
         skier.headingRad = lerpAngle(skier.headingRad, fallLineYaw, 1 - Math.exp(-3.2 * dt));
       }
     } else {
+      this.walkingActive = false;
+      this.walkStallTimerSec = 0;
       this.coyoteTimerSec = Math.max(0, this.coyoteTimerSec - dt);
       // True 3D ballistic airtime with physical quadratic aerodynamic drag (bounds deep chasm freefall!)
       skier.velY -= SKI_GRAVITY * dt;
@@ -605,6 +704,8 @@ export class SkiPhysics {
         this.airborneTimeSec = AIRBORNE_HYSTERESIS_SEC;
         this.coyoteTimerSec = 0;
         this.activeRampIndex = -1;
+        this.walkingActive = false;
+        this.walkStallTimerSec = 0;
       }
     }
 
@@ -833,6 +934,8 @@ export class SkiPhysics {
       this.physicallyGrounded = false;
       this.hasJoltContactNormal = false;
       this.activeRampIndex = -1;
+      this.walkingActive = false;
+      this.walkStallTimerSec = 0;
       if (!didJump && !appliedRampLaunch) {
         this.airborneTimeSec += dt;
       }
@@ -848,6 +951,16 @@ export class SkiPhysics {
         postClearance < AIRBORNE_MICROHOP_CLEARANCE_M &&
         surface.normalY >= COS_MAX_CLIMBABLE_SLOPE);
     skier.grounded = displayGrounded;
+    skier.walking = this.walkingActive;
+
+    const stepDist3d = Math.hypot(
+      skier.posX - prevPosX,
+      skier.posY - prevPosY,
+      skier.posZ - prevPosZ,
+    );
+    if (skier.walking && stepDist3d > 1e-4) {
+      skier.walkPhaseRad += (stepDist3d / WALK_STRIDE_LENGTH_M) * Math.PI * 2;
+    }
 
     // Update cached sample & solver pose for teleport detection next tick
     this.lastSampleX = skier.posX;
@@ -884,7 +997,7 @@ export class SkiPhysics {
     const trackRightY = rawTrackRightY / trackRightLen;
     const trackRightZ = rightZ / trackRightLen;
 
-    const trackGroundedNow = skier.grounded && this.activeRampIndex < 0;
+    const trackGroundedNow = skier.grounded && !skier.walking && this.activeRampIndex < 0;
     if (trackGroundedNow) {
       this.trackAccumDist += stepDist;
       if (!this.wasTrackGrounded || this.trackAccumDist >= SKI_TRACK_SAMPLE_DIST_M) {
@@ -1050,6 +1163,9 @@ export class SkiPhysics {
     this.physicallyGrounded = res.isSupported && res.groundNormalY >= COS_MAX_CLIMBABLE_SLOPE;
     skier.grounded = this.physicallyGrounded;
     skier.braking = false;
+    this.walkingActive = false;
+    this.walkStallTimerSec = 0;
+    skier.walking = false;
 
     // Damp bounce slightly on obstacle/wall tumble deflection
     if (res.wallHit || res.contactCount > 0) {
