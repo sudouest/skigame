@@ -343,10 +343,10 @@ export class TrailSpine implements SpineView {
     const rawAvoidSpines = config.avoidSpines;
     let avoidSpines: TrailSpine[] | null = null;
     if (rawAvoidSpines && rawAvoidSpines.length > 0) {
-      const reachMinX = config.startPosX - this.length - 180;
-      const reachMaxX = config.startPosX + this.length + 180;
-      const reachMinZ = config.startPosZ - this.length - 220;
-      const reachMaxZ = config.startPosZ + 120;
+      const reachMinX = config.startPosX - this.length - 260;
+      const reachMaxX = config.startPosX + this.length + 260;
+      const reachMinZ = config.startPosZ - this.length - 260;
+      const reachMaxZ = config.startPosZ + 260;
       for (let a = 0; a < rawAvoidSpines.length; a++) {
         const other = rawAvoidSpines[a]!;
         if (
@@ -503,15 +503,58 @@ export class TrailSpine implements SpineView {
               Math.max(config.startHalfWidth, other.lutHalfWidth[0]!) * 4 + 4);
 
         const maxLongExt = isTwin ? 55 : 75;
-        const curValid = Math.abs(avoidProjScratch.longExt) <= maxLongExt;
-        const lookValid = Math.abs(avoidLookProjScratch.longExt) <= maxLongExt;
-        if (!curValid && !lookValid) continue;
+        const maxVertDownExt = isTwin ? 55 : MACRO_LEAF_EXTENSION_M;
+        const curLatValid = Math.abs(avoidProjScratch.longExt) <= maxLongExt;
+        const lookLatValid = Math.abs(avoidLookProjScratch.longExt) <= maxLongExt;
+        const curVertValid =
+          curLatValid || (avoidProjScratch.longExt > 0 && avoidProjScratch.longExt <= maxVertDownExt);
+        const lookVertValid =
+          lookLatValid ||
+          (avoidLookProjScratch.longExt > 0 && avoidLookProjScratch.longExt <= maxVertDownExt);
+        if (!curVertValid && !lookVertValid) continue;
+
+        const useLookVert = !curVertValid;
+        const vertProj = useLookVert ? avoidLookProjScratch : avoidProjScratch;
+        const vertBestDSq = vertProj.distSq;
+
+        // Cliff-only mountain-coherent PD vertical sheet coupling within 200m edge distance
+        // (and along open-leaf downstream extensions up to MACRO_LEAF_EXTENSION_M):
+        // preserves native stage pitch across gentle-vs-black-diamond twin pairs (large safeDy
+        // headroom & tight pitch matching strictly <= 28m) while preventing cliff-scale vertical divergence.
+        // Anchored to current spine point (px, pz, py) whenever valid (compensating refY when falling
+        // back to lookahead projection so downhill offset never injects a step bias).
+        // Note: evalPitch multiplies pitchBiasRad by startBlend = smootherstep(18, 56, s), so G1 (s <= 18) is exact!
+        const vertDist = Math.sqrt(vertBestDSq);
+        const vertEdgeDist = Math.max(8, vertDist - hw - vertProj.halfWidth);
+        if (vertEdgeDist < 200) {
+          const prox = 1 - smootherstep(45, 200, vertEdgeDist);
+          const safeDy = Math.min(52, vertEdgeDist * 0.3);
+          const otherY =
+            vertProj.spineY +
+            vertProj.longExt * Math.tan(clamp(vertProj.pitchRad, -1.0, 1.0));
+          const refY = useLookVert
+            ? py - AVOID_LOOKAHEAD_M * Math.tan(degToRad(basePitchDeg))
+            : py;
+          const yDiff = otherY - refY;
+          const excessY =
+            Math.abs(yDiff) > safeDy ? Math.sign(yDiff) * (Math.abs(yDiff) - safeDy) : 0;
+          const tightT = 1 - smootherstep(10, 28, vertEdgeDist);
+          const pitchDiff = vertProj.pitchRad - (-degToRad(basePitchDeg));
+          const desiredBias =
+            clamp(excessY * 0.016, -degToRad(18), degToRad(18)) +
+            tightT * clamp(yDiff * 0.005 + pitchDiff * 0.55, -degToRad(12), degToRad(12));
+          const yw = prox / (vertEdgeDist * vertEdgeDist + 225);
+          neighborYWeightSum += yw;
+          neighborYWeightedDiff += yw * desiredBias * prox;
+        }
+
+        if (!curLatValid && !lookLatValid) continue;
 
         let activeProj = avoidProjScratch;
         let qx = px;
         let qz = pz;
-        let bestDSq = curValid ? avoidProjScratch.distSq : Infinity;
-        if (lookValid && avoidLookProjScratch.distSq < bestDSq) {
+        let bestDSq = curLatValid ? avoidProjScratch.distSq : Infinity;
+        if (lookLatValid && avoidLookProjScratch.distSq < bestDSq) {
           activeProj = avoidLookProjScratch;
           qx = lookX;
           qz = lookZ;
@@ -537,33 +580,6 @@ export class TrailSpine implements SpineView {
               : sepSign !== 0
                 ? sepSign
                 : -1;
-
-        // Mountain-coherent PD vertical sheet coupling for nearby spines within 220m:
-        // Combines proportional elevation-difference correction (excessY) with derivative pitch-matching
-        // (activeProj.pitchRad - nativePitchRad) when spines pass close so twins/cousins stay on a coherent
-        // alpine mountainside (|dY| <= ~22m at close gaps) while isolated runs keep 100% native stage pitch.
-        // Note: evalPitch multiplies pitchBiasRad by startBlend = smootherstep(18, 72, s), so G1 (s <= 18) is exact!
-        const edgeDist = Math.max(8, dist - hw - activeProj.halfWidth);
-        // Project neighbor elevation along its pitch tangent when longExt != 0 so upstream/downstream
-        // endpoints contribute their true extrapolated mountainside height rather than a clamped ledge.
-        if (dist < 240) {
-          const prox = 1 - smootherstep(40, 240, dist);
-          const safeDy = Math.min(14, edgeDist * 0.24);
-          const otherY =
-            activeProj.spineY +
-            activeProj.longExt * Math.tan(clamp(activeProj.pitchRad, -1.0, 1.0));
-          const yDiff = otherY - py;
-          const excessY =
-            Math.abs(yDiff) > safeDy ? Math.sign(yDiff) * (Math.abs(yDiff) - safeDy) : 0;
-          const tightT = 1 - smootherstep(18, 130, edgeDist);
-          const pitchDiff = activeProj.pitchRad - (-degToRad(basePitchDeg));
-          const desiredBias =
-            clamp(excessY * 0.017, -degToRad(19), degToRad(19)) +
-            tightT * clamp(yDiff * 0.006 + pitchDiff * 0.75, -degToRad(16), degToRad(16));
-          const yw = prox / (edgeDist * edgeDist + 225);
-          neighborYWeightSum += yw;
-          neighborYWeightedDiff += yw * desiredBias;
-        }
 
         // Scale lateral clearance with vertical elevation difference and anticipate fork-end widening
         // smoothly over s in [70, 140] before endEnv reduces steering authority near the fork seam.
@@ -680,8 +696,8 @@ export class TrailSpine implements SpineView {
       if (neighborYWeightSum > 1e-6) {
         out.pitchBiasRad = clamp(
           neighborYWeightedDiff / neighborYWeightSum,
-          -degToRad(18),
-          degToRad(18),
+          -degToRad(11),
+          degToRad(11),
         );
       }
     };
@@ -837,8 +853,8 @@ export class TrailSpine implements SpineView {
         Math.sin(s * rollerFreq * Math.PI * 2 + pitchPhaseA) * 0.65 +
         Math.sin(s * rollerFreq * 1.85 * Math.PI * 2 + pitchPhaseB) * 0.35;
       const rawPitchRad = -degToRad(clamp(basePitchDeg + pitchSwingDeg * wave, 6, 38));
-      // G1: Delayed fork pitch divergence over smootherstep(18, 72, s) for smooth V-wedge slope
-      const startBlend = config.isForkChild ? smootherstep(18, 72, s) : smoothstep(0, 22, s);
+      // G1: Delayed fork pitch divergence over smootherstep(18, 56, s) for smooth V-wedge slope
+      const startBlend = config.isForkChild ? smootherstep(18, 56, s) : smoothstep(0, 22, s);
       const endBlend = smoothstep(this.length - 26, this.length - 2, s);
       let p = lerp(config.startPitchRad, rawPitchRad, startBlend);
       p = lerp(p, endPitchTargetRad, endBlend);
@@ -877,7 +893,8 @@ export class TrailSpine implements SpineView {
       smoothDampPos += (avoidRepelScratch.dampPos - smoothDampPos) * 0.25;
       smoothDampNeg += (avoidRepelScratch.dampNeg - smoothDampNeg) * 0.25;
       smoothUrgentStrength += (avoidRepelScratch.urgentStrength - smoothUrgentStrength) * 0.25;
-      smoothPitchBiasRad += (avoidRepelScratch.pitchBiasRad - smoothPitchBiasRad) * 0.14;
+      // Smooth vertical-sheet pitch bias over ~14m so entering neighbor range never creates an abrupt convex crest brow
+      smoothPitchBiasRad += (avoidRepelScratch.pitchBiasRad - smoothPitchBiasRad) * 0.07;
       const k = evalCurvature(
         s,
         hw,

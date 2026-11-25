@@ -39,15 +39,15 @@ const MACRO_R0_SQ = 8.5 * 8.5;
 const MACRO_LOCAL_R0_SQ = 36 * 36;
 const MACRO_DOWN_EXT_R0_SQ = 48 * 48;
 const MACRO_EDGE_SMOOTH_SQ = 4;
-const MACRO_WIN_IN_M = 120;
-const MACRO_WIN_OUT_M = 240;
+const MACRO_WIN_IN_M = 105;
+const MACRO_WIN_OUT_M = 205;
 const MACRO_WIN_OUT_SQ = MACRO_WIN_OUT_M * MACRO_WIN_OUT_M;
-const MACRO_FAR_BLEND_START_M = 130;
+const MACRO_FAR_BLEND_START_M = 120;
 const MACRO_FAR_BLEND_START_SQ = MACRO_FAR_BLEND_START_M * MACRO_FAR_BLEND_START_M;
-const MACRO_FAR_BLEND_END_M = 190;
+const MACRO_FAR_BLEND_END_M = 180;
 const MACRO_FAR_R0_SQ = 72 * 72;
 const MACRO_FAR_WIN_IN_OFFSET_M = 60;
-const MACRO_FAR_WIN_OUT_OFFSET_M = 200;
+const MACRO_FAR_WIN_OUT_OFFSET_M = 180;
 const CLEARANCE_AABB_PAD_M = 96;
 
 const OUTER_RIM_START_M = 110;
@@ -95,6 +95,7 @@ export class MountainField implements TerrainFieldView {
   private readonly clearScaleCache = new Map<number, SpineClearanceEntry>();
   private readonly activeIdsScratch = new Set<number>();
   private readonly addedIdsScratch = new Set<number>();
+  private readonly downRecomputedIdsScratch = new Set<number>();
   private readonly addedSpinesScratch: SpineView[] = [];
   private readonly removedSpinesScratch: SpineView[] = [];
   private clearSyncedSpineCount = -1;
@@ -2390,7 +2391,7 @@ export class MountainField implements TerrainFieldView {
     const nFx = this.macroNodeFwdX;
     const nFz = this.macroNodeFwdZ;
 
-    // 1. Exact global trueMinSq (skip completely if Pass 2A already found a node < 240m!)
+    // 1. Exact global trueMinSq (skip completely if Pass 2A already found a node < MACRO_WIN_OUT_M!)
     let trueMinSq = mOut.minNodeDistSq < MACRO_WIN_OUT_SQ ? mOut.minNodeDistSq : Infinity;
     if (trueMinSq >= MACRO_WIN_OUT_SQ) {
       const hintIdx = this.farHintSpineIdx < allCount ? this.farHintSpineIdx : 0;
@@ -3160,6 +3161,7 @@ export class MountainField implements TerrainFieldView {
 
     this.activeIdsScratch.clear();
     this.addedIdsScratch.clear();
+    this.downRecomputedIdsScratch.clear();
     this.addedSpinesScratch.length = 0;
     this.removedSpinesScratch.length = 0;
 
@@ -3209,6 +3211,7 @@ export class MountainField implements TerrainFieldView {
         // Open-leaf extension just re-enabled on a ghost spine: compute its cross-spine clearance
         entry.downExtActive = true;
         this.computeDownExtClearance(sp, mn, entry.downExt, allSpines);
+        this.downRecomputedIdsScratch.add(sp.id);
       } else {
         entry.downExtActive = downActive;
       }
@@ -3260,7 +3263,11 @@ export class MountainField implements TerrainFieldView {
 
       this.updateExistingSideClearance(sp, left, entry.left, allSpines);
       this.updateExistingSideClearance(sp, right, entry.right, allSpines);
-      if (entry.downExt && sp.macroNodes?.useDownstreamExt) {
+      if (
+        entry.downExt &&
+        sp.macroNodes?.useDownstreamExt &&
+        !this.downRecomputedIdsScratch.has(sp.id)
+      ) {
         this.updateExistingDownExtClearance(sp, sp.macroNodes, entry.downExt, allSpines);
       }
     }
@@ -3885,7 +3892,7 @@ export class MountainField implements TerrainFieldView {
       }
     }
 
-    // Smooth far-field handoff over [130, 190]m (well before near window [120, 240]m tail collapses).
+    // Smooth far-field handoff over [120, 180]m (well before near window [105, 205]m tail collapses).
     // Always evaluate over allSpines so tile candidateSpines never crop the far-field sheet across tile seams.
     const minNodeDist = Math.sqrt(minNodeDistSq);
     let macroY: number;

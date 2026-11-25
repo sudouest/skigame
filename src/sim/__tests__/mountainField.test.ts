@@ -1543,4 +1543,143 @@ describe('TrailSpine, Horizon/Ghost Buffers, and MountainField', () => {
       expect(minNormalY).toBeGreaterThanOrEqual(0.38);
     }
   });
+
+  it('maintains wide twin fork divergence and preserves native stage pitch next to gentle twins', () => {
+    const fA = createSpineFrameOut();
+    const fB = createSpineFrameOut();
+    const proj = createSpineProjectionOut();
+
+    const gap100: number[] = [];
+    const gap180: number[] = [];
+    const yawDiff120Deg: number[] = [];
+    const pitchByStage = new Map<string, number[]>();
+    const icyNextToGentle: number[] = [];
+    const blizzardNextToGentle: number[] = [];
+
+    for (const [stage, seed] of [
+      ['icy-black', 2026],
+      ['sunny-blue', 1337],
+      ['powder-bowl', 8888],
+      ['blizzard-ridge', 4040],
+      ['granite-gorge', 777],
+    ] as const) {
+      const win = new TrailWindow(seed, stage);
+      for (let adv = 0; adv < 25; adv++) {
+        const left = win.nextLeft;
+        const right = win.nextRight;
+        if (left && right) {
+          left.sampleSpineFrame(100, fA);
+          right.projectXZ(fA.posX, fA.posZ, proj);
+          gap100.push(Math.sqrt(proj.distSq) - fA.halfWidth - proj.halfWidth);
+
+          left.sampleSpineFrame(180, fA);
+          right.projectXZ(fA.posX, fA.posZ, proj);
+          gap180.push(Math.sqrt(proj.distSq) - fA.halfWidth - proj.halfWidth);
+
+          left.sampleSpineFrame(120, fA);
+          right.sampleSpineFrame(120, fB);
+          yawDiff120Deg.push((Math.abs(fA.yawRad - fB.yawRad) * 180) / Math.PI);
+
+          for (const [seg, twin] of [
+            [left, right],
+            [right, left],
+          ] as const) {
+            let sumDeg = 0;
+            let count = 0;
+            for (let s = 80; s <= seg.length - 50; s += 20) {
+              seg.sampleSpineFrame(s, fA);
+              sumDeg += (-fA.pitchRad * 180) / Math.PI;
+              count++;
+            }
+            const midRunPitch = sumDeg / count;
+            let arr = pitchByStage.get(seg.stageId);
+            if (!arr) {
+              arr = [];
+              pitchByStage.set(seg.stageId, arr);
+            }
+            arr.push(midRunPitch);
+
+            const twinIsGentle =
+              twin.stageId === 'powder-bowl' || twin.stageId === 'sunny-blue';
+            if (seg.stageId === 'icy-black' && twinIsGentle) {
+              icyNextToGentle.push(midRunPitch);
+            } else if (seg.stageId === 'blizzard-ridge' && twinIsGentle) {
+              blizzardNextToGentle.push(midRunPitch);
+            }
+          }
+        }
+
+        const next = adv % 2 === 0 ? win.nextLeft! : (win.nextRight ?? win.nextLeft!);
+        next.sampleSpineFrame(45, fA);
+        win.updateProgression(next.id, 45, 40, fA.posX, fA.posZ);
+      }
+    }
+
+    const mean = (xs: readonly number[]): number => xs.reduce((a, b) => a + b, 0) / xs.length;
+    const sortedGap100 = [...gap100].sort((a, b) => a - b);
+    const p10Gap100 = sortedGap100[Math.floor(sortedGap100.length * 0.1)]!;
+
+    expect(gap100.length).toBeGreaterThan(0);
+    expect(mean(gap100)).toBeGreaterThanOrEqual(58);
+    expect(p10Gap100).toBeGreaterThanOrEqual(50);
+    expect(mean(gap180)).toBeGreaterThanOrEqual(115);
+    expect(mean(yawDiff120Deg)).toBeGreaterThanOrEqual(52);
+
+    const icySamples = pitchByStage.get('icy-black') ?? [];
+    const blzSamples = pitchByStage.get('blizzard-ridge') ?? [];
+    const powderSamples = pitchByStage.get('powder-bowl') ?? [];
+    expect(icySamples.length).toBeGreaterThan(0);
+    expect(blzSamples.length).toBeGreaterThan(0);
+    expect(powderSamples.length).toBeGreaterThan(0);
+    expect(mean(icySamples)).toBeGreaterThanOrEqual(25.0);
+    expect(mean(blzSamples)).toBeGreaterThanOrEqual(21.0);
+    expect(mean(powderSamples)).toBeLessThanOrEqual(13.0);
+
+    expect(icyNextToGentle.length).toBeGreaterThan(0);
+    expect(mean(icyNextToGentle)).toBeGreaterThanOrEqual(24.5);
+    expect(Math.min(...icyNextToGentle)).toBeGreaterThanOrEqual(19.0);
+
+    expect(blizzardNextToGentle.length).toBeGreaterThan(0);
+    expect(mean(blizzardNextToGentle)).toBeGreaterThanOrEqual(20.5);
+    expect(Math.min(...blizzardNextToGentle)).toBeGreaterThanOrEqual(17.0);
+
+    // Verify unchosen Tier-1 horizon ghosts restore open-leaf downstream extensions with valid dirtyRects
+    // and exact incremental-vs-fresh MountainField height parity.
+    const win = new TrailWindow(2026, 'icy-black');
+    const field = new MountainField(win);
+    field.ackDirtyRects();
+    const unchosenH1 = [win.horizonSpines[2]!, win.horizonSpines[3]!];
+    const h2Ids = new Set(win.horizon2Spines.map((sp) => sp.id));
+    expect(h2Ids.size).toBe(8);
+    expect(unchosenH1.every((sp) => !sp.macroNodes.useDownstreamExt)).toBe(true);
+
+    win.nextLeft!.sampleSpineFrame(45, fA);
+    win.updateProgression(win.nextLeft!.id, 45, 40, fA.posX, fA.posZ);
+
+    for (const sp of unchosenH1) {
+      expect(win.ghostSpines).toContain(sp);
+      expect(sp.macroNodes.useDownstreamExt).toBe(true);
+    }
+    for (const id of h2Ids) {
+      expect(win.ghostSpines.some((sp) => sp.id === id)).toBe(false);
+    }
+    expect(field.dirtyRects.length).toBeGreaterThan(0);
+    for (const r of field.dirtyRects) {
+      expect(Number.isFinite(r.minAbsX)).toBe(true);
+      expect(Number.isFinite(r.maxAbsX)).toBe(true);
+      expect(Number.isFinite(r.minAbsZ)).toBe(true);
+      expect(Number.isFinite(r.maxAbsZ)).toBe(true);
+      expect(r.minAbsX).toBeLessThanOrEqual(r.maxAbsX);
+      expect(r.minAbsZ).toBeLessThanOrEqual(r.maxAbsZ);
+    }
+
+    const freshField = new MountainField(win);
+    for (const sp of unchosenH1) {
+      const mn = sp.macroNodes;
+      const dMid = Math.floor(mn.downExtCount * 0.5);
+      const wx = mn.downExtX[dMid]!;
+      const wz = mn.downExtZ[dMid]!;
+      expect(Math.abs(field.evaluateHeight(wx, wz) - freshField.evaluateHeight(wx, wz))).toBeLessThan(1e-10);
+    }
+  });
 });

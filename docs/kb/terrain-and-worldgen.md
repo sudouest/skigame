@@ -24,12 +24,12 @@ TrailWindow (src/sim/trailWindow.ts)
  │                                               └─► [nextRight]
  ├── 4 Tier-1 Lookahead:       [horizonLL, horizonLR, horizonRL, horizonRR] (TrailSpine only, ~500-600m ahead)
  ├── 8 Tier-2 Lookahead:       [horizon2LLL .. horizon2RRR] (TrailSpine only, ~800-900m ahead; 8-rib umbrella fan)
- └── ≤44 Ghost History:        [ghostSpines] (TrailSpine only + unchosen horizon/horizon2, pruned > 960m AABB dist)
+ └── ≤44 Ghost History:        [ghostSpines] (pruned active + unchosen Tier-1 horizon spines, pruned > 960m AABB dist)
         │
         ▼ (rebuildElevationSpines() BEFORE onSegmentCreated; topology listeners notified)
 MountainField (src/sim/mountainField.ts — Model 3, implements TerrainFieldView)
  ├── Pass 1: Inverse-Barrier Piste Stamp (interior-core lock + rational C^1/C^2 shoulder blend, K = 0.31)
- ├── Pass 2A: Dual-Order Inverse-Distance Macro Sheet (16m macroNodes + 224m open-leaf ext + far-field [130, 190]m)
+ ├── Pass 2A: Dual-Order Inverse-Distance Macro Sheet (16m macroNodes + 224m open-leaf ext + far-field [120, 180]m)
  └── Pass 2B: Medial-Safe Curvature-Clamped Corridor Capsules (12m chains, (1-q)³ kernels) + C^2 Alpine Undulation + Outer Rim (110..200m)
         │
         ├──► MountainSurfaceSampler (src/sim/surfaceSampler.ts) ──► SkiPhysics, CameraRig, CreatureSystem, LayoutEngine
@@ -55,8 +55,8 @@ Never uses Frenet-Serret (which flips 180° at S-curve inflections):
 - `R0 = (cos(yaw), 0, -sin(yaw))`, `U0 = (-sin(pitch)*sin(yaw), cos(pitch), -sin(pitch)*cos(yaw))`
 - `bank = clamp(bankingFactor * k * 18.0, -0.28, 0.28)` smoothed via EMA (`:895-899`); `right = cos(bank)*R0 + sin(bank)*U0`.
 - **Curvature & Downhill Cone (`evalCurvature`, `:699-832`):** Sums 3 Gaussian S-curve lobes + fork separation (`s < 72`), tapers to `k = 0, bank = 0` at `s = 0` and `s = length`, enforces the **broad downhill fall-line cone** (`|yaw| <= 60°`, fork seams `<= 48°`, `:39-48`), and strictly clamps `|k| <= SAFE_CURVATURE_RATIO (0.395) / max(1, hw + skirtWidth)` (`:31, 830-831`).
-- **G1 (Delayed Fork Pitch Divergence, `:840-848`):** Child spines lock pitch to `startPitchRad` over `smootherstep(18, 72, s)` and apply neighbor `pitchBiasRad` strictly after `s > 18 m`, ensuring smooth V-wedge slopes.
-- **G2 (Fork Divergence Floor & `avoidSpines` Repulsion, `:341-420, 620-687, 739-778, 871-880`):** Enforces a signed lateral divergence floor over `s >= 25`, deterministic `avoidSpines` lateral repulsion (AABB pre-filtered, cached entry side-sign, per-shell directional push caps, PD angular-rate damping, and 6 m-step EMA smoothing so `k(s)` and `bank(s)` stay $C^1$), paired with `TrailWindow`'s center-outward 8-rib umbrella fan (`T1 = 0, Twin = 0` overlaps).
+- **G1 (Delayed Fork Pitch Divergence, `:840-848`):** Child spines lock pitch to `startPitchRad` over `smootherstep(18, 56, s)` and apply neighbor `pitchBiasRad` strictly after `s > 18 m`, ensuring smooth V-wedge slopes while letting branches reach their native stage slope quickly.
+- **G2 (Fork Divergence Floor & `avoidSpines` Repulsion, `:341-420, 620-687, 739-778, 871-880`):** Enforces a signed lateral divergence floor over `s >= 25`, deterministic `avoidSpines` lateral repulsion (AABB pre-filtered, cached entry side-sign, per-shell directional push caps, PD angular-rate damping, and 6 m-step EMA smoothing so `k(s)` and `bank(s)` stay $C^1$), and cliff-only PD vertical sheet coupling (`edgeDist < 200 m`, `safeDy = min(52, edgeDist * 0.30)`, tight pitch matching only for `edgeDist < 28 m`, downstream open-leaf vertical lookahead up to `MACRO_LEAF_EXTENSION_M`, `±11°` bias cap smoothed via ~14 m EMA, weighted with `prox` attenuation so gentle twins do not flatten adjacent black diamonds), paired with `TrailWindow`'s wide Tier-1 4-rib fan and Tier-2 8-rib umbrella (`T1 = 0, Twin = 0` overlaps).
 - **G3 (Flattened `IslandDivider`, `:264-272`):** `maxHeight = 1.35 m`, `maxHalfWidth ∈ [3.0, 3.8] m` (keeping transverse divider slope `<= 42°`, `normalY >= 0.74`).
 
 ### Projection & Piste Height Methods
@@ -83,10 +83,10 @@ Manages the bounded world topology and exposes `elevationSpines` to `MountainFie
 - **4 Active Slots (`prev`, `curr`, `nextLeft`, `nextRight`):** At a fork (`ensureLookaheadBranches`, `:610-699`), `curr` widens toward `endHalfWidth = W_L + W_R` with `k = 0, bank = 0`, and child branches spawn flush at `endPose.pos ± (0.5 * endPose.halfWidth) * r0` with `startHalfWidth = 0.5 * endPose.halfWidth`, `INNER_WALL_RAMP_LENGTH_M = 25`, and `SEAM_NOSE_RADIUS_M = 1.5`.
 - **Stage Fork Pairing:** Dynamically selects distinct left/right targets from `curr.stage.forkTargets` (preferring breather vs intense pairing when available) via `stageResolver`.
 - **Tier-1 & Tier-2 Horizon Lookahead (`horizonSpines` + `horizon2Spines`, `:58-76, 610-998`):**
-  - **Tier 1 (`horizonLL/LR/RL/RR`, 4 spines):** Math-only `TrailSpine`s 1 stage beyond `nextLeft`/`nextRight` (~500–600 m ahead) without firing `onSegmentCreated`.
-  - **Tier 2 (`horizon2LLL..horizon2RRR`, 8 spines):** Math-only `TrailSpine`s 1 stage deeper (~800–900 m ahead), generated in a symmetric **center-outward 8-rib umbrella fan** (`LRR → RLL → LRL → RLR → LLR → RRL → LLL → RRR`, `:957-978`) with per-shell directional push caps.
-  - On fork advance (`advanceFork`, `:522-607`), the chosen branch's Tier-1 spines promote with **0-delta geometry** into `nextLeft`/`nextRight` `TrailSegment`s, and its Tier-2 `horizon2` spines promote into `horizonLL..RR` (while unchosen `horizon` and `horizon2` spines move into `_ghostSpines`).
-- **Ghost Spine History (`:23-24, 554-571, 1256-1315`):** Pruned `prev`, unchosen fork branches, and unchosen `horizon` + `horizon2` spines keep their lightweight `TrailSpine` in `_ghostSpines` (`MAX_GHOST_SPINES = 44`, `GHOST_SPINE_PRUNE_DISTANCE_M = 960 m`). Whenever pruning removes the last surviving child of a ghost spine, `pruneGhostSpines` restores `g.setHasDownstreamChildren(false)` (`:1292-1314`) so no ghost becomes a truncated uphill macro stub inside the 280 m fog radius.
+  - **Tier 1 (`horizonLL/LR/RL/RR`, 4 spines):** Math-only `TrailSpine`s 1 stage beyond `nextLeft`/`nextRight` (~500–600 m ahead) without firing `onSegmentCreated`. On advance (`advanceFork`), these promote with **0-delta geometry** into `nextLeft`/`nextRight` `TrailSegment`s, while newly needed Tier-1 slots are built fresh as a wide center-outward 4-rib fan (`+38°/+14°/-14°/-38°`, bisectors `±26°`) avoiding `_ghostSpines` so twin divergence stays wide (`> 60 m` at `s = 100 m`).
+  - **Tier 2 (`horizon2LLL..horizon2RRR`, 8 spines):** Math-only `TrailSpine`s 1 stage deeper (~800–900 m ahead), generated in a symmetric **center-outward 8-rib umbrella fan** (`LRR → RLL → LRL → RLR → LLR → RRL → LLL → RRR`) strictly as the far macro apron; on fork advance, old `horizon2` spines are dropped (with `dirtyRects` recorded) rather than promoted into Tier-1 or pushed into `_ghostSpines`.
+  - **Unchosen Tier-1 ghosts:** When `advanceFork` moves `unchosenHorizonA/B` into `_ghostSpines`, open-leaf downstream extensions are restored (`setHasDownstreamChildren(false)`) with `recordDownstreamExtDirtyRect` so no ghost terminates abruptly behind fresh Tier-1 branches.
+- **Ghost Spine History (`:23-24, 550-585, 1245-1315`):** Pruned `prev`, unchosen fork branches, and unchosen Tier-1 `horizon` spines (with restored open-leaf downstream extensions) keep their lightweight `TrailSpine` in `_ghostSpines` (`MAX_GHOST_SPINES = 44`, `GHOST_SPINE_PRUNE_DISTANCE_M = 960 m`). Whenever pruning removes the last surviving child of a ghost spine, `pruneGhostSpines` restores `g.setHasDownstreamChildren(false)` so no ghost becomes a truncated uphill macro stub inside the 280 m fog radius.
 - **S6 Ordering Fix (`reset`, `:204-211`; `advanceFork`, `:599-605`):** Always calls `rebuildElevationSpines()` and `notifyTopologyChanged()` **before** firing `onSegmentCreated`, so `LayoutEngine.bakeSegment` evaluates against the complete post-advance `MountainField` topology.
 - **Progression & Pruning (`updateProgression`, `:395-505`):** Promotes `curr` once the skier crosses the fork seam plane (works on-piste and off-piste) and prunes the unchosen branch + old `prev` once `s >= DEFAULT_FORK_PRUNE_DISTANCE_M (40 m)` into the chosen child.
 
@@ -104,8 +104,8 @@ Evaluates continuous Model 3 `H(wx, wz)` in absolute noise coordinates `(absX = 
 | `PISTE_AABB_PAD_M` / `blendW` | `64 m` / `14.5 m` | Pass 1 candidate AABB filter & lateral shoulder blend width |
 | `MACRO_R0_SQ` / `MACRO_LOCAL_R0_SQ` | `8.5²` / `36²` | Dual-order inverse-distance macro sheet kernels |
 | `MACRO_DOWN_EXT_R0_SQ` | `48²` | Soft-core kernel for open-leaf downstream extensions (`downExtClear`-masked) |
-| `MACRO_WIN_IN_M` / `OUT_M` | `120 m` / `240 m` | Compact support window for near macro nodes |
-| `MACRO_FAR_BLEND_START_M` / `END_M` | `130 m` / `190 m` | Relative-window far-field handoff over unclipped `allSpines` |
+| `MACRO_WIN_IN_M` / `OUT_M` | `105 m` / `205 m` | Compact support window for near macro nodes |
+| `MACRO_FAR_BLEND_START_M` / `END_M` | `120 m` / `180 m` | Relative-window far-field handoff over unclipped `allSpines` (`MACRO_FAR_WIN_OUT_OFFSET_M = 180 m`) |
 | `ALPINE_UNDULATION_AMP_M` / `FREQ` | `3.2 m` / `0.0085` | Subtle zero-mean $C^2$ off-piste `fbm2D` undulation (faded to 0 on piste) |
 | `OUTER_RIM_START_M` / `END_M` | `110 m` / `200 m` | Flat-topped outer alpine valley walls (`+38..+52 m` via `smoothRidgedNoise2D`) |
 | `NORMAL_SAMPLE_EPS_M` | `0.5 m` | Central finite-diff half-span (`1.0 m` total span) |
@@ -123,7 +123,7 @@ Evaluates continuous Model 3 `H(wx, wz)` in absolute noise coordinates `(absX = 
    - Over coarse `16 m` `macroNodes` + `224 m` open-leaf extensions (with `downExtClear` masking on `useDownstreamExt` so ghost extensions never form floating pillars beside neighboring lower spines):
      - `wBlend = win / (smoothEdge² + 8.5²)` for linear inter-spine valley blending;
      - `wLocal = wBlend / (smoothEdge² + 36²)` for localized curved-spine elevation (`downExt` uses `1 / (rSq + 48²)`).
-   - **Far-field handoff (`:1211-1555`):** Beyond `MACRO_FAR_BLEND_START_M = 130 m` (up to `190 m`), smoothly blends over `allSpines` (ignoring tile `candidateSpines` crop for zero tile-bounds disparity) using a relative window `[trueMinDist + 60, trueMinDist + 200]`.
+   - **Far-field handoff:** Beyond `MACRO_FAR_BLEND_START_M = 120 m` (up to `180 m`, well inside the `[105, 205] m` near-window fade), smoothly blends over `allSpines` (ignoring tile `candidateSpines` crop for zero tile-bounds disparity) using a relative window `[trueMinDist + 60, trueMinDist + 180]`.
 3. **Pass 2B — Curvature-Clamped Corridor Capsules & Outer Rim (`:1559-1748`):**
    - Evaluates `corridorLeft`/`corridorRight` `(1 - q)³` polynomial kernels (zero `sqrt`/`exp`) modulated by `fbm2D` (`rollingHills`, `alpineBowl`) and $C^2$ `smoothRidgedNoise2D` (`canyonWalls`, `chasm`, `eps = 0.08` in `src/core/noise.ts:98-131`), scaled by cached cross-spine clearance `clearScaleCache` (`applyOtherSpineClearance`, `:723-763`, incrementally maintained on topology changes).
    - Smooth $C^\infty$ normalized opposing-relief blend bounds worst-case off-piste slope (`normalY >= 0.38`), multiplied by quadratic `reliefFade = reliefOffMask²` over `9.5–11.0 m` plus `ALPINE_UNDULATION_AMP_M` (`3.2 m`) and `evaluateOuterValleyRim` (`110..200 m`).
