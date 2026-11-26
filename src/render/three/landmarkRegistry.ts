@@ -2,9 +2,10 @@ import * as THREE from 'three';
 import type { LandmarkYawPolicy } from '../../content/types';
 import type { SegmentLandmarkRequirement } from '../../sim/contracts';
 import type { GraphicsUtils } from './graphicsUtils';
-import { createForkArchObject, type ProceduralMeshAssets } from './meshFactory';
+import type { ProceduralMeshAssets } from './meshFactory';
 import { createFolkAFrameLandmarkDef } from './models/folkAFrameModel';
 import { createFolkCabinLandmarkDef } from './models/folkCabinModel';
+import { createTrailGateLandmarkDef } from './models/trailGateModel';
 import type { SharedToonMaterials } from './toonMaterials';
 
 export interface ChimneyEmitterAnchor {
@@ -72,24 +73,7 @@ export function createDefaultLandmarkRegistry(
 ): LandmarkModelRegistry {
   const registry = new LandmarkModelRegistry();
 
-  registry.register({
-    id: 'forkArch',
-    poolCapacity: 12,
-    yawPolicy: 'none',
-    createInstance: (index) => {
-      const arch = createForkArchObject(
-        gfx,
-        meshAssets,
-        materials.propToonMaterial,
-        materials.beaconGlowMaterial,
-      );
-      gfx.markAsCache(arch.group, `PooledForkArch_${index}`);
-      return {
-        group: arch.group,
-        configure: (lm) => arch.setBadge(lm.badgeStageId, lm.gateHalfWidth),
-      };
-    },
-  });
+  registry.register(createTrailGateLandmarkDef(gfx, materials, outlineMaterial));
 
   registry.register({
     id: 'proc:lantern',

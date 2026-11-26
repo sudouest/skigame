@@ -48,7 +48,8 @@ import { GraphicsTracker } from '../graphicsTracker';
 import { GraphicsUtils } from '../graphicsUtils';
 import { InstancePools, MAX_STATIC_BILLBOARDS } from '../instancePools';
 import { LandmarkStreamer } from '../landmarkStreamer';
-import { createForkArchObject, createProceduralMeshAssets } from '../meshFactory';
+import { createProceduralMeshAssets } from '../meshFactory';
+import { createTrailGateAssets, createTrailGateObject } from '../models/trailGateModel';
 import { createSmoothOutlineMaterial } from '../outlineShader';
 import { CAMERA_FAR_M, ThreeRenderer } from '../renderer';
 import { SkierRig } from '../skierRig';
@@ -1956,23 +1957,19 @@ describe('CDLOD TerrainClipmap, ClipmapDataStore, SceneryCellStreamer, LandmarkS
     expect(minTreeDist).toBeGreaterThanOrEqual(4.19);
     expect(sawUnderstoryTucked).toBe(true);
 
-    // Explicitly verify green circle badge on 'powder-bowl' fork arch
+    // Explicitly verify green circle badge on 'powder-bowl' trail gate
     const tracker = new GraphicsTracker();
     const gfx = new GraphicsUtils(tracker);
     const mats = createSharedToonMaterials(gfx);
-    const powderAssets = createProceduralMeshAssets(gfx);
-    const powderArch = createForkArchObject(
-      gfx,
-      powderAssets,
-      mats.propToonMaterial,
-      mats.propToonMaterial,
-      'powder-bowl',
-    );
+    const gateAssets = createTrailGateAssets(gfx, mats);
+    const powderArch = createTrailGateObject(gfx, gateAssets, 'powder-bowl');
     expect(powderArch.group.getObjectByName('ForkBadgeCircle')?.visible).toBe(true);
     expect(powderArch.group.getObjectByName('ForkBadgeSquare')?.visible).toBe(false);
     expect(powderArch.group.getObjectByName('ForkBadgeDiamond')?.visible).toBe(false);
-    expect(powderArch.group.getObjectByName('ForkGateTrimCircle')?.visible).toBe(true);
+    expect(powderArch.group.getObjectByName('TrailGateLeftPost')).toBeDefined();
+    expect(powderArch.group.getObjectByName('TrailGateRightPost')).toBeDefined();
     gfx.disposeObject(powderArch.group);
+    tracker.disposeAll();
 
     // Verify blizzard-ridge fog clamp & rocky scenery
     const blizSim = new SkiSimulation({ seed: 101, startStageId: 'blizzard-ridge' });

@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { getStageDef } from '../../content/stages';
 import { buildChimneySmokeQuadGeometry } from './chimneySmoke';
 import type { GraphicsUtils } from './graphicsUtils';
 import {
@@ -7,7 +6,6 @@ import {
   type ColoredGeometryPart,
 } from './models/proceduralModelUtils';
 import { computeSmoothNormals } from './smoothNormals';
-import type { SharedToonMaterials } from './toonMaterials';
 
 export { buildMergedColoredGeometry, type ColoredGeometryPart };
 
@@ -217,73 +215,11 @@ export interface ProceduralMeshAssets {
   readonly presentStdGeo: THREE.BufferGeometry;
   readonly presentGoldGeo: THREE.BufferGeometry;
   readonly rampGeo: THREE.BufferGeometry;
-  readonly badgeCircleGeo: THREE.BufferGeometry;
-  readonly badgeSquareGeo: THREE.BufferGeometry;
-  readonly badgeDiamondGeo: THREE.BufferGeometry;
-  readonly badgeTrimCircleGeo: THREE.BufferGeometry;
-  readonly badgeTrimSquareGeo: THREE.BufferGeometry;
-  readonly badgeTrimDiamondGeo: THREE.BufferGeometry;
-  readonly forkArchFrameGeo: THREE.BufferGeometry;
   readonly lanternPostGeo: THREE.BufferGeometry;
   readonly lanternGlowGeo: THREE.BufferGeometry;
   readonly deliveryArchGeo: THREE.BufferGeometry;
   readonly deliveryArchGlowGeo: THREE.BufferGeometry;
   readonly cabinSmokeGeo: THREE.BufferGeometry;
-}
-
-function buildStageBadgeGeo(
-  shape: 'circle' | 'square' | 'diamond',
-  colorHex: string,
-  label: string,
-): THREE.BufferGeometry {
-  const parts: ColoredGeometryPart[] = [
-    // Dark contrast outer backing frame
-    { geometry: new THREE.BoxGeometry(3.65, 3.65, 0.22), color: '#0f172a' },
-    // White backing plaque
-    { geometry: new THREE.BoxGeometry(3.4, 3.4, 0.3), color: '#f8fafc' },
-  ];
-  if (shape === 'circle') {
-    parts.push({
-      geometry: new THREE.CylinderGeometry(1.18, 1.18, 0.42, 16),
-      color: colorHex,
-      rx: Math.PI * 0.5,
-    });
-  } else if (shape === 'square') {
-    parts.push({
-      geometry: new THREE.BoxGeometry(2.1, 2.1, 0.42),
-      color: colorHex,
-    });
-  } else {
-    parts.push({
-      geometry: new THREE.BoxGeometry(1.78, 1.78, 0.42),
-      color: colorHex,
-      rz: Math.PI * 0.25,
-    });
-  }
-  return buildMergedColoredGeometry(parts, label, false);
-}
-
-function buildGateTrimGeo(
-  colorHex: string,
-  accentHex: string,
-  label: string,
-): THREE.BufferGeometry {
-  const parts: ColoredGeometryPart[] = [
-    // Color-coded header fascia bars along front and back of crossbar
-    { geometry: new THREE.BoxGeometry(19.6, 0.48, 0.12), color: colorHex, ty: 7.15, tz: 0.52 },
-    { geometry: new THREE.BoxGeometry(19.6, 0.48, 0.12), color: colorHex, ty: 7.15, tz: -0.52 },
-    // Thin contrast trim borders framing the fascia bar
-    { geometry: new THREE.BoxGeometry(19.6, 0.1, 0.12), color: accentHex, ty: 7.45, tz: 0.52 },
-    { geometry: new THREE.BoxGeometry(19.6, 0.1, 0.12), color: accentHex, ty: 6.85, tz: 0.52 },
-    { geometry: new THREE.BoxGeometry(19.6, 0.1, 0.12), color: accentHex, ty: 7.45, tz: -0.52 },
-    { geometry: new THREE.BoxGeometry(19.6, 0.1, 0.12), color: accentHex, ty: 6.85, tz: -0.52 },
-    // Upper post accent bands
-    { geometry: new THREE.BoxGeometry(0.96, 0.72, 0.96), color: colorHex, tx: -10.0, ty: 5.35 },
-    { geometry: new THREE.BoxGeometry(0.96, 0.72, 0.96), color: colorHex, tx: 10.0, ty: 5.35 },
-    { geometry: new THREE.BoxGeometry(1.0, 0.16, 1.0), color: accentHex, tx: -10.0, ty: 4.9 },
-    { geometry: new THREE.BoxGeometry(1.0, 0.16, 1.0), color: accentHex, tx: 10.0, ty: 4.9 },
-  ];
-  return buildMergedColoredGeometry(parts, label, false);
 }
 
 /**
@@ -314,40 +250,6 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     ['#e0f2fe', '#7dd3fc', '#f59e0b'],
     'SkiRampUnitGeo',
   );
-
-  // Single-path gate frame spanning X = [-10.0, +10.0] with 7.15m overhead crossbar
-  const forkArchFrameGeo = buildMergedColoredGeometry(
-    [
-      { geometry: new THREE.BoxGeometry(0.85, 7.4, 0.85), color: '#78350f', tx: -10.0, ty: 3.7 },
-      { geometry: new THREE.BoxGeometry(0.85, 7.4, 0.85), color: '#78350f', tx: 10.0, ty: 3.7 },
-      {
-        geometry: new THREE.BoxGeometry(0.45, 2.2, 0.45),
-        color: '#78350f',
-        tx: -9.15,
-        ty: 6.1,
-        rz: -Math.PI * 0.25,
-      },
-      {
-        geometry: new THREE.BoxGeometry(0.45, 2.2, 0.45),
-        color: '#78350f',
-        tx: 9.15,
-        ty: 6.1,
-        rz: Math.PI * 0.25,
-      },
-      { geometry: new THREE.BoxGeometry(21.6, 1.05, 0.95), color: '#92400e', ty: 7.15 },
-      { geometry: new THREE.BoxGeometry(22.2, 0.35, 1.15), color: '#f8fafc', ty: 7.85 },
-    ],
-    'ForkArchFrameGeo',
-    false,
-  );
-
-  const badgeCircleGeo = buildStageBadgeGeo('circle', '#16a34a', 'BadgeCircleGeo');
-  const badgeSquareGeo = buildStageBadgeGeo('square', '#2563eb', 'BadgeSquareGeo');
-  const badgeDiamondGeo = buildStageBadgeGeo('diamond', '#111827', 'BadgeDiamondGeo');
-
-  const badgeTrimCircleGeo = buildGateTrimGeo('#16a34a', '#dcfce7', 'BadgeTrimCircleGeo');
-  const badgeTrimSquareGeo = buildGateTrimGeo('#2563eb', '#dbeafe', 'BadgeTrimSquareGeo');
-  const badgeTrimDiamondGeo = buildGateTrimGeo('#111827', '#38bdf8', 'BadgeTrimDiamondGeo');
 
   // Delivery Lantern Post
   const lanternPostGeo = buildMergedColoredGeometry(
@@ -396,13 +298,6 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     presentStdGeo,
     presentGoldGeo,
     rampGeo,
-    badgeCircleGeo,
-    badgeSquareGeo,
-    badgeDiamondGeo,
-    badgeTrimCircleGeo,
-    badgeTrimSquareGeo,
-    badgeTrimDiamondGeo,
-    forkArchFrameGeo,
     lanternPostGeo,
     lanternGlowGeo,
     deliveryArchGeo,
@@ -419,78 +314,10 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     presentStdGeo,
     presentGoldGeo,
     rampGeo,
-    badgeCircleGeo,
-    badgeSquareGeo,
-    badgeDiamondGeo,
-    badgeTrimCircleGeo,
-    badgeTrimSquareGeo,
-    badgeTrimDiamondGeo,
-    forkArchFrameGeo,
     lanternPostGeo,
     lanternGlowGeo,
     deliveryArchGeo,
     deliveryArchGlowGeo,
     cabinSmokeGeo,
   };
-}
-
-/**
- * Helper to create a complete pooled single-branch ForkArch gate with swappable stage badge and trim.
- */
-export function createForkArchObject(
-  gfx: GraphicsUtils,
-  assets: ProceduralMeshAssets,
-  toonMat: THREE.Material,
-  badgeMat: THREE.Material = toonMat,
-  stageId?: string | null,
-): {
-  readonly group: THREE.Group;
-  setBadge: (stageId?: string | null, gateHalfWidth?: number) => void;
-} {
-  const group = new THREE.Group();
-  group.name = 'ForkArchLandmark';
-
-  const frameHolder = new THREE.Group();
-  frameHolder.name = 'ForkArchFrameHolder';
-  const frameMesh = gfx.createMesh(assets.forkArchFrameGeo, toonMat, 'ForkArchFrame');
-  const trimCircle = gfx.createMesh(assets.badgeTrimCircleGeo, toonMat, 'ForkGateTrimCircle');
-  const trimSquare = gfx.createMesh(assets.badgeTrimSquareGeo, toonMat, 'ForkGateTrimSquare');
-  const trimDiamond = gfx.createMesh(assets.badgeTrimDiamondGeo, toonMat, 'ForkGateTrimDiamond');
-  frameMesh.castShadow = true;
-  trimCircle.castShadow = true;
-  trimSquare.castShadow = true;
-  trimDiamond.castShadow = true;
-  frameHolder.add(frameMesh, trimCircle, trimSquare, trimDiamond);
-  group.add(frameHolder);
-
-  const badgeHolder = new THREE.Group();
-  badgeHolder.name = 'ForkArchBadgeHolder';
-  badgeHolder.position.set(0, 7.55, 0.65);
-  const circle = gfx.createMesh(assets.badgeCircleGeo, badgeMat, 'ForkBadgeCircle');
-  const square = gfx.createMesh(assets.badgeSquareGeo, badgeMat, 'ForkBadgeSquare');
-  const diamond = gfx.createMesh(assets.badgeDiamondGeo, badgeMat, 'ForkBadgeDiamond');
-  circle.castShadow = true;
-  square.castShadow = true;
-  diamond.castShadow = true;
-  badgeHolder.add(circle, square, diamond);
-  group.add(badgeHolder);
-
-  const setBadge = (nextStageId?: string | null, gateHalfWidth?: number): void => {
-    const shape = nextStageId ? (getStageDef(nextStageId)?.badge.shape ?? 'square') : 'square';
-    circle.visible = shape === 'circle';
-    square.visible = shape === 'square';
-    diamond.visible = shape === 'diamond';
-    trimCircle.visible = shape === 'circle';
-    trimSquare.visible = shape === 'square';
-    trimDiamond.visible = shape === 'diamond';
-
-    const scaleX =
-      gateHalfWidth !== undefined
-        ? Math.min(1.35, Math.max(0.65, (gateHalfWidth - 2.5) / 10.0))
-        : 1.0;
-    frameHolder.scale.set(scaleX, 1, 1);
-  };
-
-  setBadge(stageId);
-  return { group, setBadge };
 }
