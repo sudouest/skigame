@@ -1,4 +1,36 @@
-import type { DeliveryZoneDef } from './types';
+import type { DeliveryZoneDef, LandmarkColliderSpec } from './types';
+
+export const FOLK_LOG_COLLIDER: LandmarkColliderSpec = {
+  id: 'building_folk_log',
+  shape: 'box',
+  halfWidth: 2.55,
+  halfDepth: 3.3,
+  height: 5.4,
+  skirtDepth: 2.0,
+  offsetX: 0,
+  offsetZ: -0.4,
+  impact: {
+    effect: 'wipeout',
+    presentsDropped: 3,
+    speedRetention: 0,
+  },
+};
+
+export const FOLK_AFRAME_COLLIDER: LandmarkColliderSpec = {
+  id: 'building_folk_aframe',
+  shape: 'box',
+  halfWidth: 3.0,
+  halfDepth: 2.85,
+  height: 5.6,
+  skirtDepth: 2.0,
+  offsetX: -0.15,
+  offsetZ: 0,
+  impact: {
+    effect: 'wipeout',
+    presentsDropped: 3,
+    speedRetention: 0,
+  },
+};
 
 export const DELIVERY_CHILD_SOLO: DeliveryZoneDef = {
   id: 'child_solo',
@@ -104,6 +136,8 @@ export const DELIVERY_VILLAGE_PLAZA: DeliveryZoneDef = {
     variant: 'folk_log',
     outline: true,
   },
+  landmarkYawPolicy: 'faceTrail',
+  landmarkCollider: FOLK_LOG_COLLIDER,
   landmarkVisualPool: [
     {
       visual: {
@@ -117,6 +151,8 @@ export const DELIVERY_VILLAGE_PLAZA: DeliveryZoneDef = {
       weight: 1,
       clearanceRadius: 4.5,
       lateralOffsetM: 3.0,
+      yawPolicy: 'faceTrail',
+      collider: FOLK_LOG_COLLIDER,
     },
     {
       visual: {
@@ -130,6 +166,8 @@ export const DELIVERY_VILLAGE_PLAZA: DeliveryZoneDef = {
       weight: 1,
       clearanceRadius: 4.8,
       lateralOffsetM: 3.2,
+      yawPolicy: 'faceTrail',
+      collider: FOLK_AFRAME_COLLIDER,
     },
   ],
   requiredSceneryId: 'delivery_cabin',

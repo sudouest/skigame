@@ -8,7 +8,13 @@ import {
   type TerrainFieldView,
   type TerrainGridSampleOut,
 } from '../contracts';
-import { MAX_CREATURES, MAX_HAZARDS, MAX_RAMPS, type EntityPools } from '../entityPools';
+import {
+  MAX_CREATURES,
+  MAX_HAZARDS,
+  MAX_RAMPS,
+  MAX_STRUCTURES,
+  type EntityPools,
+} from '../entityPools';
 import { DisposableScope, type JoltModule, type JoltRuntime, type JoltWorldSlot } from './joltRuntime';
 import {
   MAX_CONTACT_EVENTS_PER_STEP,
@@ -62,7 +68,7 @@ const BUBBLE_EXIT_RADIUS_M = 60.0;
 const BUBBLE_EXIT_RADIUS_SQ = BUBBLE_EXIT_RADIUS_M * BUBBLE_EXIT_RADIUS_M;
 const BUBBLE_RESYNC_DIST_M = 4.0;
 const BUBBLE_RESYNC_DIST_SQ = BUBBLE_RESYNC_DIST_M * BUBBLE_RESYNC_DIST_M;
-const LISTENER_PROXIMITY_SQ = 8.0 * 8.0;
+const LISTENER_PROXIMITY_M = 8.0;
 
 export const MAX_CLIMBABLE_SLOPE_DEG = 52;
 export const MAX_CLIMBABLE_SLOPE_RAD = degToRad(MAX_CLIMBABLE_SLOPE_DEG);
@@ -74,6 +80,7 @@ const KIND_RAMP = 2;
 const KIND_HAZARD = 3;
 const KIND_CREATURE = 4;
 const KIND_FORK_BUMPER = 5;
+const KIND_STRUCTURE = 6;
 
 const KIND_TABLE: readonly ContactBodyKind[] = [
   'none',
@@ -82,6 +89,7 @@ const KIND_TABLE: readonly ContactBodyKind[] = [
   'hazard',
   'creature',
   'forkBumper',
+  'structure',
 ];
 
 const FORK_BUMPER_CLEARANCE_Y_M = 1.65;
@@ -100,6 +108,7 @@ interface BubbleBodySlot {
   posY: number;
   posZ: number;
   halfHeightY: number;
+  boundingRadius: number;
 }
 
 export interface JoltContactSolverOptions {
@@ -176,6 +185,7 @@ export class JoltContactSolver implements WorldContactSolver {
   private readonly hazardSlotToBubble = new Int32Array(MAX_HAZARDS).fill(-1);
   private readonly rampSlotToBubble = new Int32Array(MAX_RAMPS).fill(-1);
   private readonly creatureSlotToBubble = new Int32Array(MAX_CREATURES).fill(-1);
+  private readonly structureSlotToBubble = new Int32Array(MAX_STRUCTURES).fill(-1);
   private forkBumperBubbleSlot = -1;
   private forkBumperLastX = NaN;
   private forkBumperLastY = NaN;
@@ -186,6 +196,7 @@ export class JoltContactSolver implements WorldContactSolver {
   private lastHazardCount = -1;
   private lastRampCount = -1;
   private lastCreatureCount = -1;
+  private lastStructureCount = -1;
   private hasNearbyObstacle = false;
   private patchHasSteepSlope = false;
 
@@ -230,6 +241,7 @@ export class JoltContactSolver implements WorldContactSolver {
         posY: 0,
         posZ: 0,
         halfHeightY: 0,
+        boundingRadius: 0,
       });
       this.freeBubbleSlotIndices.push(MAX_BUBBLE_BODIES - 1 - i);
     }
@@ -362,7 +374,9 @@ export class JoltContactSolver implements WorldContactSolver {
       const bIdx = heapU32[bodyIdPtr >> 2]! & BODY_ID_INDEX_MASK;
       if (bIdx >= maxBodies) return false;
       const kindCode = bodyKinds[bIdx]!;
-      if (kindCode === KIND_TERRAIN || kindCode === KIND_RAMP) return true;
+      if (kindCode === KIND_TERRAIN || kindCode === KIND_RAMP || kindCode === KIND_STRUCTURE) {
+        return true;
+      }
       if (kindCode === KIND_HAZARD) {
         if (!this.activeCollideHazards) return false;
         if (!this.activeIsWipeoutTumble) {
@@ -584,11 +598,12 @@ export class JoltContactSolver implements WorldContactSolver {
       );
     }
 
-    // 2. Sync active 50-60m body bubble (hazards, ramps, creatures, fork nose bumper)
+    // 2. Sync active 50-60m body bubble (hazards, ramps, creatures, structures, fork nose bumper)
     const poolCountChanged =
       pools.hazards.count !== this.lastHazardCount ||
       pools.ramps.count !== this.lastRampCount ||
-      pools.creatures.count !== this.lastCreatureCount;
+      pools.creatures.count !== this.lastCreatureCount ||
+      pools.structures.count !== this.lastStructureCount;
     const dxB = skierX - this.lastBubbleSyncX;
     const dzB = skierZ - this.lastBubbleSyncZ;
     if (
@@ -602,6 +617,7 @@ export class JoltContactSolver implements WorldContactSolver {
       this.lastHazardCount = pools.hazards.count;
       this.lastRampCount = pools.ramps.count;
       this.lastCreatureCount = pools.creatures.count;
+      this.lastStructureCount = pools.structures.count;
     }
 
     // 3. Update kinematic creature poses & velocities every tick (only 0..3 creatures in bubble!)
@@ -616,7 +632,8 @@ export class JoltContactSolver implements WorldContactSolver {
       const slot = this.bubbleSlots[this.activeBubbleIndices[i]!]!;
       const dx = slot.posX - skierX;
       const dz = slot.posZ - skierZ;
-      if (dx * dx + dz * dz <= LISTENER_PROXIMITY_SQ) {
+      const prox = LISTENER_PROXIMITY_M + slot.boundingRadius;
+      if (dx * dx + dz * dz <= prox * prox) {
         nearObs = true;
         break;
       }
@@ -893,6 +910,7 @@ export class JoltContactSolver implements WorldContactSolver {
     this.lastHazardCount = -1;
     this.lastRampCount = -1;
     this.lastCreatureCount = -1;
+    this.lastStructureCount = -1;
     this.hasNearbyObstacle = false;
     this.patchHasSteepSlope = false;
     this.runtime.physicsSystem.OptimizeBroadPhase();
@@ -1419,6 +1437,7 @@ export class JoltContactSolver implements WorldContactSolver {
           this.scratchQuat,
           this.jolt.EMotionType_Static,
           this.worldSlot.staticLayer,
+          r,
         );
         this.hazardSlotToBubble[i] = slotIdx;
       }
@@ -1452,6 +1471,7 @@ export class JoltContactSolver implements WorldContactSolver {
           this.scratchQuat,
           this.jolt.EMotionType_Static,
           this.worldSlot.staticLayer,
+          Math.hypot(w * 0.5, l * 0.5),
         );
         this.rampSlotToBubble[i] = slotIdx;
       }
@@ -1483,8 +1503,49 @@ export class JoltContactSolver implements WorldContactSolver {
           this.identityQuat,
           this.jolt.EMotionType_Kinematic,
           this.worldSlot.movingLayer,
+          r,
         );
         this.creatureSlotToBubble[i] = slotIdx;
+      }
+    }
+
+    const structures = pools.structures;
+    for (let i = 0; i < structures.count; i++) {
+      const dx = structures.posX[i]! - skierX;
+      const dz = structures.posZ[i]! - skierZ;
+      const distSq = dx * dx + dz * dz;
+      const boundR = Math.max(0.5, structures.boundingRadius[i]!);
+      const enterR = BUBBLE_ENTER_RADIUS_M + boundR;
+      const exitR = BUBBLE_EXIT_RADIUS_M + boundR;
+      const existingSlot = this.structureSlotToBubble[i]!;
+      if (existingSlot >= 0) {
+        if (distSq > exitR * exitR) {
+          this.removeBubbleSlot(existingSlot);
+          this.structureSlotToBubble[i] = -1;
+        }
+      } else if (distSq <= enterR * enterR) {
+        const hw = Math.max(0.2, structures.halfWidth[i]!);
+        const hd = Math.max(0.2, structures.halfDepth[i]!);
+        const h = Math.max(0.5, structures.height[i]!);
+        const skirt = Math.max(0, structures.skirtDepth[i]!);
+        const halfH = (h + skirt) * 0.5;
+        const centerOffsetY = (h - skirt) * 0.5;
+        const shape = this.getOrCreateOrientedBoxShape(hw, halfH, hd);
+        this.setQuatFromYawPitch(structures.yawRad[i]!, 0, this.scratchQuat);
+        const slotIdx = this.addBubbleBody(
+          KIND_STRUCTURE,
+          i,
+          shape,
+          structures.posX[i]!,
+          structures.posY[i]!,
+          structures.posZ[i]!,
+          centerOffsetY,
+          this.scratchQuat,
+          this.jolt.EMotionType_Static,
+          this.worldSlot.staticLayer,
+          boundR,
+        );
+        this.structureSlotToBubble[i] = slotIdx;
       }
     }
   }
@@ -1571,6 +1632,7 @@ export class JoltContactSolver implements WorldContactSolver {
           this.identityQuat,
           this.jolt.EMotionType_Static,
           this.worldSlot.staticLayer,
+          r,
         );
         this.forkBumperLastX = forkBumper.seamWorldX;
         this.forkBumperLastY = forkBumper.seamWorldY;
@@ -1591,6 +1653,7 @@ export class JoltContactSolver implements WorldContactSolver {
     rot: JoltNS.Quat,
     motionType: JoltNS.EMotionType,
     objectLayer: number,
+    boundingRadius = 0,
   ): number {
     const slotIdx = this.freeBubbleSlotIndices.pop();
     if (slotIdx === undefined) return -1;
@@ -1627,6 +1690,7 @@ export class JoltContactSolver implements WorldContactSolver {
     slot.posY = posY;
     slot.posZ = posZ;
     slot.halfHeightY = halfHeightY;
+    slot.boundingRadius = boundingRadius;
     this.activeBubbleIndices.push(slotIdx);
     return slotIdx;
   }
@@ -1652,6 +1716,7 @@ export class JoltContactSolver implements WorldContactSolver {
     slot.kindCode = KIND_NONE;
     slot.poolIndex = -1;
     slot.bodyIndex = -1;
+    slot.boundingRadius = 0;
     const activePos = this.activeBubbleIndices.indexOf(slotIdx);
     if (activePos >= 0) {
       const last = this.activeBubbleIndices.pop()!;
@@ -1670,6 +1735,7 @@ export class JoltContactSolver implements WorldContactSolver {
     this.hazardSlotToBubble.fill(-1);
     this.rampSlotToBubble.fill(-1);
     this.creatureSlotToBubble.fill(-1);
+    this.structureSlotToBubble.fill(-1);
     this.forkBumperBubbleSlot = -1;
     this.forkBumperLastX = NaN;
     this.lastBubbleSyncX = NaN;
@@ -1677,6 +1743,7 @@ export class JoltContactSolver implements WorldContactSolver {
     this.lastHazardCount = -1;
     this.lastRampCount = -1;
     this.lastCreatureCount = -1;
+    this.lastStructureCount = -1;
     this.hasNearbyObstacle = false;
   }
 
@@ -1702,6 +1769,24 @@ export class JoltContactSolver implements WorldContactSolver {
     const halfD = Math.min(radius, Math.max(0.25, halfH));
     const convexR = Math.min(0.05, radius * 0.5, halfH * 0.5, halfD * 0.5);
     const ext = new this.jolt.Vec3(radius, halfH, halfD);
+    const shape = new this.jolt.BoxShape(ext, convexR);
+    this.jolt.destroy(ext);
+    shape.AddRef();
+    this.shapeCache.set(key, shape);
+    return shape;
+  }
+
+  private getOrCreateOrientedBoxShape(
+    halfWidth: number,
+    halfHeight: number,
+    halfDepth: number,
+  ): JoltNS.Shape {
+    const key = `obox:${Math.round(halfWidth * 1000)}:${Math.round(halfHeight * 1000)}:${Math.round(halfDepth * 1000)}`;
+    const cached = this.shapeCache.get(key);
+    if (cached) return cached;
+
+    const convexR = Math.min(0.05, halfWidth * 0.5, halfHeight * 0.5, halfDepth * 0.5);
+    const ext = new this.jolt.Vec3(halfWidth, halfHeight, halfDepth);
     const shape = new this.jolt.BoxShape(ext, convexR);
     this.jolt.destroy(ext);
     shape.AddRef();

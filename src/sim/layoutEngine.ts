@@ -5,13 +5,16 @@ import { getCreatureDef } from '../content/creatures';
 import { getDeliveryZoneDef } from '../content/deliveryZones';
 import { getHazardDef, getRampDef } from '../content/hazards';
 import { getPresentDef } from '../content/presents';
-import type {
-  DeliveryZoneDef,
-  HazardDef,
-  PlacementBand,
-  StageCreatureRule,
-  StageDeliveryRule,
-  StageSpawnRule,
+import {
+  resolveLandmarkWorldYaw,
+  type DeliveryZoneDef,
+  type HazardDef,
+  type LandmarkColliderSpec,
+  type LandmarkYawPolicy,
+  type PlacementBand,
+  type StageCreatureRule,
+  type StageDeliveryRule,
+  type StageSpawnRule,
 } from '../content/types';
 import {
   createMountainSampleOut,
@@ -488,6 +491,8 @@ export class LayoutEngine {
 
     // Emit SegmentLandmarkRequirement for LandmarkStreamer (cabin/chalet/lantern/arch beside children)
     let chosenVisual = def.landmarkVisual;
+    let chosenYawPolicy: LandmarkYawPolicy = def.landmarkYawPolicy ?? 'none';
+    let chosenCollider: LandmarkColliderSpec | undefined = def.landmarkCollider;
     let clearanceRadius = 4.5;
     let lateralOffsetM = 3.0;
     if (def.landmarkVisualPool && def.landmarkVisualPool.length > 0) {
@@ -495,12 +500,31 @@ export class LayoutEngine {
       const picked = variantRng.pickWeighted(def.landmarkVisualPool, (o) => o.weight);
       if (picked) {
         chosenVisual = picked.visual;
+        chosenYawPolicy = picked.yawPolicy ?? chosenYawPolicy;
+        chosenCollider = picked.collider ?? chosenCollider;
         clearanceRadius = picked.clearanceRadius ?? clearanceRadius;
         lateralOffsetM = picked.lateralOffsetM ?? lateralOffsetM;
       }
     }
 
-    const landmarkX = clamp(zoneX + side * lateralOffsetM, -(hw + 2.0), hw + 2.0);
+    const scale =
+      chosenVisual.kind === 'procedural' || chosenVisual.kind === 'mesh'
+        ? clamp(chosenVisual.scale ?? 1, 0.5, 2)
+        : 1;
+
+    let landmarkX = clamp(zoneX + side * lateralOffsetM, -(hw + 2.0), hw + 2.0);
+    if (chosenCollider) {
+      const offX = chosenCollider.offsetX ?? 0;
+      const offZ = chosenCollider.offsetZ ?? 0;
+      const structExtentR =
+        (Math.hypot(chosenCollider.halfWidth, chosenCollider.halfDepth) + Math.hypot(offX, offZ)) *
+        scale;
+      if (Math.abs(landmarkX - safeX) < structExtentR + 2.5) {
+        landmarkX = clamp(safeX + side * (structExtentR + 2.6), -(hw + 2.0), hw + 2.0);
+      }
+      clearanceRadius = Math.max(clearanceRadius, structExtentR + 0.5);
+    }
+
     this.samplePlacementSurface(segment, s, landmarkX, mountainField);
     const landmarkReq: SegmentLandmarkRequirement = {
       id: `deliv_lm_${segment.id}_${Math.round(s)}_${rng.nextInt(100, 999)}`,
@@ -514,6 +538,7 @@ export class LayoutEngine {
       yawRad: this.scratchFrame.yawRad + side * 0.35,
       clearanceRadius,
       visual: chosenVisual,
+      ...(chosenYawPolicy !== 'none' ? { yawPolicy: chosenYawPolicy } : {}),
     };
     segment.addLandmarkRequirement(landmarkReq);
     this.segmentOccupationGrid.insert(
@@ -522,6 +547,44 @@ export class LayoutEngine {
       this.scratchPlacement.posZ,
       clearanceRadius,
     );
+
+    if (chosenCollider) {
+      const meshYawOffset = chosenVisual.kind === 'mesh' ? chosenVisual.yawOffset : undefined;
+      const resolvedYaw = resolveLandmarkWorldYaw(
+        landmarkReq.yawRad,
+        landmarkReq.x,
+        chosenYawPolicy,
+        meshYawOffset,
+      );
+      const cosY = Math.cos(resolvedYaw);
+      const sinY = Math.sin(resolvedYaw);
+      const offX = chosenCollider.offsetX ?? 0;
+      const offZ = chosenCollider.offsetZ ?? 0;
+      const centerX = landmarkReq.worldX + (offX * cosY + offZ * sinY) * scale;
+      const centerZ = landmarkReq.worldZ + (-offX * sinY + offZ * cosY) * scale;
+      const halfW = chosenCollider.halfWidth * scale;
+      const halfD = chosenCollider.halfDepth * scale;
+      const height = chosenCollider.height * scale;
+      const skirtDepth = (chosenCollider.skirtDepth ?? 1.5) * scale;
+      const boundingRadius = Math.hypot(halfW, halfD);
+
+      pools.structures.add(
+        chosenCollider.id,
+        segment.id,
+        centerX,
+        landmarkReq.worldY,
+        centerZ,
+        resolvedYaw,
+        halfW,
+        halfD,
+        height,
+        skirtDepth,
+        boundingRadius,
+        chosenCollider.impact.effect !== 'stumble',
+        chosenCollider.impact.presentsDropped,
+        chosenCollider.impact.speedRetention,
+      );
+    }
 
     return true;
   }

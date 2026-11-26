@@ -257,6 +257,48 @@ export class DebugOverlay3D {
       }
     }
 
+    // 4b. Solid structure oriented bounding boxes (12 edges in red/lethal)
+    const structures = simState.entities.structures;
+    for (let i = 0; i < structures.count; i++) {
+      const cx = structures.posX[i]!;
+      const cy = structures.posY[i]!;
+      const cz = structures.posZ[i]!;
+      const yaw = structures.yawRad[i]!;
+      const hw = structures.halfWidth[i]!;
+      const hd = structures.halfDepth[i]!;
+      const topY = cy + structures.height[i]!;
+      const botY = cy - structures.skirtDepth[i]!;
+
+      const cosY = Math.cos(yaw);
+      const sinY = Math.sin(yaw);
+
+      // Local corners rotated around +Y: worldX = cx + lx*cosY + lz*sinY, worldZ = cz - lx*sinY + lz*cosY
+      const x00 = cx + (-hw * cosY + -hd * sinY);
+      const z00 = cz + (hw * sinY + -hd * cosY);
+      const x10 = cx + (hw * cosY + -hd * sinY);
+      const z10 = cz + (-hw * sinY + -hd * cosY);
+      const x11 = cx + (hw * cosY + hd * sinY);
+      const z11 = cz + (-hw * sinY + hd * cosY);
+      const x01 = cx + (-hw * cosY + hd * sinY);
+      const z01 = cz + (hw * sinY + hd * cosY);
+
+      // Bottom loop
+      this.pushSegment(x00, botY, z00, x10, botY, z10, _colLethal);
+      this.pushSegment(x10, botY, z10, x11, botY, z11, _colLethal);
+      this.pushSegment(x11, botY, z11, x01, botY, z01, _colLethal);
+      this.pushSegment(x01, botY, z01, x00, botY, z00, _colLethal);
+      // Top loop
+      this.pushSegment(x00, topY, z00, x10, topY, z10, _colLethal);
+      this.pushSegment(x10, topY, z10, x11, topY, z11, _colLethal);
+      this.pushSegment(x11, topY, z11, x01, topY, z01, _colLethal);
+      this.pushSegment(x01, topY, z01, x00, topY, z00, _colLethal);
+      // Vertical pillars
+      this.pushSegment(x00, botY, z00, x00, topY, z00, _colLethal);
+      this.pushSegment(x10, botY, z10, x10, topY, z10, _colLethal);
+      this.pushSegment(x11, botY, z11, x11, topY, z11, _colLethal);
+      this.pushSegment(x01, botY, z01, x01, topY, z01, _colLethal);
+    }
+
     this.linePosAttr.needsUpdate = true;
     this.lineColAttr.needsUpdate = true;
     this.lineGeometry.setDrawRange(0, this.lineVertCount);

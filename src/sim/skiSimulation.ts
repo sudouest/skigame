@@ -621,13 +621,16 @@ export class SkiSimulation {
           this.wipeoutRecoveryMode = 'safeX';
           this.triggerImpact('wall_crash', 'wipeout', 2, 0.15);
           triggeredWipeout = true;
-        } else if (outcome.wallImpactKind === 'wall_scrape') {
+        } else if (outcome.wallImpactKind === 'wall_scrape' && outcome.hitStructureIndex < 0) {
           this.triggerImpact('wall_scrape', 'stumble', 1, 0.6);
         } else if (outcome.landingImpactKind === 'hard_landing_wipeout') {
           this.wipeoutRecoveryMode = 'local';
           this.triggerImpact('hard_landing', 'wipeout', 2, 0.15);
           triggeredWipeout = true;
-        } else if (outcome.landingImpactKind === 'hard_landing_stumble') {
+        } else if (
+          outcome.landingImpactKind === 'hard_landing_stumble' &&
+          outcome.hitStructureIndex < 0
+        ) {
           this.triggerImpact('hard_landing', 'stumble', 1, 0.58);
         }
       }
@@ -764,6 +767,7 @@ export class SkiSimulation {
     this.stepOutcomeScratch.landingImpactSpeed = 0;
     this.stepOutcomeScratch.hitHazardIndex = -1;
     this.stepOutcomeScratch.hitCreatureIndex = -1;
+    this.stepOutcomeScratch.hitStructureIndex = -1;
     this.stepOutcomeScratch.hitForkBumper = false;
     this.stepOutcomeScratch.rampLaunched = false;
   }
@@ -954,8 +958,68 @@ export class SkiSimulation {
     }
   }
 
+  private findOverlappingStructure(
+    wx: number,
+    wy: number,
+    wz: number,
+    extraRadius: number,
+  ): number {
+    const structures = this.pools.structures;
+    const skierHeight = this.skierDef.stats.skierHeight;
+    for (let i = 0; i < structures.count; i++) {
+      const sx = structures.posX[i]!;
+      const sy = structures.posY[i]!;
+      const sz = structures.posZ[i]!;
+      const maxR = structures.boundingRadius[i]! + extraRadius;
+      const dx = wx - sx;
+      const dz = wz - sz;
+      if (dx * dx + dz * dz > maxR * maxR) continue;
+
+      const height = structures.height[i]!;
+      const skirt = structures.skirtDepth[i]!;
+      if (wy > sy + height + 0.1 || wy + skierHeight < sy - skirt) continue;
+
+      const yaw = structures.yawRad[i]!;
+      const cosY = Math.cos(yaw);
+      const sinY = Math.sin(yaw);
+      const localX = dx * cosY - dz * sinY;
+      const localZ = dx * sinY + dz * cosY;
+      const hw = structures.halfWidth[i]!;
+      const hd = structures.halfDepth[i]!;
+      const cx = clamp(localX, -hw, hw);
+      const cz = clamp(localZ, -hd, hd);
+      const rx = localX - cx;
+      const rz = localZ - cz;
+      if (rx * rx + rz * rz <= extraRadius * extraRadius) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
   private checkObstacleAndCreatureCollisions(): void {
     const curr = this.state.currSkier;
+
+    // 0. Solid Landmark Structures (buildings: swept Jolt contact + OBB overlap fallback; never disabled)
+    const structures = this.pools.structures;
+    let hitStructIdx = this.stepOutcomeScratch.hitStructureIndex;
+    if (hitStructIdx < 0 || hitStructIdx >= structures.count) {
+      hitStructIdx = this.findOverlappingStructure(
+        curr.posX,
+        curr.posY,
+        curr.posZ,
+        this.skierDef.stats.collisionRadius,
+      );
+    }
+    if (hitStructIdx >= 0) {
+      const defId = structures.defIds[hitStructIdx] || 'building';
+      const effect = structures.lethalFlags[hitStructIdx] !== 0 ? 'wipeout' : 'stumble';
+      const dropped = structures.presentsDropped[hitStructIdx] ?? 3;
+      const retain = structures.speedRetention[hitStructIdx] ?? 0;
+      this.wipeoutRecoveryMode = 'safeX';
+      this.triggerImpact(defId, effect, dropped, retain);
+      return;
+    }
 
     // 1. Prefer swept Jolt CharacterVirtual hazard contact (anti-tunneling at 36 m/s),
     // falling back to SpatialGrid overlap for direct test teleports
@@ -1148,11 +1212,20 @@ export class SkiSimulation {
     const oldZ = curr.posZ;
     const surface = this.state.surfaceSample;
 
+    const nearStructure =
+      this.findOverlappingStructure(
+        curr.posX,
+        curr.posY,
+        curr.posZ,
+        this.skierDef.stats.collisionRadius + 1.2,
+      ) >= 0;
+
     const forceSafeX =
       this.wipeoutRecoveryMode === 'safeX' ||
       surface.onPiste ||
       surface.inChasmZone ||
-      surface.normalY < 0.72;
+      surface.normalY < 0.72 ||
+      nearStructure;
 
     if (forceSafeX) {
       let seg = this.trailWindow.getActiveSegmentById(surface.segmentId);

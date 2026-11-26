@@ -1,4 +1,5 @@
 import type {
+  LandmarkYawPolicy,
   LandscapeProfile,
   PisteSurfaceType,
   SurfaceType,
@@ -654,6 +655,7 @@ export interface SegmentLandmarkRequirement {
   readonly yawRad: number;
   readonly clearanceRadius: number;
   readonly visual: VisualSpec;
+  readonly yawPolicy?: LandmarkYawPolicy;
   /** Stage ID for 'forkArch' iconographic branch gate badge. */
   readonly badgeStageId?: string;
   /** Which fork branch this gate frames ('left' or 'right'). */
@@ -829,6 +831,26 @@ export interface RampPoolView {
   readonly height: ReadonlyNumericBuffer;
 }
 
+export interface StructurePoolView {
+  readonly count: number;
+  readonly capacity: number;
+  readonly defIds: readonly string[];
+  readonly segmentIds: ReadonlyNumericBuffer;
+  readonly posX: ReadonlyNumericBuffer;
+  readonly posY: ReadonlyNumericBuffer;
+  readonly posZ: ReadonlyNumericBuffer;
+  readonly yawRad: ReadonlyNumericBuffer;
+  readonly halfWidth: ReadonlyNumericBuffer;
+  readonly halfDepth: ReadonlyNumericBuffer;
+  readonly height: ReadonlyNumericBuffer;
+  readonly skirtDepth: ReadonlyNumericBuffer;
+  readonly boundingRadius: ReadonlyNumericBuffer;
+  /** 0 = stumble, 1 = wipeout. */
+  readonly lethalFlags: ReadonlyNumericBuffer;
+  readonly presentsDropped: ReadonlyNumericBuffer;
+  readonly speedRetention: ReadonlyNumericBuffer;
+}
+
 export interface EntityPoolViews {
   readonly hazards: HazardPoolView;
   readonly presents: PresentPoolView;
@@ -837,6 +859,7 @@ export interface EntityPoolViews {
   readonly creatures: CreaturePoolView;
   readonly skiTracks: SkiTrackPoolView;
   readonly ramps: RampPoolView;
+  readonly structures: StructurePoolView;
 }
 
 export interface DebugDrawView {

@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
-import { DELIVERY_VILLAGE_PLAZA } from '../../../content/deliveryZones';
+import {
+  DELIVERY_VILLAGE_PLAZA,
+  FOLK_AFRAME_COLLIDER,
+  FOLK_LOG_COLLIDER,
+} from '../../../content/deliveryZones';
 import type {
   SegmentLandmarkRequirement,
   TerrainSegmentView,
@@ -366,5 +370,123 @@ describe('Folk A-Frame Chalet, LandmarkModelRegistry & Deterministic Building Va
     expect(variantsRun1).toEqual(variantsRun2);
     expect(variantsRun1).toContain('folk_log');
     expect(variantsRun1).toContain('folk_aframe');
+  });
+
+  it('aligns rendered LandmarkStreamer visual transforms identically with LayoutEngine structure colliders', () => {
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const scene = new THREE.Scene();
+    const mats = createSharedToonMaterials(gfx);
+    const outlineMat = createSmoothOutlineMaterial(gfx);
+    const assets = createProceduralMeshAssets(gfx);
+    const landmarkStreamer = new LandmarkStreamer(gfx, mats, assets, {
+      outlineMaterial: outlineMat,
+    });
+    scene.add(landmarkStreamer.rootGroup);
+
+    const stage = getStageDef('powder-bowl')!;
+    const engine = new LayoutEngine(4242);
+    const pools = new EntityPools();
+    let testedLog = false;
+    let testedAFrame = false;
+
+    for (let segId = 1; segId <= 40 && !(testedLog && testedAFrame); segId++) {
+      pools.clear();
+      const seg = new TrailSegment({
+        id: segId,
+        slot: 'curr',
+        stage,
+        seed: segId * 131,
+        length: 220,
+        startPosX: 0,
+        startPosY: 0,
+        startPosZ: 0,
+        startYawRad: 0.28,
+        startPitchRad: -0.2,
+        startHalfWidth: 16,
+        endHalfWidth: 16,
+        prevSegmentId: null,
+        hasFork: false,
+        leftStageId: null,
+        rightStageId: null,
+        isForkChild: false,
+        forkSide: 'none',
+        seamWorldX: 0,
+        seamWorldY: -44,
+        seamWorldZ: -220,
+        seamYawRad: 0.28,
+      });
+      engine.bakeSegment(seg, pools, 0.25);
+
+      const buildingLms = seg.landmarks.filter(
+        (lm) =>
+          lm.kind === 'deliveryLandmark' &&
+          lm.visual.kind === 'procedural' &&
+          lm.visual.preset === 'cabin',
+      );
+      if (buildingLms.length === 0) continue;
+
+      const window: TrailWindowView = { prev: null, curr: seg, nextLeft: null, nextRight: null };
+      landmarkStreamer.sync(window, 0.2, undefined, 0);
+
+      for (const lm of buildingLms) {
+        const variant = lm.visual.kind === 'procedural' ? lm.visual.variant : undefined;
+        const expectedDefId =
+          variant === 'folk_aframe' ? 'building_folk_aframe' : 'building_folk_log';
+        const collider = variant === 'folk_aframe' ? FOLK_AFRAME_COLLIDER : FOLK_LOG_COLLIDER;
+
+        let matchedStructIdx = -1;
+        let bestDist = Infinity;
+        for (let sIdx = 0; sIdx < pools.structures.count; sIdx++) {
+          if (pools.structures.defIds[sIdx] !== expectedDefId) continue;
+          const d = Math.hypot(
+            pools.structures.posX[sIdx]! - lm.worldX,
+            pools.structures.posZ[sIdx]! - lm.worldZ,
+          );
+          if (d < bestDist) {
+            bestDist = d;
+            matchedStructIdx = sIdx;
+          }
+        }
+        expect(matchedStructIdx).toBeGreaterThanOrEqual(0);
+
+        let matchedGroup: THREE.Object3D | undefined;
+        for (const child of landmarkStreamer.rootGroup.children) {
+          if (
+            Math.hypot(child.position.x - lm.worldX, child.position.z - lm.worldZ) < 0.05 &&
+            Math.abs(child.position.y - lm.worldY) < 0.05
+          ) {
+            matchedGroup = child;
+            break;
+          }
+        }
+        expect(matchedGroup).toBeDefined();
+
+        const structYaw = pools.structures.yawRad[matchedStructIdx]!;
+        expect(structYaw).toBeCloseTo(matchedGroup!.rotation.y, 5);
+
+        const cosY = Math.cos(structYaw);
+        const sinY = Math.sin(structYaw);
+        const offX = collider.offsetX ?? 0;
+        const offZ = collider.offsetZ ?? 0;
+        expect(pools.structures.posX[matchedStructIdx]!).toBeCloseTo(
+          lm.worldX + (offX * cosY + offZ * sinY),
+          4,
+        );
+        expect(pools.structures.posY[matchedStructIdx]!).toBeCloseTo(lm.worldY, 4);
+        expect(pools.structures.posZ[matchedStructIdx]!).toBeCloseTo(
+          lm.worldZ + (-offX * sinY + offZ * cosY),
+          4,
+        );
+
+        if (variant === 'folk_aframe') testedAFrame = true;
+        else testedLog = true;
+      }
+      landmarkStreamer.clearAll();
+    }
+
+    expect(testedLog).toBe(true);
+    expect(testedAFrame).toBe(true);
+    tracker.disposeAll();
   });
 });

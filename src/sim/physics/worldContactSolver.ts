@@ -1,7 +1,14 @@
 import type { SpineForkMeta, TerrainFieldView } from '../contracts';
 import type { EntityPools } from '../entityPools';
 
-export type ContactBodyKind = 'none' | 'terrain' | 'ramp' | 'hazard' | 'creature' | 'forkBumper';
+export type ContactBodyKind =
+  | 'none'
+  | 'terrain'
+  | 'ramp'
+  | 'hazard'
+  | 'creature'
+  | 'forkBumper'
+  | 'structure';
 
 export const MAX_CONTACT_EVENTS_PER_STEP = 16;
 

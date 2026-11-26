@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { LandmarkYawPolicy } from '../../content/types';
 import type { SegmentLandmarkRequirement } from '../../sim/contracts';
 import type { GraphicsUtils } from './graphicsUtils';
 import { createForkArchObject, type ProceduralMeshAssets } from './meshFactory';
@@ -23,7 +24,7 @@ export interface LandmarkInstanceHandle {
 export interface LandmarkModelDef {
   readonly id: string;
   readonly poolCapacity: number;
-  readonly yawPolicy: 'none' | 'faceTrail' | number;
+  readonly yawPolicy: LandmarkYawPolicy;
   readonly smokeAnchors?: readonly ChimneyEmitterAnchor[];
   readonly createInstance: (index: number) => LandmarkInstanceHandle;
 }

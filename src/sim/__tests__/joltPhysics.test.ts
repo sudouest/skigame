@@ -1357,4 +1357,164 @@ describe('Jolt Physics WASM (M3) — Zero-Leak, 3D Dynamics, Ramps, Crests & Sol
       }
     }
   });
+
+  it('blocks skier movement, downhill undercutting, and wipeout tumbles with solid rotated building OBBs (0 B WASM leak)', () => {
+    const runtime = resolveDefaultPhysicsRuntime()!;
+    const skierDef = getSkierDef('skier_alpine')!;
+    const slopeTan = Math.tan(degToRad(25));
+    const harness = createAnalyticHarness({
+      heightAt: (_x, z) => z * slopeTan,
+      surfaceTypeAt: () => 'packed',
+    });
+
+    const yaw = 0.7;
+    const hw = 2.55;
+    const hd = 3.3;
+    const h = 5.4;
+    const skirt = 2.0;
+    const structX = 0;
+    const structZ = -24;
+    const structY = structZ * slopeTan;
+
+    const obbSignedDist = (px: number, pz: number): number => {
+      const cosY = Math.cos(yaw);
+      const sinY = Math.sin(yaw);
+      const dx = px - structX;
+      const dz = pz - structZ;
+      const lx = dx * cosY - dz * sinY;
+      const lz = dx * sinY + dz * cosY;
+      const ax = Math.abs(lx) - hw;
+      const az = Math.abs(lz) - hd;
+      return ax > 0 || az > 0 ? Math.hypot(Math.max(0, ax), Math.max(0, az)) : Math.max(ax, az);
+    };
+
+    const runStructureProbe = (): void => {
+      const pools = new EntityPools();
+      pools.structures.add(
+        'building_folk_log',
+        1,
+        structX,
+        structY,
+        structZ,
+        yaw,
+        hw,
+        hd,
+        h,
+        skirt,
+        Math.hypot(hw, hd),
+        true,
+        3,
+        0,
+      );
+      const solver = new JoltContactSolver(runtime, {
+        skierRadius: skierDef.stats.collisionRadius,
+        skierHeight: skierDef.stats.skierHeight,
+      });
+      const physics = new SkiPhysics();
+      const pose = createMutableSkierPose();
+      const surf = createSurfaceSample();
+      const outcome = createPhysicsStepOutcome();
+      const intent = createMutablePlayerIntent();
+      const ctx: PhysicsStepContext = {
+        skierDef,
+        surfaceQuery: harness.surfaceQuery,
+        terrain: harness.terrain,
+        pools,
+        contactSolver: solver,
+        forkBumper: null,
+        surface: surf,
+        ramps: pools.ramps,
+        skiTracks: pools.skiTracks,
+        invulnerable: false,
+      };
+
+      try {
+        // 1. High-speed uphill approach at 24 m/s stops outside rotated building OBB and reports hitStructureIndex === 0
+        pose.posX = 0;
+        pose.posZ = -12;
+        pose.posY = -12 * slopeTan;
+        pose.headingRad = 0;
+        pose.velX = 0;
+        pose.velY = -24 * Math.sin(degToRad(25));
+        pose.velZ = -24 * Math.cos(degToRad(25));
+        pose.grounded = true;
+
+        let sawStructureHit = false;
+        let firstHitPosZ = NaN;
+        let minSignedDist = Infinity;
+        for (let t = 0; t < 45; t++) {
+          physics.stepSkiing(FIXED_DT, intent, pose, ctx, outcome);
+          if (outcome.hitStructureIndex === 0) {
+            if (!sawStructureHit) firstHitPosZ = pose.posZ;
+            sawStructureHit = true;
+          }
+          minSignedDist = Math.min(minSignedDist, obbSignedDist(pose.posX, pose.posZ));
+        }
+        expect(sawStructureHit).toBe(true);
+        expect(firstHitPosZ).toBeGreaterThan(structZ);
+        expect(minSignedDist).toBeGreaterThanOrEqual(skierDef.stats.collisionRadius - 0.12);
+        // Rotated front wall deflects skier laterally outside around the corner rather than straight through
+        expect(pose.posZ > structZ || Math.abs(pose.posX) > 2.0).toBe(true);
+
+        // 2. Downhill-side approach cannot undercut beneath sloped floor thanks to skirtDepth = 2.0
+        physics.reset();
+        pose.posX = 0;
+        pose.posZ = -29.0;
+        pose.posY = -29.0 * slopeTan;
+        pose.headingRad = Math.PI;
+        pose.carveAngleRad = 0;
+        pose.braking = false;
+        pose.walking = false;
+        pose.walkPhaseRad = 0;
+        pose.velX = 0;
+        pose.velY = 12 * Math.sin(degToRad(25));
+        pose.velZ = 12 * Math.cos(degToRad(25));
+        pose.grounded = true;
+
+        let sawDownhillHit = false;
+        let firstDownhillHitZ = NaN;
+        let minDownhillDist = Infinity;
+        for (let t = 0; t < 45; t++) {
+          physics.stepSkiing(FIXED_DT, intent, pose, ctx, outcome);
+          if (outcome.hitStructureIndex === 0) {
+            if (!sawDownhillHit) firstDownhillHitZ = pose.posZ;
+            sawDownhillHit = true;
+          }
+          minDownhillDist = Math.min(minDownhillDist, obbSignedDist(pose.posX, pose.posZ));
+        }
+        expect(sawDownhillHit).toBe(true);
+        expect(firstDownhillHitZ).toBeLessThan(structZ);
+        expect(minDownhillDist).toBeGreaterThanOrEqual(skierDef.stats.collisionRadius - 0.12);
+        expect(pose.posZ < structZ || Math.abs(pose.posX) > 2.0).toBe(true);
+
+        // 3. Wipeout tumble (invulnerable) still physically deflects outside OBB
+        physics.reset();
+        pose.carveAngleRad = 0;
+        pose.braking = false;
+        pose.walking = false;
+        pose.posX = 1.0;
+        pose.posZ = -17;
+        pose.posY = -17 * slopeTan;
+        pose.velX = 0;
+        pose.velY = -18 * Math.sin(degToRad(25));
+        pose.velZ = -18 * Math.cos(degToRad(25));
+        pose.grounded = true;
+        let minTumbleDist = Infinity;
+        for (let t = 0; t < 60; t++) {
+          physics.stepWipeout(FIXED_DT, pose, ctx);
+          minTumbleDist = Math.min(minTumbleDist, obbSignedDist(pose.posX, pose.posZ));
+        }
+        expect(minTumbleDist).toBeGreaterThanOrEqual(skierDef.stats.collisionRadius - 0.15);
+      } finally {
+        solver.dispose();
+      }
+    };
+
+    // Warmup shape/body allocations then verify exact 0 B WASM memory delta on full structure probe
+    runStructureProbe();
+    const freeBefore = runtime.getFreeMemory();
+    runStructureProbe();
+    const freeAfter = runtime.getFreeMemory();
+    expect(freeBefore - freeAfter).toBe(0);
+  });
 });

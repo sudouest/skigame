@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { resolveLandmarkWorldYaw } from '../../content/types';
 import { clamp, smoothstep } from '../../core/math';
 import type {
   SegmentLandmarkRequirement,
@@ -82,17 +83,10 @@ function resolveScale(lm: SegmentLandmarkRequirement): number {
 }
 
 function resolveYaw(lm: SegmentLandmarkRequirement, modelDef: LandmarkModelDef | null): number {
-  const yawPolicy = modelDef?.yawPolicy ?? 'none';
-  if (yawPolicy === 'faceTrail') {
-    return lm.yawRad + (lm.x < 0 ? Math.PI * 0.35 : -Math.PI * 0.35);
-  }
-  if (typeof yawPolicy === 'number') {
-    return lm.yawRad + yawPolicy;
-  }
-  if (lm.kind !== 'forkArch' && lm.visual.kind === 'mesh' && lm.visual.yawOffset !== undefined) {
-    return lm.yawRad + lm.visual.yawOffset;
-  }
-  return lm.yawRad;
+  const policy = lm.yawPolicy ?? modelDef?.yawPolicy ?? 'none';
+  const meshYawOffset =
+    lm.kind !== 'forkArch' && lm.visual.kind === 'mesh' ? lm.visual.yawOffset : undefined;
+  return resolveLandmarkWorldYaw(lm.yawRad, lm.x, policy, meshYawOffset);
 }
 
 /**

@@ -143,6 +143,7 @@ export interface PhysicsStepOutcome {
   landingImpactSpeed: number;
   hitHazardIndex: number;
   hitCreatureIndex: number;
+  hitStructureIndex: number;
   hitForkBumper: boolean;
   rampLaunched: boolean;
 }
@@ -155,6 +156,7 @@ export function createPhysicsStepOutcome(): PhysicsStepOutcome {
     landingImpactSpeed: 0,
     hitHazardIndex: -1,
     hitCreatureIndex: -1,
+    hitStructureIndex: -1,
     hitForkBumper: false,
     rampLaunched: false,
   };
@@ -811,16 +813,25 @@ export class SkiPhysics {
       }
     }
 
-    // 8. Process Jolt swept contacts (hazards, creatures, fork V-wedge bumper, >52 deg wall impacts)
+    // 8. Process Jolt swept contacts (hazards, creatures, structures, fork V-wedge bumper, >52 deg wall impacts)
     for (let i = 0; i < res.contactCount; i++) {
       const c = res.contacts[i]!;
       if (c.kind === 'hazard' && outcome.hitHazardIndex < 0 && c.poolIndex >= 0) {
         outcome.hitHazardIndex = c.poolIndex;
       } else if (c.kind === 'creature' && outcome.hitCreatureIndex < 0 && c.poolIndex >= 0) {
         outcome.hitCreatureIndex = c.poolIndex;
+      } else if (c.kind === 'structure' && outcome.hitStructureIndex < 0 && c.poolIndex >= 0) {
+        outcome.hitStructureIndex = c.poolIndex;
       } else if (c.kind === 'forkBumper') {
         outcome.hitForkBumper = true;
       }
+    }
+    if (
+      outcome.hitStructureIndex < 0 &&
+      res.groundKind === 'structure' &&
+      res.groundPoolIndex >= 0
+    ) {
+      outcome.hitStructureIndex = res.groundPoolIndex;
     }
 
     // Soft fork V-wedge branch nudge & fallback push if teleported inside nose cylinder
@@ -997,7 +1008,8 @@ export class SkiPhysics {
     const trackRightY = rawTrackRightY / trackRightLen;
     const trackRightZ = rightZ / trackRightLen;
 
-    const trackGroundedNow = skier.grounded && !skier.walking && this.activeRampIndex < 0;
+    const trackGroundedNow =
+      skier.grounded && !skier.walking && this.activeRampIndex < 0 && res.groundKind !== 'structure';
     if (trackGroundedNow) {
       this.trackAccumDist += stepDist;
       if (!this.wasTrackGrounded || this.trackAccumDist >= SKI_TRACK_SAMPLE_DIST_M) {
@@ -1237,6 +1249,7 @@ export class SkiPhysics {
     out.landingImpactSpeed = 0;
     out.hitHazardIndex = -1;
     out.hitCreatureIndex = -1;
+    out.hitStructureIndex = -1;
     out.hitForkBumper = false;
     out.rampLaunched = false;
   }

@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { getAllStages } from '../../content/stages';
 import { FIXED_DT } from '../../core/fixedLoop';
 import { angleDelta, clamp } from '../../core/math';
-import { createMutablePlayerIntent, createSurfaceSample } from '../contracts';
+import {
+  createMutablePlayerIntent,
+  createSpineFrameOut,
+  createSurfaceSample,
+} from '../contracts';
 import { SkiSimulation } from '../skiSimulation';
 
 describe('50 km Headless PCG & Simulation Soak Test', () => {
@@ -24,6 +28,8 @@ describe('50 km Headless PCG & Simulation Soak Test', () => {
     let maxActivePresents = 0;
     let maxActiveZones = 0;
     let maxActiveCreatures = 0;
+    let maxActiveStructures = 0;
+    let checkedStructureCount = 0;
     let maxAbsVelY = 0;
     let maxUpwardVelY = 0;
     let maxSpeed3d = 0;
@@ -33,6 +39,7 @@ describe('50 km Headless PCG & Simulation Soak Test', () => {
     });
 
     const sampleScratch = createSurfaceSample();
+    const frameScratch = createSpineFrameOut();
     const maxTicks = 180000;
     let lastCheckedSegmentId = -1;
 
@@ -164,6 +171,60 @@ describe('50 km Headless PCG & Simulation Soak Test', () => {
               }
               segLastDeliveryS.set(seg.id, zoneSList[zoneSList.length - 1]!);
             }
+
+            // Verify solid building structures never intrude into safeX corridor
+            const structures = st.entities.structures;
+            for (let i = 0; i < structures.count; i++) {
+              if (structures.segmentIds[i] !== seg.id) continue;
+              checkedStructureCount++;
+              const sx = structures.posX[i]!;
+              const sz = structures.posZ[i]!;
+              let bestDistSq = Infinity;
+              let bestS = 0;
+              const segPoly = seg as unknown as {
+                polyCount: number;
+                polyS: Float32Array;
+                polyX: Float64Array;
+                polyZ: Float64Array;
+              };
+              for (let p = 0; p < segPoly.polyCount - 1; p++) {
+                const ax = segPoly.polyX[p]!;
+                const az = segPoly.polyZ[p]!;
+                const bx = segPoly.polyX[p + 1]!;
+                const bz = segPoly.polyZ[p + 1]!;
+                const dx = bx - ax;
+                const dz = bz - az;
+                const lenSq = dx * dx + dz * dz;
+                const t = lenSq > 1e-8 ? clamp(((sx - ax) * dx + (sz - az) * dz) / lenSq, 0, 1) : 0;
+                const ex = sx - (ax + t * dx);
+                const ez = sz - (az + t * dz);
+                const dSq = ex * ex + ez * ez;
+                if (dSq < bestDistSq) {
+                  bestDistSq = dSq;
+                  bestS = segPoly.polyS[p]! + t * (segPoly.polyS[p + 1]! - segPoly.polyS[p]!);
+                }
+              }
+              sim.sampleSurface(sx, sz, seg.id, bestS, sampleScratch);
+              const safeX = seg.sampleSafeX(sampleScratch.s);
+              seg.sampleSpineFrame(sampleScratch.s, frameScratch);
+              const safeWx = frameScratch.posX + safeX * frameScratch.rightX;
+              const safeWz = frameScratch.posZ + safeX * frameScratch.rightZ;
+
+              const cosY = Math.cos(structures.yawRad[i]!);
+              const sinY = Math.sin(structures.yawRad[i]!);
+              const relX = safeWx - sx;
+              const relZ = safeWz - sz;
+              const localX = relX * cosY - relZ * sinY;
+              const localZ = relX * sinY + relZ * cosY;
+              const ax = Math.max(0, Math.abs(localX) - structures.halfWidth[i]!);
+              const az = Math.max(0, Math.abs(localZ) - structures.halfDepth[i]!);
+              const obbClearance = Math.hypot(ax, az);
+              if (obbClearance < 1.5) {
+                throw new Error(
+                  `Structure '${structures.defIds[i]}' intruded into safeX corridor: clearance=${obbClearance.toFixed(2)}m at seg=${seg.id} s=${sampleScratch.s}`,
+                );
+              }
+            }
           }
         }
       }
@@ -225,6 +286,9 @@ describe('50 km Headless PCG & Simulation Soak Test', () => {
       if (post.entities.presents.count > maxActivePresents) maxActivePresents = post.entities.presents.count;
       if (post.entities.deliveryZones.count > maxActiveZones) maxActiveZones = post.entities.deliveryZones.count;
       if (post.entities.creatures.count > maxActiveCreatures) maxActiveCreatures = post.entities.creatures.count;
+      if (post.entities.structures.count > maxActiveStructures) {
+        maxActiveStructures = post.entities.structures.count;
+      }
     }
 
     const finalState = sim.getState();
@@ -241,6 +305,8 @@ describe('50 km Headless PCG & Simulation Soak Test', () => {
     expect(maxActivePresents).toBeLessThan(finalState.entities.presents.capacity);
     expect(maxActiveZones).toBeLessThan(finalState.entities.deliveryZones.capacity);
     expect(maxActiveCreatures).toBeLessThan(finalState.entities.creatures.capacity);
+    expect(checkedStructureCount).toBeGreaterThan(10);
+    expect(maxActiveStructures).toBeLessThan(finalState.entities.structures.capacity);
 
     // Verify Delivery Zone cadence across 50 km stays strictly bounded
     expect(deliveryCadences.length).toBeGreaterThan(150);

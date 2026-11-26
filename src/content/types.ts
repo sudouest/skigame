@@ -301,11 +301,53 @@ export interface PresentDef {
   readonly glowColor: string;
 }
 
+export type LandmarkYawPolicy = 'none' | 'faceTrail' | number;
+
+/**
+ * Resolves the final world Y-rotation (radians around +Y, 0 facing -Z) for a trailside landmark
+ * so visual geometry and physics colliders always share identical orientation.
+ */
+export function resolveLandmarkWorldYaw(
+  baseYawRad: number,
+  lateralX: number,
+  policy: LandmarkYawPolicy = 'none',
+  meshYawOffset?: number,
+): number {
+  if (policy === 'faceTrail') {
+    return baseYawRad + (lateralX < 0 ? Math.PI * 0.35 : -Math.PI * 0.35);
+  }
+  if (typeof policy === 'number') {
+    return baseYawRad + policy;
+  }
+  if (meshYawOffset !== undefined) {
+    return baseYawRad + meshYawOffset;
+  }
+  return baseYawRad;
+}
+
+export interface LandmarkColliderSpec {
+  readonly id: string;
+  readonly shape: 'box';
+  readonly halfWidth: number;
+  readonly halfDepth: number;
+  readonly height: number;
+  readonly skirtDepth?: number;
+  readonly offsetX?: number;
+  readonly offsetZ?: number;
+  readonly impact: {
+    readonly effect: 'wipeout' | 'stumble';
+    readonly presentsDropped: number;
+    readonly speedRetention: number;
+  };
+}
+
 export interface LandmarkVisualOption {
   readonly visual: VisualSpec;
   readonly weight: number;
   readonly clearanceRadius?: number;
   readonly lateralOffsetM?: number;
+  readonly yawPolicy?: LandmarkYawPolicy;
+  readonly collider?: LandmarkColliderSpec;
 }
 
 export interface DeliveryZoneDef {
@@ -320,6 +362,8 @@ export interface DeliveryZoneDef {
   readonly comboBonusPerGift: number;
   readonly childVisuals: readonly VisualSpec[];
   readonly landmarkVisual: VisualSpec;
+  readonly landmarkYawPolicy?: LandmarkYawPolicy;
+  readonly landmarkCollider?: LandmarkColliderSpec;
   readonly landmarkVisualPool?: readonly LandmarkVisualOption[];
   readonly requiredSceneryId?: string;
 }

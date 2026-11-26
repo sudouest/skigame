@@ -6,6 +6,7 @@ import type {
   PresentPoolView,
   RampPoolView,
   SkiTrackPoolView,
+  StructurePoolView,
   TossedPresentPoolView,
 } from './contracts';
 
@@ -16,6 +17,7 @@ export const MAX_DELIVERY_ZONES = 24;
 export const MAX_CREATURES = 24;
 export const MAX_SKI_TRACKS = 256;
 export const MAX_RAMPS = 32;
+export const MAX_STRUCTURES = 32;
 
 export class HazardPool implements HazardPoolView {
   count = 0;
@@ -847,6 +849,117 @@ export class RampPool implements RampPoolView {
   }
 }
 
+export class StructurePool implements StructurePoolView {
+  count = 0;
+  readonly capacity: number;
+  readonly defIds: string[];
+  readonly segmentIds: Int32Array;
+  readonly posX: Float32Array;
+  readonly posY: Float32Array;
+  readonly posZ: Float32Array;
+  readonly yawRad: Float32Array;
+  readonly halfWidth: Float32Array;
+  readonly halfDepth: Float32Array;
+  readonly height: Float32Array;
+  readonly skirtDepth: Float32Array;
+  readonly boundingRadius: Float32Array;
+  readonly lethalFlags: Uint8Array;
+  readonly presentsDropped: Uint8Array;
+  readonly speedRetention: Float32Array;
+
+  constructor(capacity = MAX_STRUCTURES) {
+    this.capacity = capacity;
+    this.defIds = new Array<string>(capacity).fill('');
+    this.segmentIds = new Int32Array(capacity);
+    this.posX = new Float32Array(capacity);
+    this.posY = new Float32Array(capacity);
+    this.posZ = new Float32Array(capacity);
+    this.yawRad = new Float32Array(capacity);
+    this.halfWidth = new Float32Array(capacity);
+    this.halfDepth = new Float32Array(capacity);
+    this.height = new Float32Array(capacity);
+    this.skirtDepth = new Float32Array(capacity);
+    this.boundingRadius = new Float32Array(capacity);
+    this.lethalFlags = new Uint8Array(capacity);
+    this.presentsDropped = new Uint8Array(capacity);
+    this.speedRetention = new Float32Array(capacity);
+  }
+
+  add(
+    defId: string,
+    segmentId: number,
+    posX: number,
+    posY: number,
+    posZ: number,
+    yawRad: number,
+    halfWidth: number,
+    halfDepth: number,
+    height: number,
+    skirtDepth: number,
+    boundingRadius: number,
+    lethal: boolean,
+    presentsDropped: number,
+    speedRetention: number,
+  ): number {
+    if (this.count >= this.capacity) return -1;
+    const i = this.count++;
+    this.defIds[i] = defId;
+    this.segmentIds[i] = segmentId;
+    this.posX[i] = posX;
+    this.posY[i] = posY;
+    this.posZ[i] = posZ;
+    this.yawRad[i] = yawRad;
+    this.halfWidth[i] = halfWidth;
+    this.halfDepth[i] = halfDepth;
+    this.height[i] = height;
+    this.skirtDepth[i] = skirtDepth;
+    this.boundingRadius[i] = boundingRadius;
+    this.lethalFlags[i] = lethal ? 1 : 0;
+    this.presentsDropped[i] = presentsDropped;
+    this.speedRetention[i] = speedRetention;
+    return i;
+  }
+
+  pruneBySegment(segmentId: number): void {
+    let i = 0;
+    while (i < this.count) {
+      if (this.segmentIds[i] === segmentId) {
+        const last = --this.count;
+        if (i !== last) {
+          this.defIds[i] = this.defIds[last]!;
+          this.segmentIds[i] = this.segmentIds[last]!;
+          this.posX[i] = this.posX[last]!;
+          this.posY[i] = this.posY[last]!;
+          this.posZ[i] = this.posZ[last]!;
+          this.yawRad[i] = this.yawRad[last]!;
+          this.halfWidth[i] = this.halfWidth[last]!;
+          this.halfDepth[i] = this.halfDepth[last]!;
+          this.height[i] = this.height[last]!;
+          this.skirtDepth[i] = this.skirtDepth[last]!;
+          this.boundingRadius[i] = this.boundingRadius[last]!;
+          this.lethalFlags[i] = this.lethalFlags[last]!;
+          this.presentsDropped[i] = this.presentsDropped[last]!;
+          this.speedRetention[i] = this.speedRetention[last]!;
+        }
+      } else {
+        i++;
+      }
+    }
+  }
+
+  shiftOrigin(dx: number, dy: number, dz: number): void {
+    for (let i = 0; i < this.count; i++) {
+      this.posX[i] = this.posX[i]! - dx;
+      this.posY[i] = this.posY[i]! - dy;
+      this.posZ[i] = this.posZ[i]! - dz;
+    }
+  }
+
+  clear(): void {
+    this.count = 0;
+  }
+}
+
 export class EntityPools implements EntityPoolViews {
   readonly hazards = new HazardPool();
   readonly presents = new PresentPool();
@@ -855,6 +968,7 @@ export class EntityPools implements EntityPoolViews {
   readonly creatures = new CreaturePool();
   readonly skiTracks = new SkiTrackPool();
   readonly ramps = new RampPool();
+  readonly structures = new StructurePool();
 
   capturePreviousPoses(): void {
     this.tossedPresents.capturePrevious();
@@ -867,6 +981,7 @@ export class EntityPools implements EntityPoolViews {
     this.deliveryZones.pruneBySegment(segmentId);
     this.creatures.pruneBySegment(segmentId);
     this.ramps.pruneBySegment(segmentId);
+    this.structures.pruneBySegment(segmentId);
   }
 
   shiftOrigin(dx: number, dy: number, dz: number): void {
@@ -877,6 +992,7 @@ export class EntityPools implements EntityPoolViews {
     this.creatures.shiftOrigin(dx, dy, dz);
     this.skiTracks.shiftOrigin(dx, dy, dz);
     this.ramps.shiftOrigin(dx, dy, dz);
+    this.structures.shiftOrigin(dx, dy, dz);
   }
 
   clear(): void {
@@ -887,5 +1003,6 @@ export class EntityPools implements EntityPoolViews {
     this.creatures.clear();
     this.skiTracks.clear();
     this.ramps.clear();
+    this.structures.clear();
   }
 }

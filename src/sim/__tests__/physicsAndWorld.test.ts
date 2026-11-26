@@ -1052,4 +1052,134 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     expect(chasmWipeout).toBe(true);
     chasmSim.dispose();
   });
+
+  it('triggers wipeout on building impact, prevents passing through before and during invulnerability, and recovers safely', () => {
+    let sim: SkiSimulation | null = null;
+    for (let seed = 1; seed <= 40; seed++) {
+      const candidate = new SkiSimulation({ seed, startStageId: 'powder-bowl' });
+      if (candidate.getState().entities.structures.count > 0) {
+        sim = candidate;
+        break;
+      }
+      candidate.dispose();
+    }
+    expect(sim).not.toBeNull();
+    const activeSim = sim!;
+
+    const st = activeSim.getState();
+    const structures = st.entities.structures;
+    const targetDefId = structures.defIds[0]!;
+    const sx = structures.posX[0]!;
+    const sy = structures.posY[0]!;
+    const sz = structures.posZ[0]!;
+    const sYaw = structures.yawRad[0]!;
+    const hw = structures.halfWidth[0]!;
+    const hd = structures.halfDepth[0]!;
+
+    expect(targetDefId === 'building_folk_log' || targetDefId === 'building_folk_aframe').toBe(true);
+
+    const obbSignedDist = (px: number, pz: number): number => {
+      const cosY = Math.cos(sYaw);
+      const sinY = Math.sin(sYaw);
+      const dx = px - sx;
+      const dz = pz - sz;
+      const lx = dx * cosY - dz * sinY;
+      const lz = dx * sinY + dz * cosY;
+      const ax = Math.abs(lx) - hw;
+      const az = Math.abs(lz) - hd;
+      return ax > 0 || az > 0 ? Math.hypot(Math.max(0, ax), Math.max(0, az)) : Math.max(ax, az);
+    };
+
+    const internal = st as unknown as {
+      currSkier: {
+        posX: number;
+        posY: number;
+        posZ: number;
+        velX: number;
+        velY: number;
+        velZ: number;
+        headingRad: number;
+        speed: number;
+        grounded: boolean;
+      };
+      surfaceSample: ReturnType<typeof createSurfaceSample>;
+    };
+
+    // Place skier uphill (+Z / opposite trail tangent toward structure) heading straight into the building center
+    const approachSurf = activeSim.sampleSurface(sx, sz + 12);
+    internal.currSkier.posX = sx;
+    internal.currSkier.posZ = sz + 12;
+    internal.currSkier.posY = approachSurf.groundY;
+    internal.currSkier.headingRad = 0;
+    internal.currSkier.grounded = true;
+    internal.surfaceSample.segmentId = approachSurf.segmentId;
+    internal.surfaceSample.s = approachSurf.s;
+
+    const dirX = sx - internal.currSkier.posX;
+    const dirZ = sz - internal.currSkier.posZ;
+    const dirLen = Math.hypot(dirX, dirZ) || 1;
+    internal.currSkier.velX = (dirX / dirLen) * 22;
+    internal.currSkier.velZ = (dirZ / dirLen) * 22;
+    internal.currSkier.velY = -4;
+    internal.currSkier.speed = 22;
+
+    const wipeouts: Array<{ hazardId: string; effect: string }> = [];
+    let recoveredCount = 0;
+    activeSim.eventBus.on('PLAYER_WIPEOUT', (ev) => {
+      wipeouts.push({ hazardId: ev.hazardId, effect: ev.effect });
+    });
+    activeSim.eventBus.on('PLAYER_RECOVERED', () => {
+      recoveredCount++;
+    });
+
+    const intent = createMutablePlayerIntent();
+    let minSignedDist = Infinity;
+    for (let t = 0; t < 60 && wipeouts.length === 0; t++) {
+      activeSim.savePreviousPoses();
+      activeSim.step(FIXED_DT, intent);
+      minSignedDist = Math.min(minSignedDist, obbSignedDist(st.currSkier.posX, st.currSkier.posZ));
+    }
+
+    expect(wipeouts).toHaveLength(1);
+    expect(wipeouts[0]).toEqual({ hazardId: targetDefId, effect: 'wipeout' });
+    expect(st.skierState).toBe('wipeout');
+    expect(minSignedDist).toBeGreaterThanOrEqual(0.2);
+
+    // Step through tumble and recovery until recovered
+    for (let t = 0; t < 120 && recoveredCount === 0; t++) {
+      activeSim.savePreviousPoses();
+      activeSim.step(FIXED_DT, intent);
+      expect(obbSignedDist(st.currSkier.posX, st.currSkier.posZ)).toBeGreaterThanOrEqual(0.2);
+    }
+
+    expect(recoveredCount).toBe(1);
+    expect(st.skierState).toBe('skiing');
+    expect(st.invulnerableTimerSec).toBeGreaterThan(0);
+    expect(obbSignedDist(st.currSkier.posX, st.currSkier.posZ)).toBeGreaterThanOrEqual(0.35);
+
+    // Drive straight at the building wall while invulnerable: still physically impassable & no double wipeout
+    const invSurf = activeSim.sampleSurface(sx, sz + 9);
+    internal.currSkier.posX = sx;
+    internal.currSkier.posZ = sz + 9;
+    internal.currSkier.posY = invSurf.groundY;
+    internal.currSkier.headingRad = 0;
+    internal.currSkier.velX = 0;
+    internal.currSkier.velY = -3;
+    internal.currSkier.velZ = -20;
+    internal.currSkier.grounded = true;
+    internal.surfaceSample.segmentId = invSurf.segmentId;
+    internal.surfaceSample.s = invSurf.s;
+
+    let minInvDist = Infinity;
+    for (let t = 0; t < 30 && st.invulnerableTimerSec > FIXED_DT; t++) {
+      activeSim.savePreviousPoses();
+      activeSim.step(FIXED_DT, intent);
+      minInvDist = Math.min(minInvDist, obbSignedDist(st.currSkier.posX, st.currSkier.posZ));
+    }
+    expect(minInvDist).toBeGreaterThanOrEqual(0.2);
+    expect(wipeouts).toHaveLength(1);
+    expect(st.currSkier.posZ).toBeGreaterThan(sz - hd * 0.5);
+
+    activeSim.dispose();
+  });
 });
