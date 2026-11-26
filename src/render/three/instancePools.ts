@@ -3,20 +3,31 @@ import { getCreatureDef } from '../../content/creatures';
 import { getDeliveryZoneDef } from '../../content/deliveryZones';
 import { getHazardDef, getRampDef } from '../../content/hazards';
 import { getStageDef } from '../../content/stages';
+import { FIXED_DT } from '../../core/fixedLoop';
 import { clamp, lerp, lerpAngle } from '../../core/math';
 import { hashCoords2DU32 } from '../../core/rng';
+import type { ReadonlySimState } from '../../sim/contracts';
 import {
-  CREATURE_PHASE_ATTACK,
-  CREATURE_PHASE_TELEGRAPH,
-  type ReadonlySimState,
-} from '../../sim/contracts';
+  CHARACTER_ATLAS_FRAMES,
+  CHILD_SPRITE_BASE_HEIGHT_M,
+  CHILD_SPRITE_BASE_WIDTH_M,
+} from './characterSpriteAtlas';
 import type { GraphicsUtils } from './graphicsUtils';
 import type { ProceduralMeshAssets } from './meshFactory';
+import {
+  computeDeliveryChildPosition,
+  createBillboardAnimPose,
+  evaluateChildAnimPose,
+  evaluateCreatureAnimEntry,
+  resolveChildVisualScale,
+  type CreatureAnimMetrics,
+} from './spriteAnimation';
 import {
   ATLAS_FRAMES,
   FROSTED_TREE_FRAMES,
   GREEN_TREE_FRAMES,
   TREE_FRAME_PROPORTIONS,
+  type AtlasFrameRect,
   type BillboardFrameName,
 } from './spriteAtlas';
 import type { SceneryProvider } from './sceneryCellStreamer';
@@ -28,6 +39,7 @@ const MAX_PRESENTS_STD = 192;
 const MAX_PRESENTS_GOLD = 96;
 const MAX_RAMPS = 48;
 const MAX_DYNAMIC_BILLBOARDS = 256;
+export const MAX_CHARACTER_BILLBOARDS = 128;
 export const MAX_STATIC_BILLBOARDS = 4096;
 
 const _mat4 = new THREE.Matrix4();
@@ -35,11 +47,21 @@ const _pos = new THREE.Vector3();
 const _quat = new THREE.Quaternion();
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
 const _scale = new THREE.Vector3();
+const _childPosScratch = { x: 0, y: 0, z: 0 };
+const _childPoseScratch = createBillboardAnimPose('child_idle_0');
+const _creaturePoseScratch = createBillboardAnimPose('bear_walk');
+const _creatureMetricsScratch: CreatureAnimMetrics = {
+  baseWidthM: 2.55,
+  baseHeightM: 2.75,
+  flipX: false,
+};
 
 interface BillboardMeshWrapper {
   readonly mesh: THREE.InstancedMesh;
   readonly uvRectArray: Float32Array;
   readonly uvRectAttr: THREE.InstancedBufferAttribute;
+  readonly tiltArray: Float32Array;
+  readonly tiltAttr: THREE.InstancedBufferAttribute;
   readonly capacity: number;
 }
 
@@ -61,22 +83,27 @@ function createBillboardPoolMesh(
   const uvRectAttr = new THREE.InstancedBufferAttribute(uvRectArray, 4);
   uvRectAttr.setUsage(THREE.DynamicDrawUsage);
   instGeo.setAttribute('aUvRect', uvRectAttr);
+
+  const tiltArray = new Float32Array(capacity);
+  const tiltAttr = new THREE.InstancedBufferAttribute(tiltArray, 1);
+  tiltAttr.setUsage(THREE.DynamicDrawUsage);
+  instGeo.setAttribute('aTilt', tiltAttr);
+
   gfx.markAsCache(instGeo, instGeo.name);
 
   const mesh = gfx.createInstancedMesh(instGeo, billboardMat, capacity, label);
   mesh.frustumCulled = false;
   mesh.count = 0;
 
-  return { mesh, uvRectArray, uvRectAttr, capacity };
+  return { mesh, uvRectArray, uvRectAttr, tiltArray, tiltAttr, capacity };
 }
 
 function writeUvRect(
   uvRectArray: Float32Array,
   index: number,
-  frame: BillboardFrameName,
+  rect: AtlasFrameRect,
   flipX: boolean,
 ): void {
-  const rect = ATLAS_FRAMES[frame];
   const base = index * 4;
   if (flipX) {
     uvRectArray[base] = rect.uOffset + rect.uScale;
@@ -111,6 +138,7 @@ export class InstancePools {
   private readonly rampOutlineMesh: THREE.InstancedMesh;
 
   private readonly dynamicBillboards: BillboardMeshWrapper;
+  private readonly characterBillboards: BillboardMeshWrapper;
   private readonly staticBillboards: BillboardMeshWrapper;
   private staticPackCount = 0;
   private lastSceneryRevision = -1;
@@ -128,7 +156,13 @@ export class InstancePools {
     _mat4.compose(_pos, _quat, _scale);
 
     this.staticBillboards.mesh.setMatrixAt(this.staticPackCount, _mat4);
-    writeUvRect(this.staticBillboards.uvRectArray, this.staticPackCount, item.frame, item.flipX);
+    this.staticBillboards.tiltArray[this.staticPackCount] = 0;
+    writeUvRect(
+      this.staticBillboards.uvRectArray,
+      this.staticPackCount,
+      ATLAS_FRAMES[item.frame],
+      item.flipX,
+    );
     this.staticPackCount++;
     return true;
   };
@@ -140,6 +174,7 @@ export class InstancePools {
     billboardMat: THREE.Material,
     billboardQuadGeo: THREE.BufferGeometry,
     assets: ProceduralMeshAssets,
+    characterBillboardMat?: THREE.Material,
   ) {
     this.rootGroup = new THREE.Group();
     this.rootGroup.name = 'InstancePoolsRoot';
@@ -195,6 +230,14 @@ export class InstancePools {
       'DynamicBillboardPool',
     );
     this.dynamicBillboards.mesh.castShadow = false;
+    this.characterBillboards = createBillboardPoolMesh(
+      gfx,
+      billboardQuadGeo,
+      characterBillboardMat ?? billboardMat,
+      MAX_CHARACTER_BILLBOARDS,
+      'CharacterBillboardPool',
+    );
+    this.characterBillboards.mesh.castShadow = false;
     this.staticBillboards = createBillboardPoolMesh(
       gfx,
       billboardQuadGeo,
@@ -203,7 +246,11 @@ export class InstancePools {
       'StaticSceneryBillboardPool',
     );
     this.staticBillboards.mesh.castShadow = false;
-    this.rootGroup.add(this.dynamicBillboards.mesh, this.staticBillboards.mesh);
+    this.rootGroup.add(
+      this.dynamicBillboards.mesh,
+      this.characterBillboards.mesh,
+      this.staticBillboards.mesh,
+    );
   }
 
   sync(simState: ReadonlySimState, alpha: number, sceneryProvider: SceneryProvider): void {
@@ -254,10 +301,11 @@ export class InstancePools {
         _scale.set(w, h, 1);
         _mat4.compose(_pos, _quat, _scale);
         this.dynamicBillboards.mesh.setMatrixAt(dynBbCount, _mat4);
+        this.dynamicBillboards.tiltArray[dynBbCount] = 0;
         writeUvRect(
           this.dynamicBillboards.uvRectArray,
           dynBbCount,
-          frame,
+          ATLAS_FRAMES[frame],
           flipX,
         );
         dynBbCount++;
@@ -373,77 +421,133 @@ export class InstancePools {
       this.rampOutlineMesh.instanceMatrix.needsUpdate = true;
     }
 
-    // 4. Waiting / Cheering Children at DeliveryZones (2.5D cylindrical billboards)
+    this.dynamicBillboards.mesh.count = dynBbCount;
+    if (dynBbCount > 0) {
+      this.dynamicBillboards.mesh.instanceMatrix.needsUpdate = true;
+      this.dynamicBillboards.uvRectAttr.needsUpdate = true;
+      this.dynamicBillboards.tiltAttr.needsUpdate = true;
+    }
+
+    // 4. Waiting / Cheering Children at DeliveryZones (dedicated CharacterBillboardPool)
+    const camPosX = lerp(simState.prevCamera.posX, simState.currCamera.posX, t);
+    const camPosZ = lerp(simState.prevCamera.posZ, simState.currCamera.posZ, t);
+    const camLookX = lerp(simState.prevCamera.lookAtX, simState.currCamera.lookAtX, t);
+    const camLookZ = lerp(simState.prevCamera.lookAtZ, simState.currCamera.lookAtZ, t);
+    const camDx = camLookX - camPosX;
+    const camDz = camLookZ - camPosZ;
+    const camLen = Math.hypot(camDx, camDz);
+    const camFwdX = camLen > 1e-4 ? camDx / camLen : 0;
+    const camFwdZ = camLen > 1e-4 ? camDz / camLen : -1;
+    const camRightX = -camFwdZ;
+    const camRightZ = camFwdX;
+
+    let charBbCount = 0;
     const zones = simState.entities.deliveryZones;
     for (let i = 0; i < zones.count; i++) {
       const zoneDef = getDeliveryZoneDef(zones.defIds[i]!);
       const childCount = zoneDef ? zoneDef.childVisuals.length : 1;
       const yaw = zones.yawRad[i]!;
-      const rightX = Math.cos(yaw);
-      const rightZ = -Math.sin(yaw);
-      const celebrating = zones.celebratingTimer[i]! > 0 || zones.active[i]! === 0;
+      const celebTimer = zones.celebratingTimer[i]!;
 
       for (let c = 0; c < childCount; c++) {
-        if (dynBbCount >= this.dynamicBillboards.capacity) break;
-        const spread = (c - (childCount - 1) * 0.5) * 1.45;
-        const hop = celebrating ? Math.abs(Math.sin(elapsed * 9.5 + c * 1.4)) * 0.45 : 0;
+        if (charBbCount >= this.characterBillboards.capacity) break;
+        computeDeliveryChildPosition(
+          zones.posX[i]!,
+          zones.posY[i]!,
+          zones.posZ[i]!,
+          yaw,
+          c,
+          childCount,
+          simState.mountainField,
+          _childPosScratch,
+        );
+        const childScale = resolveChildVisualScale(zoneDef, c);
+        const flipX = c % 2 === 1;
+        evaluateChildAnimPose(elapsed, celebTimer, c, _childPoseScratch, flipX);
 
         _pos.set(
-          zones.posX[i]! + rightX * spread,
-          zones.posY[i]! + hop,
-          zones.posZ[i]! + rightZ * spread,
+          _childPosScratch.x,
+          _childPosScratch.y + _childPoseScratch.offsetY,
+          _childPosScratch.z,
         );
         _quat.identity();
-        _scale.set(1.65, 1.85, 1);
+        _scale.set(
+          CHILD_SPRITE_BASE_WIDTH_M * childScale * _childPoseScratch.scaleX,
+          CHILD_SPRITE_BASE_HEIGHT_M * childScale * _childPoseScratch.scaleY,
+          1,
+        );
         _mat4.compose(_pos, _quat, _scale);
 
-        const frame: BillboardFrameName = celebrating
-          ? 'child_cheer'
-          : (c % 2 === 1 ? 'child_blue' : 'child_idle');
-
-        this.dynamicBillboards.mesh.setMatrixAt(dynBbCount, _mat4);
-        writeUvRect(this.dynamicBillboards.uvRectArray, dynBbCount, frame, c % 2 === 1);
-        dynBbCount++;
+        this.characterBillboards.mesh.setMatrixAt(charBbCount, _mat4);
+        this.characterBillboards.tiltArray[charBbCount] = _childPoseScratch.tiltRad;
+        writeUvRect(
+          this.characterBillboards.uvRectArray,
+          charBbCount,
+          CHARACTER_ATLAS_FRAMES[_childPoseScratch.frame],
+          flipX,
+        );
+        charBbCount++;
       }
     }
 
-    // 5. World-Space Patrolling Creatures (interpolated prev -> curr with alpha)
+    // 5. World-Space Creatures (interpolated prev -> curr with alpha, dispatched by CreatureDef)
     const creatures = simState.entities.creatures;
     for (let i = 0; i < creatures.count; i++) {
-      if (dynBbCount >= this.dynamicBillboards.capacity) break;
-      const def = getCreatureDef(creatures.defIds[i]!);
+      if (charBbCount >= this.characterBillboards.capacity) break;
+      const defId = creatures.defIds[i]!;
+      const def = getCreatureDef(defId);
       const cx = lerp(creatures.prevPosX[i]!, creatures.posX[i]!, t);
       const cy = lerp(creatures.prevPosY[i]!, creatures.posY[i]!, t);
       const cz = lerp(creatures.prevPosZ[i]!, creatures.posZ[i]!, t);
-      const phase = creatures.stateCode[i]!;
-      const isTelegraph =
-        phase === CREATURE_PHASE_TELEGRAPH || phase === CREATURE_PHASE_ATTACK;
-      const baseScale = def?.visual.kind === 'procedural' ? (def.visual.scale ?? 1) : 1;
-      const pulse = isTelegraph ? 1 + 0.14 * creatures.telegraphProgress[i]! : 1;
-      const waddle = Math.abs(Math.sin(elapsed * 8.5 + i * 2.1)) * 0.12;
+      const clearanceM = Math.max(0, cy - creatures.groundY[i]!);
+      const velY = (creatures.posY[i]! - creatures.prevPosY[i]!) / FIXED_DT;
+      const heading = lerpAngle(creatures.prevHeadingRad[i]!, creatures.headingRad[i]!, t);
 
-      _pos.set(cx, cy + waddle, cz);
+      if (
+        !evaluateCreatureAnimEntry(
+          defId,
+          def?.visual,
+          elapsed,
+          creatures.stateCode[i]!,
+          creatures.telegraphProgress[i]!,
+          clearanceM,
+          velY,
+          heading,
+          camRightX,
+          camRightZ,
+          i,
+          _creaturePoseScratch,
+          _creatureMetricsScratch,
+        )
+      ) {
+        continue;
+      }
+
+      _pos.set(cx, cy + _creaturePoseScratch.offsetY, cz);
       _quat.identity();
-      _scale.set(2.55 * baseScale * pulse, 2.75 * baseScale * pulse, 1);
+      _scale.set(
+        _creatureMetricsScratch.baseWidthM * _creaturePoseScratch.scaleX,
+        _creatureMetricsScratch.baseHeightM * _creaturePoseScratch.scaleY,
+        1,
+      );
       _mat4.compose(_pos, _quat, _scale);
 
-      const heading = lerpAngle(creatures.prevHeadingRad[i]!, creatures.headingRad[i]!, t);
-      const movingRight = Math.sin(heading) < 0;
-
-      this.dynamicBillboards.mesh.setMatrixAt(dynBbCount, _mat4);
+      this.characterBillboards.mesh.setMatrixAt(charBbCount, _mat4);
+      this.characterBillboards.tiltArray[charBbCount] = _creaturePoseScratch.tiltRad;
       writeUvRect(
-        this.dynamicBillboards.uvRectArray,
-        dynBbCount,
-        isTelegraph ? 'bear_telegraph' : 'bear_walk',
-        movingRight,
+        this.characterBillboards.uvRectArray,
+        charBbCount,
+        CHARACTER_ATLAS_FRAMES[_creaturePoseScratch.frame],
+        _creatureMetricsScratch.flipX,
       );
-      dynBbCount++;
+      charBbCount++;
     }
 
-    this.dynamicBillboards.mesh.count = dynBbCount;
-    if (dynBbCount > 0) {
-      this.dynamicBillboards.mesh.instanceMatrix.needsUpdate = true;
-      this.dynamicBillboards.uvRectAttr.needsUpdate = true;
+    this.characterBillboards.mesh.count = charBbCount;
+    if (charBbCount > 0) {
+      this.characterBillboards.mesh.instanceMatrix.needsUpdate = true;
+      this.characterBillboards.uvRectAttr.needsUpdate = true;
+      this.characterBillboards.tiltAttr.needsUpdate = true;
     }
 
     // 6. Static Off-Trail Scenery (repacked ONLY when sceneryRevision changes!)
@@ -456,6 +560,7 @@ export class InstancePools {
       if (this.staticPackCount > 0) {
         this.staticBillboards.mesh.instanceMatrix.needsUpdate = true;
         this.staticBillboards.uvRectAttr.needsUpdate = true;
+        this.staticBillboards.tiltAttr.needsUpdate = true;
       }
     }
   }

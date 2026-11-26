@@ -44,6 +44,47 @@ export {
   type TreeFrameProportion,
 } from './spriteAtlas';
 export {
+  CHARACTER_ATLAS_COLS,
+  CHARACTER_ATLAS_FRAMES,
+  CHARACTER_ATLAS_HEIGHT,
+  CHARACTER_ATLAS_ROWS,
+  CHARACTER_ATLAS_WIDTH,
+  CHARACTER_CELL_PAD_PX,
+  CHARACTER_CELL_SIZE,
+  CHILD_SHADOW_RADIUS_M,
+  CHILD_SPRITE_BASE_HEIGHT_M,
+  CHILD_SPRITE_BASE_WIDTH_M,
+  copyCanvasRegionToFlippedRgba,
+  createCharacterSpriteAtlasTexture,
+  isCharacterFrameName,
+  type CharacterFrameName,
+} from './characterSpriteAtlas';
+export {
+  applyVolumePreservingSquash,
+  CHILD_CELEBRATION_DURATION_SEC,
+  CHILD_CELEBRATION_HOP_COUNT,
+  CHILD_CELEBRATION_STAGGER_SEC,
+  CHILD_HOP_CONFIG,
+  CHILD_IDLE_CLIP,
+  CHILD_SLOT_SPREAD_M,
+  computeCameraRelativeFlipX,
+  computeDeliveryChildPosition,
+  createBillboardAnimPose,
+  evaluateBallisticHopPose,
+  evaluateBearAnimPose,
+  evaluateChildAnimPose,
+  evaluateCreatureAnimEntry,
+  evaluateThreePhaseHop,
+  resolveChildVisualScale,
+  sampleSpriteAnimFrame,
+  type BallisticHopConfig,
+  type BillboardAnimPose,
+  type CreatureAnimMetrics,
+  type SpriteAnimClip,
+  type SpriteAnimLoopMode,
+  type ThreePhaseHopConfig,
+} from './spriteAnimation';
+export {
   createBillboardQuadGeometry,
   createCylindricalBillboardMaterial,
 } from './billboardMaterial';
@@ -182,7 +223,11 @@ export {
   LandmarkStreamer,
   type LandmarkStreamerOptions,
 } from './landmarkStreamer';
-export { InstancePools, MAX_STATIC_BILLBOARDS } from './instancePools';
+export {
+  InstancePools,
+  MAX_CHARACTER_BILLBOARDS,
+  MAX_STATIC_BILLBOARDS,
+} from './instancePools';
 export { ContactShadows } from './contactShadows';
 export { BackpackStack } from './backpackStack';
 export { TossedPresents } from './tossedPresents';

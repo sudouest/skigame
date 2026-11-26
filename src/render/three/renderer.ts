@@ -28,6 +28,7 @@ import { SkiTracks } from './skiTracks';
 import { SkyDome } from './skyDome';
 import { SnowVfx } from './snowVfx';
 import { createCartoonSpriteAtlasTexture } from './spriteAtlas';
+import { createCharacterSpriteAtlasTexture } from './characterSpriteAtlas';
 import { TerrainClipmap } from './terrainClipmap';
 import {
   bindClipmapStoreToMaterial,
@@ -118,6 +119,8 @@ export class ThreeRenderer {
   private readonly outlineMaterial: THREE.ShaderMaterial;
   private readonly billboardAtlas: THREE.Texture;
   private readonly billboardMaterial: THREE.MeshBasicMaterial;
+  private readonly characterBillboardAtlas: THREE.Texture;
+  private readonly characterBillboardMaterial: THREE.MeshBasicMaterial;
 
   private readonly hemiLight: THREE.HemisphereLight;
   private readonly skierRig: SkierRig;
@@ -240,6 +243,14 @@ export class ThreeRenderer {
       this.sharedMaterials.sharedUniforms,
       antialiasEnabled,
     );
+    this.characterBillboardAtlas = createCharacterSpriteAtlasTexture(this.gfx);
+    this.characterBillboardMaterial = createCylindricalBillboardMaterial(
+      this.gfx,
+      this.characterBillboardAtlas,
+      this.sharedMaterials.sharedUniforms,
+      antialiasEnabled,
+      'CharacterBillboardMaterial',
+    );
 
     const meshAssets = createProceduralMeshAssets(this.gfx);
     const billboardQuadGeo = createBillboardQuadGeometry(this.gfx);
@@ -269,6 +280,7 @@ export class ThreeRenderer {
       this.billboardMaterial,
       billboardQuadGeo,
       meshAssets,
+      this.characterBillboardMaterial,
     );
     this.scene.add(this.instancePools.rootGroup);
 

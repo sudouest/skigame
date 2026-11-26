@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { getCreatureDef } from '../../content/creatures';
+import { getDeliveryZoneDef } from '../../content/deliveryZones';
 import { getHazardDef } from '../../content/hazards';
 import { clamp, lerp } from '../../core/math';
 import {
@@ -7,7 +8,14 @@ import {
   type MountainFieldView,
   type ReadonlySimState,
 } from '../../sim/contracts';
+import { CHILD_SHADOW_RADIUS_M } from './characterSpriteAtlas';
 import type { GraphicsUtils } from './graphicsUtils';
+import {
+  computeDeliveryChildPosition,
+  createBillboardAnimPose,
+  evaluateChildAnimPose,
+  resolveChildVisualScale,
+} from './spriteAnimation';
 
 const MAX_SHADOWS = 512;
 const SHADOW_TEX_SIZE = 64;
@@ -19,6 +27,8 @@ const _scale = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
 const _normal = new THREE.Vector3();
 const _mountainScratch = createMountainSampleOut();
+const _childPosScratch = { x: 0, y: 0, z: 0 };
+const _childPoseScratch = createBillboardAnimPose('child_idle_0');
 
 function createShadowBlobTexture(gfx: GraphicsUtils): THREE.DataTexture {
   const size = SHADOW_TEX_SIZE;
@@ -241,8 +251,58 @@ diffuseColor.a *= vShadowAlpha;`,
       );
     }
 
-    // 4. Uncollected presents (terrain-normal aligned)
     const mountainField = simState.mountainField;
+
+    // 4. DeliveryZone Children (prioritized before static presents; terrain-normal aligned + jump fade)
+    const zones = simState.entities.deliveryZones;
+    for (let i = 0; i < zones.count; i++) {
+      if (this.activeCount >= MAX_SHADOWS) break;
+      const zoneDef = getDeliveryZoneDef(zones.defIds[i]!);
+      const childCount = zoneDef ? zoneDef.childVisuals.length : 1;
+      const yaw = zones.yawRad[i]!;
+      const celebTimer = zones.celebratingTimer[i]!;
+
+      for (let c = 0; c < childCount; c++) {
+        if (this.activeCount >= MAX_SHADOWS) break;
+        computeDeliveryChildPosition(
+          zones.posX[i]!,
+          zones.posY[i]!,
+          zones.posZ[i]!,
+          yaw,
+          c,
+          childCount,
+          mountainField,
+          _childPosScratch,
+        );
+        evaluateChildAnimPose(simState.elapsedSec, celebTimer, c, _childPoseScratch);
+
+        let nx = 0;
+        let ny = 1;
+        let nz = 0;
+        if (mountainField) {
+          mountainField.evaluate(_childPosScratch.x, _childPosScratch.z, _mountainScratch);
+          nx = _mountainScratch.normalX;
+          ny = _mountainScratch.normalY;
+          nz = _mountainScratch.normalZ;
+        }
+
+        const childScale = resolveChildVisualScale(zoneDef, c);
+
+        this.pushShadow(
+          _childPosScratch.x,
+          _childPosScratch.y,
+          _childPosScratch.z,
+          nx,
+          ny,
+          nz,
+          CHILD_SHADOW_RADIUS_M * childScale,
+          _childPoseScratch.offsetY * 2.2,
+          0.52,
+        );
+      }
+    }
+
+    // 5. Uncollected presents (terrain-normal aligned)
     if (this.lastMountainField !== mountainField) {
       this.presentCacheValid.fill(0);
       this.lastMountainField = mountainField;

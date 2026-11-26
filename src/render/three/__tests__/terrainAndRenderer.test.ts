@@ -845,17 +845,21 @@ describe('CDLOD TerrainClipmap, ClipmapDataStore, SceneryCellStreamer, LandmarkS
     const presentGoldPool = poolsRoot.getObjectByName('PresentGoldPool') as THREE.InstancedMesh;
     const rampPool = poolsRoot.getObjectByName('RampPool') as THREE.InstancedMesh;
     const dynBbPool = poolsRoot.getObjectByName('DynamicBillboardPool') as THREE.InstancedMesh;
+    const charBbPool = poolsRoot.getObjectByName('CharacterBillboardPool') as THREE.InstancedMesh;
     const staticBbPool = poolsRoot.getObjectByName('StaticSceneryBillboardPool') as THREE.InstancedMesh;
     expect(boulderSmallPool.count).toBe(1);
     expect(boulderLargePool.count).toBe(1);
     expect(presentStdPool.count).toBe(1);
     expect(presentGoldPool.count).toBe(1);
     expect(rampPool.count).toBe(1);
-    expect(dynBbPool.count).toBe(4);
+    expect(dynBbPool.count).toBe(1);
+    expect(charBbPool.count).toBe(3);
     expect(staticBbPool.count).toBeGreaterThan(0);
     expect(staticBbPool.count).toBeLessThanOrEqual(MAX_STATIC_BILLBOARDS);
     expect(boulderSmallPool.frustumCulled).toBe(false);
     expect(dynBbPool.frustumCulled).toBe(false);
+    expect(charBbPool.frustumCulled).toBe(false);
+    expect(charBbPool.castShadow).toBe(false);
     expect(staticBbPool.frustumCulled).toBe(false);
 
     const forkArches: THREE.Object3D[] = [];
@@ -867,7 +871,7 @@ describe('CDLOD TerrainClipmap, ClipmapDataStore, SceneryCellStreamer, LandmarkS
     expect(forkArches.some((a) => a.getObjectByName('ForkBadgeDiamond')?.visible === true)).toBe(true);
 
     const shadowsPool = renderer.scene.getObjectByName('ContactShadowsPool') as THREE.InstancedMesh;
-    expect(shadowsPool.count).toBe(7);
+    expect(shadowsPool.count).toBe(9);
 
     const skiTracks = renderer.scene.getObjectByName('SkiTracksMesh') as THREE.Mesh;
     expect(skiTracks.geometry.drawRange.count).toBe(24);
