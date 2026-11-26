@@ -12,10 +12,12 @@ import {
 } from '../../../sim/contracts';
 import {
   buildFolkCabinGeometries,
+  CABIN_SMOKE_PUFFS_PER_CABIN,
   drawFolkCabinAtlas,
   drawFolkSmokeSprite,
   FOLK_CABIN_ATLAS_TILES,
   FOLK_CABIN_SMOKE_ORIGIN,
+  FOLK_SMOKE_FRAMES,
   type FolkCabinTileName,
 } from '../folkCabinModel';
 import { GraphicsTracker } from '../graphicsTracker';
@@ -161,6 +163,44 @@ describe('Folk Log Cabin Model & LandmarkStreamer Integration', () => {
     }
   });
 
+  it('defines 4 non-overlapping [0, 1] smoke UV rects and cleanly expands cabinSmokeMaterial against ShaderLib.basic', () => {
+    expect(FOLK_SMOKE_FRAMES).toHaveLength(4);
+    for (let i = 0; i < FOLK_SMOKE_FRAMES.length; i++) {
+      const f = FOLK_SMOKE_FRAMES[i]!;
+      expect(f.uOffset).toBeGreaterThanOrEqual(0);
+      expect(f.vOffset).toBeGreaterThanOrEqual(0);
+      expect(f.uScale).toBeGreaterThan(0);
+      expect(f.vScale).toBeGreaterThan(0);
+      expect(f.uOffset + f.uScale).toBeLessThanOrEqual(1);
+      expect(f.vOffset + f.vScale).toBeLessThanOrEqual(1);
+      for (let j = i + 1; j < FOLK_SMOKE_FRAMES.length; j++) {
+        const b = FOLK_SMOKE_FRAMES[j]!;
+        const overlapU = f.uOffset < b.uOffset + b.uScale && b.uOffset < f.uOffset + f.uScale;
+        const overlapV = f.vOffset < b.vOffset + b.vScale && b.vOffset < f.vOffset + f.vScale;
+        expect(overlapU && overlapV, `smoke frame overlap ${i} vs ${j}`).toBe(false);
+      }
+    }
+
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const mats = createSharedToonMaterials(gfx);
+    const shader = {
+      uniforms: {} as Record<string, THREE.IUniform>,
+      vertexShader: THREE.ShaderLib.basic.vertexShader,
+      fragmentShader: THREE.ShaderLib.basic.fragmentShader,
+    };
+    mats.cabinSmokeMaterial.onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
+
+    expect(shader.vertexShader).toContain('attribute vec4 aUvRect;');
+    expect(shader.vertexShader).toContain('attribute float aSmokeAlpha;');
+    expect(shader.vertexShader).toContain('vMapUv = uv * aUvRect.zw + aUvRect.xy;');
+    expect(shader.fragmentShader).toContain('varying float vSmokeAlpha;');
+    expect(shader.fragmentShader).toContain('uniform vec3 uBiomeTint;');
+    expect(shader.fragmentShader).toContain('uniform float uBlizzardDim;');
+    expect(shader.fragmentShader).toContain('diffuseColor.a *= vSmokeAlpha;');
+    tracker.disposeAll();
+  });
+
   it('draws folk cabin atlas and swirling smoke sprite with strictly finite Canvas2D coordinates', () => {
     const ctx = createRecordingCanvas2DContext();
     expect(() => drawFolkCabinAtlas(ctx)).not.toThrow();
@@ -213,8 +253,10 @@ describe('Folk Log Cabin Model & LandmarkStreamer Integration', () => {
 
     cabinSmokeGeo.computeBoundingBox();
     const smokeBox = cabinSmokeGeo.boundingBox!;
-    expect(smokeBox.min.y).toBeGreaterThanOrEqual(-0.1);
-    expect(smokeBox.max.y).toBeGreaterThanOrEqual(2.8);
+    expect(smokeBox.min.x).toBeCloseTo(-0.5, 5);
+    expect(smokeBox.max.x).toBeCloseTo(0.5, 5);
+    expect(smokeBox.min.y).toBeCloseTo(-0.5, 5);
+    expect(smokeBox.max.y).toBeCloseTo(0.5, 5);
 
     // Verify front (+Z) and back (-Z) gable pediment triangles point strictly outward
     const normAttr = cabinGeo.getAttribute('normal');
@@ -277,45 +319,95 @@ describe('Folk Log Cabin Model & LandmarkStreamer Integration', () => {
     const seg = createMockCabinSegment(1, 17, [cabinReq]);
     const window: TrailWindowView = { prev: null, curr: seg, nextLeft: null, nextRight: null };
 
-    landmarkStreamer.sync(window, 0.25);
+    const camera = new THREE.PerspectiveCamera(60, 16 / 9, 0.25, 400);
+    camera.position.set(0, -6, -15);
+    camera.lookAt(-10, -12, -40);
+    camera.updateMatrixWorld();
+
+    landmarkStreamer.sync(window, 0.25, camera, 0);
     expect(landmarkStreamer.activeCount).toBe(1);
 
     let cabinMesh: THREE.Mesh | undefined;
     let outlineMesh: THREE.Mesh | undefined;
     let glowMesh: THREE.Mesh | undefined;
-    let smokeMesh: THREE.Mesh | undefined;
 
     landmarkStreamer.rootGroup.traverse((node) => {
       if (!(node as THREE.Mesh).isMesh) return;
       if (node.name.startsWith('DeliveryCabinOutline_')) outlineMesh = node as THREE.Mesh;
       else if (node.name.startsWith('DeliveryCabinGlow_')) glowMesh = node as THREE.Mesh;
-      else if (node.name.startsWith('DeliveryCabinSmoke_')) smokeMesh = node as THREE.Mesh;
       else if (node.name.startsWith('DeliveryCabin_')) cabinMesh = node as THREE.Mesh;
     });
 
+    const smokePool = landmarkStreamer.cabinSmokeMesh;
     expect(cabinMesh).toBeDefined();
     expect(outlineMesh).toBeDefined();
     expect(glowMesh).toBeDefined();
-    expect(smokeMesh).toBeDefined();
+    expect(smokePool.name).toBe('DeliveryCabinSmokePool');
+    expect(smokePool.count).toBe(CABIN_SMOKE_PUFFS_PER_CABIN);
+    expect(smokePool.frustumCulled).toBe(false);
 
     expect(cabinMesh!.castShadow).toBe(true);
     expect(outlineMesh!.castShadow).toBe(false);
     expect(glowMesh!.castShadow).toBe(false);
-    expect(smokeMesh!.castShadow).toBe(false);
+    expect(smokePool.castShadow).toBe(false);
+    expect(smokePool.receiveShadow).toBe(false);
 
-    expect(smokeMesh!.position.x).toBeCloseTo(FOLK_CABIN_SMOKE_ORIGIN.x, 5);
-    expect(smokeMesh!.position.y).toBeCloseTo(FOLK_CABIN_SMOKE_ORIGIN.y, 5);
-    expect(smokeMesh!.position.z).toBeCloseTo(FOLK_CABIN_SMOKE_ORIGIN.z, 5);
+    const yaw = Math.PI * 0.35; // cabinReq.x < 0 -> +0.35 * PI
+    const expectedMouthX =
+      cabinReq.worldX +
+      FOLK_CABIN_SMOKE_ORIGIN.x * Math.cos(yaw) +
+      FOLK_CABIN_SMOKE_ORIGIN.z * Math.sin(yaw);
+    const expectedMouthY = cabinReq.worldY + FOLK_CABIN_SMOKE_ORIGIN.y;
+    const expectedMouthZ =
+      cabinReq.worldZ -
+      FOLK_CABIN_SMOKE_ORIGIN.x * Math.sin(yaw) +
+      FOLK_CABIN_SMOKE_ORIGIN.z * Math.cos(yaw);
 
-    const rotY0 = smokeMesh!.rotation.y;
-    const scaleY0 = smokeMesh!.scale.y;
-    landmarkStreamer.sync(window, 1.35);
-    expect(smokeMesh!.rotation.y).not.toBeCloseTo(rotY0, 4);
-    expect(smokeMesh!.scale.y).not.toBeCloseTo(scaleY0, 4);
+    const readSmokeInstances = (): Array<{ x: number; y: number; z: number; size: number }> => {
+      const m = new THREE.Matrix4();
+      const p = new THREE.Vector3();
+      const q = new THREE.Quaternion();
+      const s = new THREE.Vector3();
+      const out: Array<{ x: number; y: number; z: number; size: number }> = [];
+      for (let i = 0; i < smokePool.count; i++) {
+        smokePool.getMatrixAt(i, m);
+        m.decompose(p, q, s);
+        out.push({ x: p.x, y: p.y, z: p.z, size: s.x });
+      }
+      return out;
+    };
+
+    const atT0 = readSmokeInstances();
+    const lowestT0 = atT0.reduce((best, cur) => (cur.y < best.y ? cur : best), atT0[0]!);
+    expect(Math.hypot(lowestT0.x - expectedMouthX, lowestT0.z - expectedMouthZ)).toBeLessThan(0.8);
+    expect(lowestT0.y).toBeGreaterThanOrEqual(expectedMouthY - 0.05);
+
+    landmarkStreamer.sync(window, 0.55, camera, 0);
+    const atT1 = readSmokeInstances();
+    let risingMatches = 0;
+    let expandingMatches = 0;
+    for (let i = 0; i < CABIN_SMOKE_PUFFS_PER_CABIN; i++) {
+      // Non-wrapping puffs move upward (+Y) and bloom outward in size
+      if (atT1[i]!.y > atT0[i]!.y + 0.15) {
+        risingMatches++;
+        if (atT1[i]!.size >= atT0[i]!.size) {
+          expandingMatches++;
+        }
+      }
+    }
+    expect(risingMatches).toBeGreaterThanOrEqual(CABIN_SMOKE_PUFFS_PER_CABIN - 3);
+    expect(expandingMatches).toBe(risingMatches);
+
+    // Alpine wind lateral drift bends upper smoke downwind
+    landmarkStreamer.sync(window, 0.55, camera, 6.0);
+    const atWind = readSmokeInstances();
+    const highestWindIdx = atWind.reduce((bestI, cur, idx, arr) => (cur.y > arr[bestI]!.y ? idx : bestI), 0);
+    expect(atWind[highestWindIdx]!.x).toBeGreaterThan(atT1[highestWindIdx]!.x + 0.4);
 
     expect(tracker.checkLeaks(0, true, scene).totalLeaks).toBe(0);
 
     landmarkStreamer.clearAll();
+    expect(smokePool.count).toBe(0);
     tracker.disposeAll();
     const stats = tracker.getStats();
     expect(stats.activeObjects).toBe(0);

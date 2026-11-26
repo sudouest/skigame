@@ -1,11 +1,17 @@
 import * as THREE from 'three';
-import { clamp } from '../../core/math';
+import { clamp, smoothstep } from '../../core/math';
 import type {
   SegmentLandmarkRequirement,
   TerrainSegmentView,
   TrailWindowView,
 } from '../../sim/contracts';
-import { FOLK_CABIN_SMOKE_ORIGIN } from './folkCabinModel';
+import {
+  CABIN_SMOKE_CYCLE_SEC,
+  CABIN_SMOKE_PUFFS_PER_CABIN,
+  CABIN_SMOKE_RISE_HEIGHT_M,
+  FOLK_CABIN_SMOKE_ORIGIN,
+  FOLK_SMOKE_FRAMES,
+} from './folkCabinModel';
 import type { GraphicsUtils } from './graphicsUtils';
 import { createForkArchObject, type ProceduralMeshAssets } from './meshFactory';
 import type { SharedToonMaterials } from './toonMaterials';
@@ -17,17 +23,11 @@ interface PooledForkArch {
   readonly setBadge: (stageId?: string | null, gateHalfWidth?: number) => void;
 }
 
-interface PooledCabin {
-  readonly group: THREE.Group;
-  readonly smokeMesh: THREE.Mesh;
-}
-
 interface ActiveLandmarkRecord {
   id: string;
   pooledKind: PooledLandmarkKind | null;
   obj: THREE.Object3D | null;
   forkArch: PooledForkArch | null;
-  cabin: PooledCabin | null;
   segmentSeed: number;
   badgeStageId: string | undefined;
   gateHalfWidth: number | undefined;
@@ -48,6 +48,15 @@ export interface LandmarkStreamerOptions {
 }
 
 const MAX_ACTIVE_LANDMARKS = 48;
+const MAX_CABIN_POOLED = 8;
+const MAX_CABIN_SMOKE_PUFFS = MAX_CABIN_POOLED * CABIN_SMOKE_PUFFS_PER_CABIN;
+
+const _smokeMat4 = new THREE.Matrix4();
+const _smokePos = new THREE.Vector3();
+const _smokeCamQuat = new THREE.Quaternion();
+const _smokeRollQuat = new THREE.Quaternion();
+const _smokeScale = new THREE.Vector3();
+const _smokeZAxis = new THREE.Vector3(0, 0, 1);
 
 function resolveVisualSignature(lm: SegmentLandmarkRequirement): string {
   if (lm.visual.kind === 'mesh') {
@@ -95,12 +104,17 @@ function resolvePooledKind(lm: SegmentLandmarkRequirement): PooledLandmarkKind {
  */
 export class LandmarkStreamer {
   readonly rootGroup: THREE.Group;
+  readonly cabinSmokeMesh: THREE.InstancedMesh;
 
   private readonly assetWaiter: ((modelId: string) => Promise<void> | null) | undefined;
   private readonly forkArchPool: PooledForkArch[] = [];
   private readonly lanternPool: THREE.Group[] = [];
   private readonly deliveryArchPool: THREE.Group[] = [];
-  private readonly cabinPool: PooledCabin[] = [];
+  private readonly cabinPool: THREE.Group[] = [];
+  private readonly smokeUvRects: Float32Array;
+  private readonly smokeUvRectAttr: THREE.InstancedBufferAttribute;
+  private readonly smokeAlphas: Float32Array;
+  private readonly smokeAlphaAttr: THREE.InstancedBufferAttribute;
 
   private readonly activeRecords = new Map<string, ActiveLandmarkRecord>();
   private readonly recordPool: ActiveLandmarkRecord[] = [];
@@ -124,7 +138,6 @@ export class LandmarkStreamer {
         pooledKind: null,
         obj: null,
         forkArch: null,
-        cabin: null,
         segmentSeed: 0,
         badgeStageId: undefined,
         gateHalfWidth: undefined,
@@ -191,7 +204,7 @@ export class LandmarkStreamer {
       this.deliveryArchPool.push(group);
     }
 
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < MAX_CABIN_POOLED; i++) {
       const group = new THREE.Group();
       group.name = `PooledDeliveryCabin_${i}`;
       const cabinMesh = gfx.createMesh(
@@ -215,22 +228,42 @@ export class LandmarkStreamer {
         `DeliveryCabinGlow_${i}`,
       );
       glowMesh.castShadow = false;
-      const smokeMesh = gfx.createMesh(
-        meshAssets.cabinSmokeGeo,
-        materials.cabinSmokeMaterial,
-        `DeliveryCabinSmoke_${i}`,
-      );
-      smokeMesh.castShadow = false;
-      smokeMesh.receiveShadow = false;
-      smokeMesh.position.set(
-        FOLK_CABIN_SMOKE_ORIGIN.x,
-        FOLK_CABIN_SMOKE_ORIGIN.y,
-        FOLK_CABIN_SMOKE_ORIGIN.z,
-      );
-      group.add(cabinMesh, glowMesh, smokeMesh);
+      group.add(cabinMesh, glowMesh);
       gfx.markAsCache(group, group.name);
-      this.cabinPool.push({ group, smokeMesh });
+      this.cabinPool.push(group);
     }
+
+    const instSmokeGeo = new THREE.BufferGeometry();
+    instSmokeGeo.name = 'DeliveryCabinSmokePool_InstGeo';
+    instSmokeGeo.index = meshAssets.cabinSmokeGeo.index;
+    instSmokeGeo.setAttribute('position', meshAssets.cabinSmokeGeo.attributes.position!);
+    instSmokeGeo.setAttribute('normal', meshAssets.cabinSmokeGeo.attributes.normal!);
+    instSmokeGeo.setAttribute('uv', meshAssets.cabinSmokeGeo.attributes.uv!);
+
+    this.smokeUvRects = new Float32Array(MAX_CABIN_SMOKE_PUFFS * 4);
+    this.smokeUvRectAttr = new THREE.InstancedBufferAttribute(this.smokeUvRects, 4);
+    this.smokeUvRectAttr.setUsage(THREE.DynamicDrawUsage);
+    instSmokeGeo.setAttribute('aUvRect', this.smokeUvRectAttr);
+
+    this.smokeAlphas = new Float32Array(MAX_CABIN_SMOKE_PUFFS);
+    this.smokeAlphaAttr = new THREE.InstancedBufferAttribute(this.smokeAlphas, 1);
+    this.smokeAlphaAttr.setUsage(THREE.DynamicDrawUsage);
+    instSmokeGeo.setAttribute('aSmokeAlpha', this.smokeAlphaAttr);
+    gfx.markAsCache(instSmokeGeo, instSmokeGeo.name);
+
+    this.cabinSmokeMesh = gfx.createInstancedMesh(
+      instSmokeGeo,
+      materials.cabinSmokeMaterial,
+      MAX_CABIN_SMOKE_PUFFS,
+      'DeliveryCabinSmokePool',
+    );
+    this.cabinSmokeMesh.frustumCulled = false;
+    this.cabinSmokeMesh.castShadow = false;
+    this.cabinSmokeMesh.receiveShadow = false;
+    this.cabinSmokeMesh.renderOrder = 2;
+    this.cabinSmokeMesh.count = 0;
+    this.rootGroup.add(this.cabinSmokeMesh);
+    gfx.markAsCache(this.cabinSmokeMesh, 'DeliveryCabinSmokePool');
   }
 
   get activeCount(): number {
@@ -249,7 +282,12 @@ export class LandmarkStreamer {
     return pending;
   }
 
-  sync(trailWindow: TrailWindowView, elapsedSec = 0): void {
+  sync(
+    trailWindow: TrailWindowView,
+    elapsedSec = 0,
+    camera?: THREE.Camera,
+    windLateral = 0,
+  ): void {
     this.activeSegmentsScratch.length = 0;
     if (trailWindow.prev) this.activeSegmentsScratch.push(trailWindow.prev);
     this.activeSegmentsScratch.push(trailWindow.curr);
@@ -283,20 +321,99 @@ export class LandmarkStreamer {
       }
     }
 
+    this.updateCabinSmoke(elapsedSec, camera, windLateral);
+  }
+
+  private updateCabinSmoke(
+    elapsedSec: number,
+    camera: THREE.Camera | undefined,
+    windLateral: number,
+  ): void {
+    if (camera) {
+      _smokeCamQuat.copy(camera.quaternion);
+    } else {
+      _smokeCamQuat.identity();
+    }
+
+    const windDriftX = clamp(0.85 + windLateral * 0.35, -3.2, 3.2);
+    const windDriftZ = 0.28;
+    let count = 0;
+
     for (const rec of this.activeRecords.values()) {
-      if (!rec.cabin) continue;
-      const phase = elapsedSec * 1.4 + (rec.segmentSeed % 31) * 0.37;
-      const swayXZ = 1 + 0.035 * Math.sin(phase * 1.1);
-      rec.cabin.smokeMesh.rotation.set(
-        0.03 * Math.cos(phase * 0.8),
-        0.14 * Math.sin(phase * 0.65),
-        0.055 * Math.sin(phase),
-      );
-      rec.cabin.smokeMesh.scale.set(
-        swayXZ,
-        1 + 0.055 * Math.cos(phase * 0.85),
-        swayXZ,
-      );
+      if (rec.pooledKind !== 'delivery_cabin' || rec.obj === null) continue;
+      const cosY = Math.cos(rec.yawRad);
+      const sinY = Math.sin(rec.yawRad);
+      const scale = rec.scale;
+
+      const mouthX =
+        rec.worldX + (FOLK_CABIN_SMOKE_ORIGIN.x * cosY + FOLK_CABIN_SMOKE_ORIGIN.z * sinY) * scale;
+      const mouthY = rec.worldY + FOLK_CABIN_SMOKE_ORIGIN.y * scale;
+      const mouthZ =
+        rec.worldZ + (-FOLK_CABIN_SMOKE_ORIGIN.x * sinY + FOLK_CABIN_SMOKE_ORIGIN.z * cosY) * scale;
+
+      const tiltX = -0.16 * cosY - 0.05 * sinY;
+      const tiltZ = 0.16 * sinY - 0.05 * cosY;
+      const seedPhase = ((rec.segmentSeed & 255) / 256) * 0.73;
+
+      for (let k = 0; k < CABIN_SMOKE_PUFFS_PER_CABIN && count < MAX_CABIN_SMOKE_PUFFS; k++) {
+        const rawPhase =
+          elapsedSec / CABIN_SMOKE_CYCLE_SEC + k / CABIN_SMOKE_PUFFS_PER_CABIN + seedPhase;
+        const u = ((rawPhase % 1) + 1) % 1;
+        const invU = 1 - u;
+        const dy = (u * 0.78 + (1 - invU * invU) * 0.22) * CABIN_SMOKE_RISE_HEIGHT_M * scale;
+
+        const curlPhase = u * Math.PI * 3.2 + k * 1.15 + seedPhase * 6.28;
+        const curlAmp = (0.12 + 0.42 * smoothstep(0.08, 0.85, u)) * scale;
+        const windEase = u * u * 0.65 + u * 0.35;
+
+        const px =
+          mouthX +
+          (tiltX * 0.55 * u + windDriftX * windEase) * scale +
+          Math.sin(curlPhase) * curlAmp;
+        const py = mouthY + dy;
+        const pz =
+          mouthZ +
+          (tiltZ * 0.55 * u + windDriftZ * windEase) * scale +
+          Math.cos(curlPhase * 0.85) * curlAmp * 0.75;
+
+        const puffSize =
+          (0.34 + 0.96 * smoothstep(0.0, 0.9, u)) * (k % 3 === 1 ? 0.88 : 1.0) * scale;
+        const spinRad = ((k & 1) === 0 ? 1 : -1) * (u * 1.65 + k * 0.52);
+        const fadeIn = smoothstep(0.0, 0.12, u);
+        const fadeOut = 1 - smoothstep(0.58, 1.0, u);
+        const alpha = fadeIn * fadeOut * 0.92;
+
+        _smokePos.set(px, py, pz);
+        _smokeRollQuat.setFromAxisAngle(_smokeZAxis, spinRad);
+        _smokeRollQuat.premultiply(_smokeCamQuat);
+        _smokeScale.set(puffSize, puffSize, 1);
+        _smokeMat4.compose(_smokePos, _smokeRollQuat, _smokeScale);
+        this.cabinSmokeMesh.setMatrixAt(count, _smokeMat4);
+
+        const frame = FOLK_SMOKE_FRAMES[k % FOLK_SMOKE_FRAMES.length]!;
+        const flipX = (k & 1) === 1;
+        const uvBase = count * 4;
+        if (flipX) {
+          this.smokeUvRects[uvBase] = frame.uOffset + frame.uScale;
+          this.smokeUvRects[uvBase + 1] = frame.vOffset;
+          this.smokeUvRects[uvBase + 2] = -frame.uScale;
+          this.smokeUvRects[uvBase + 3] = frame.vScale;
+        } else {
+          this.smokeUvRects[uvBase] = frame.uOffset;
+          this.smokeUvRects[uvBase + 1] = frame.vOffset;
+          this.smokeUvRects[uvBase + 2] = frame.uScale;
+          this.smokeUvRects[uvBase + 3] = frame.vScale;
+        }
+        this.smokeAlphas[count] = alpha;
+        count++;
+      }
+    }
+
+    this.cabinSmokeMesh.count = count;
+    if (count > 0) {
+      this.cabinSmokeMesh.instanceMatrix.needsUpdate = true;
+      this.smokeUvRectAttr.needsUpdate = true;
+      this.smokeAlphaAttr.needsUpdate = true;
     }
   }
 
@@ -316,6 +433,7 @@ export class LandmarkStreamer {
       this.releaseRecord(rec);
     }
     this.activeRecords.clear();
+    this.cabinSmokeMesh.count = 0;
   }
 
   private reconcileLandmark(segmentSeed: number, lm: SegmentLandmarkRequirement): void {
@@ -391,7 +509,6 @@ export class LandmarkStreamer {
       pooledKind: null,
       obj: null,
       forkArch: null,
-      cabin: null,
       segmentSeed: 0,
       badgeStageId: undefined,
       gateHalfWidth: undefined,
@@ -410,7 +527,6 @@ export class LandmarkStreamer {
     rec.pooledKind = null;
     rec.obj = null;
     rec.forkArch = null;
-    rec.cabin = null;
     rec.segmentSeed = segmentSeed;
     rec.badgeStageId = lm.badgeStageId;
     rec.gateHalfWidth = lm.gateHalfWidth;
@@ -467,21 +583,13 @@ export class LandmarkStreamer {
       rec.pooledKind = pooledKind;
       rec.obj = arch.group;
       rec.forkArch = arch;
-      rec.cabin = null;
-    } else if (pooledKind === 'delivery_cabin') {
-      const cabin = this.cabinPool.pop();
-      if (!cabin) return;
-      cabin.group.position.set(lm.worldX, lm.worldY, lm.worldZ);
-      cabin.group.rotation.set(0, yaw, 0, 'YXZ');
-      cabin.group.scale.setScalar(scale);
-      this.rootGroup.add(cabin.group);
-      rec.pooledKind = pooledKind;
-      rec.obj = cabin.group;
-      rec.forkArch = null;
-      rec.cabin = cabin;
     } else {
       const pool =
-        pooledKind === 'delivery_arch' ? this.deliveryArchPool : this.lanternPool;
+        pooledKind === 'delivery_cabin'
+          ? this.cabinPool
+          : pooledKind === 'delivery_arch'
+            ? this.deliveryArchPool
+            : this.lanternPool;
       const group = pool.pop();
       if (!group) return;
       group.position.set(lm.worldX, lm.worldY, lm.worldZ);
@@ -491,7 +599,6 @@ export class LandmarkStreamer {
       rec.pooledKind = pooledKind;
       rec.obj = group;
       rec.forkArch = null;
-      rec.cabin = null;
     }
 
     rec.segmentSeed = segmentSeed;
@@ -513,10 +620,8 @@ export class LandmarkStreamer {
         this.forkArchPool.push(rec.forkArch);
       } else if (rec.pooledKind === 'delivery_arch') {
         this.deliveryArchPool.push(rec.obj as THREE.Group);
-      } else if (rec.pooledKind === 'delivery_cabin' && rec.cabin) {
-        rec.cabin.smokeMesh.rotation.set(0, 0, 0);
-        rec.cabin.smokeMesh.scale.set(1, 1, 1);
-        this.cabinPool.push(rec.cabin);
+      } else if (rec.pooledKind === 'delivery_cabin') {
+        this.cabinPool.push(rec.obj as THREE.Group);
       } else if (rec.pooledKind === 'delivery_lantern') {
         this.lanternPool.push(rec.obj as THREE.Group);
       }
@@ -526,7 +631,6 @@ export class LandmarkStreamer {
     rec.pooledKind = null;
     rec.obj = null;
     rec.forkArch = null;
-    rec.cabin = null;
     rec.badgeStageId = undefined;
     rec.gateHalfWidth = undefined;
     rec.visualSignature = '';

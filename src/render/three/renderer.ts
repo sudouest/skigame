@@ -140,6 +140,7 @@ export class ThreeRenderer {
   private lastOriginOffsetY = 0;
   private lastOriginOffsetZ = 0;
   private lastTickCount = -1;
+  private smokeClockSec = 0;
   private contextLost = false;
   private disposed = false;
 
@@ -393,6 +394,7 @@ export class ThreeRenderer {
       this.sceneryStreamer.clearAll();
       this.landmarkStreamer.clearAll();
       this.carveSprayVfx.reset();
+      this.smokeClockSec = simState.elapsedSec;
     } else if (simState.rebase.rebaseCount > this.lastRebaseCount) {
       const dx = simState.rebase.offsetX - this.lastOriginOffsetX;
       const dy = simState.rebase.offsetY - this.lastOriginOffsetY;
@@ -476,7 +478,15 @@ export class ThreeRenderer {
         ? Math.max(1, budgetMs)
         : Math.max(DEFAULT_TERRAIN_STREAM_BUDGET_MS - Math.max(0, this.nowMs() - syncStartMs), 1);
 
-    this.landmarkStreamer.sync(simState.trailWindow, simState.elapsedSec);
+    if (!simState.paused || simState.tickCount === 0) {
+      this.smokeClockSec += Math.min(0.1, Math.max(0, frameDtSec));
+    }
+    this.landmarkStreamer.sync(
+      simState.trailWindow,
+      this.smokeClockSec,
+      this.camera,
+      simState.activeWeather.windLateral,
+    );
 
     // 1. Update toroidal CDLOD DataArrayTextures & CPU mirrors within budget
     const clipStartMs = this.nowMs();
