@@ -257,6 +257,7 @@ export class ThreeRenderer {
 
     this.landmarkStreamer = new LandmarkStreamer(this.gfx, this.sharedMaterials, meshAssets, {
       assetWaiter: options.assetWaiter,
+      outlineMaterial: this.outlineMaterial,
     });
     this.scene.add(this.landmarkStreamer.rootGroup);
 
@@ -475,7 +476,7 @@ export class ThreeRenderer {
         ? Math.max(1, budgetMs)
         : Math.max(DEFAULT_TERRAIN_STREAM_BUDGET_MS - Math.max(0, this.nowMs() - syncStartMs), 1);
 
-    this.landmarkStreamer.sync(simState.trailWindow);
+    this.landmarkStreamer.sync(simState.trailWindow, simState.elapsedSec);
 
     // 1. Update toroidal CDLOD DataArrayTextures & CPU mirrors within budget
     const clipStartMs = this.nowMs();
@@ -655,6 +656,10 @@ export class ThreeRenderer {
     this.sharedMaterials.terrainMaterial.needsUpdate = true;
     this.sharedMaterials.propToonMaterial.needsUpdate = true;
     this.sharedMaterials.beaconGlowMaterial.needsUpdate = true;
+    this.sharedMaterials.cabinAtlasTexture.needsUpdate = true;
+    this.sharedMaterials.cabinToonMaterial.needsUpdate = true;
+    this.sharedMaterials.cabinSmokeTexture.needsUpdate = true;
+    this.sharedMaterials.cabinSmokeMaterial.needsUpdate = true;
     this.outlineMaterial.needsUpdate = true;
     this.billboardAtlas.needsUpdate = true;
     this.billboardMaterial.needsUpdate = true;

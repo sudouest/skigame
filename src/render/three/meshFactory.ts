@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { getStageDef } from '../../content/stages';
+import { buildFolkCabinGeometries } from './folkCabinModel';
 import type { GraphicsUtils } from './graphicsUtils';
 import { computeSmoothNormals } from './smoothNormals';
 import type { SharedToonMaterials } from './toonMaterials';
@@ -332,6 +333,7 @@ export interface ProceduralMeshAssets {
   readonly deliveryArchGlowGeo: THREE.BufferGeometry;
   readonly cabinGeo: THREE.BufferGeometry;
   readonly cabinGlowGeo: THREE.BufferGeometry;
+  readonly cabinSmokeGeo: THREE.BufferGeometry;
 }
 
 function buildStageBadgeGeo(
@@ -491,34 +493,8 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     false,
   );
 
-  // Cozy Delivery Cabin
-  const cabinGeo = buildMergedColoredGeometry(
-    [
-      // Timber walls
-      { geometry: new THREE.BoxGeometry(5.2, 2.8, 4.2), color: '#7f4f24', ty: 1.4 },
-      // Porch overhang & door
-      { geometry: new THREE.BoxGeometry(1.1, 2.0, 0.18), color: '#4a2c11', tx: 0, ty: 1.0, tz: 2.12 },
-      // Pitched snow-capped roof
-      { geometry: new THREE.ConeGeometry(4.2, 2.5, 4), color: '#9c6644', ty: 3.9, ry: Math.PI * 0.25 },
-      { geometry: new THREE.ConeGeometry(4.35, 2.35, 4), color: '#f8fafc', ty: 4.1, ry: Math.PI * 0.25 },
-      // Chimney
-      { geometry: new THREE.BoxGeometry(0.65, 1.5, 0.65), color: '#64748b', tx: 1.5, ty: 4.5, tz: -0.6 },
-    ],
-    'DeliveryCabinGeo',
-    false,
-  );
-  const cabinGlowGeo = buildMergedColoredGeometry(
-    [
-      // Warm glowing windows on all sides + porch lantern
-      { geometry: new THREE.BoxGeometry(0.85, 0.85, 0.16), color: '#fef08a', tx: -1.45, ty: 1.55, tz: 2.12 },
-      { geometry: new THREE.BoxGeometry(0.85, 0.85, 0.16), color: '#fef08a', tx: 1.45, ty: 1.55, tz: 2.12 },
-      { geometry: new THREE.BoxGeometry(0.16, 0.85, 1.1), color: '#fde047', tx: -2.62, ty: 1.55, tz: 0 },
-      { geometry: new THREE.BoxGeometry(0.16, 0.85, 1.1), color: '#fde047', tx: 2.62, ty: 1.55, tz: 0 },
-      { geometry: new THREE.OctahedronGeometry(0.32, 0), color: '#fbbf24', tx: 0, ty: 2.55, tz: 2.35 },
-    ],
-    'DeliveryCabinGlowGeo',
-    false,
-  );
+  // Folk Log Cabin (sculpted 3D architecture, textured atlas, glowing 4-pane windows, smoke)
+  const { cabinGeo, cabinGlowGeo, cabinSmokeGeo } = buildFolkCabinGeometries();
 
   const allGeos = [
     boulderSmallGeo,
@@ -539,6 +515,7 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     deliveryArchGlowGeo,
     cabinGeo,
     cabinGlowGeo,
+    cabinSmokeGeo,
   ];
   for (const g of allGeos) {
     gfx.markAsCache(g, g.name);
@@ -563,6 +540,7 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     deliveryArchGlowGeo,
     cabinGeo,
     cabinGlowGeo,
+    cabinSmokeGeo,
   };
 }
 

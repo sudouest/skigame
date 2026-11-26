@@ -99,7 +99,7 @@ export const DELIVERY_VILLAGE_PLAZA: DeliveryZoneDef = {
   landmarkVisual: {
     kind: 'procedural',
     preset: 'cabin',
-    palette: ['#7f4f24', '#b08968', '#fbbf24', '#f8fafc'],
+    palette: ['#c48636', '#4d2612', '#356b4e', '#ffe066', '#faf6ee'],
     scale: 1.0,
     outline: true,
   },

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { STAGE_SUNNY_BLUE } from '../../content/stages';
 import type { ClipmapDataStore } from './clipmapDataStore';
+import { createFolkCabinMaterials } from './folkCabinModel';
 import type { GraphicsUtils } from './graphicsUtils';
 
 /**
@@ -43,6 +44,10 @@ export interface SharedToonMaterials {
   readonly terrainMaterial: THREE.MeshToonMaterial;
   readonly propToonMaterial: THREE.MeshToonMaterial;
   readonly beaconGlowMaterial: THREE.MeshBasicMaterial;
+  readonly cabinAtlasTexture: THREE.Texture;
+  readonly cabinToonMaterial: THREE.MeshToonMaterial;
+  readonly cabinSmokeTexture: THREE.Texture;
+  readonly cabinSmokeMaterial: THREE.MeshBasicMaterial;
 }
 
 /**
@@ -640,6 +645,8 @@ outgoingLight *= mix(vec3(1.0), uBiomeTint, 0.25) * (1.0 - uBlizzardDim * 0.35);
   beaconGlowMaterial.name = 'SharedBeaconGlowMaterial';
   gfx.markAsCache(beaconGlowMaterial, 'SharedBeaconGlowMaterial');
 
+  const folkCabinMaterials = createFolkCabinMaterials(gfx, gradientMap, sharedUniforms);
+
   return {
     gradientMap,
     sharedUniforms,
@@ -647,5 +654,9 @@ outgoingLight *= mix(vec3(1.0), uBiomeTint, 0.25) * (1.0 - uBlizzardDim * 0.35);
     terrainMaterial,
     propToonMaterial,
     beaconGlowMaterial,
+    cabinAtlasTexture: folkCabinMaterials.cabinAtlasTexture,
+    cabinToonMaterial: folkCabinMaterials.cabinToonMaterial,
+    cabinSmokeTexture: folkCabinMaterials.cabinSmokeTexture,
+    cabinSmokeMaterial: folkCabinMaterials.cabinSmokeMaterial,
   };
 }

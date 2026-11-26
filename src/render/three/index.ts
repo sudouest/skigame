@@ -46,6 +46,24 @@ export {
   createCylindricalBillboardMaterial,
 } from './billboardMaterial';
 export {
+  buildFolkCabinGeometries,
+  buildMergedTexturedGeometry,
+  createFolkCabinMaterials,
+  drawFolkCabinAtlas,
+  drawFolkSmokeSprite,
+  FOLK_CABIN_ATLAS_SIZE,
+  FOLK_CABIN_ATLAS_TILES,
+  FOLK_CABIN_SMOKE_ORIGIN,
+  FOLK_SMOKE_HEIGHT,
+  FOLK_SMOKE_WIDTH,
+  type FolkCabinAtlasTile,
+  type FolkCabinGeometries,
+  type FolkCabinMaterials,
+  type FolkCabinTileName,
+  type TexturedGeometryPart,
+  type TileMappingSpec,
+} from './folkCabinModel';
+export {
   buildMergedColoredGeometry,
   buildPresentGeometry,
   buildUnitBoulderGeometry,
