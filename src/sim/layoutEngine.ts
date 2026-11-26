@@ -486,8 +486,21 @@ export class LayoutEngine {
       def.deliveryRadius + 2.5,
     );
 
-    // Emit SegmentLandmarkRequirement for LandmarkStreamer (cabin/lantern/arch beside children)
-    const landmarkX = clamp(zoneX + side * 3.0, -(hw + 2.0), hw + 2.0);
+    // Emit SegmentLandmarkRequirement for LandmarkStreamer (cabin/chalet/lantern/arch beside children)
+    let chosenVisual = def.landmarkVisual;
+    let clearanceRadius = 4.5;
+    let lateralOffsetM = 3.0;
+    if (def.landmarkVisualPool && def.landmarkVisualPool.length > 0) {
+      const variantRng = rng.fork(`deliv_var_${segment.id}_${Math.round(s)}`);
+      const picked = variantRng.pickWeighted(def.landmarkVisualPool, (o) => o.weight);
+      if (picked) {
+        chosenVisual = picked.visual;
+        clearanceRadius = picked.clearanceRadius ?? clearanceRadius;
+        lateralOffsetM = picked.lateralOffsetM ?? lateralOffsetM;
+      }
+    }
+
+    const landmarkX = clamp(zoneX + side * lateralOffsetM, -(hw + 2.0), hw + 2.0);
     this.samplePlacementSurface(segment, s, landmarkX, mountainField);
     const landmarkReq: SegmentLandmarkRequirement = {
       id: `deliv_lm_${segment.id}_${Math.round(s)}_${rng.nextInt(100, 999)}`,
@@ -499,15 +512,15 @@ export class LayoutEngine {
       worldY: this.scratchPlacement.posY,
       worldZ: this.scratchPlacement.posZ,
       yawRad: this.scratchFrame.yawRad + side * 0.35,
-      clearanceRadius: 4.5,
-      visual: def.landmarkVisual,
+      clearanceRadius,
+      visual: chosenVisual,
     };
     segment.addLandmarkRequirement(landmarkReq);
     this.segmentOccupationGrid.insert(
       idx,
       this.scratchPlacement.posX,
       this.scratchPlacement.posZ,
-      4.5,
+      clearanceRadius,
     );
 
     return true;

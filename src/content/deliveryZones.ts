@@ -101,8 +101,37 @@ export const DELIVERY_VILLAGE_PLAZA: DeliveryZoneDef = {
     preset: 'cabin',
     palette: ['#c48636', '#4d2612', '#356b4e', '#ffe066', '#faf6ee'],
     scale: 1.0,
+    variant: 'folk_log',
     outline: true,
   },
+  landmarkVisualPool: [
+    {
+      visual: {
+        kind: 'procedural',
+        preset: 'cabin',
+        palette: ['#c48636', '#4d2612', '#356b4e', '#ffe066', '#faf6ee'],
+        scale: 1.0,
+        variant: 'folk_log',
+        outline: true,
+      },
+      weight: 1,
+      clearanceRadius: 4.5,
+      lateralOffsetM: 3.0,
+    },
+    {
+      visual: {
+        kind: 'procedural',
+        preset: 'cabin',
+        palette: ['#cc8a32', '#2f5e42', '#a82d26', '#ffe066', '#d5e4f0'],
+        scale: 1.0,
+        variant: 'folk_aframe',
+        outline: true,
+      },
+      weight: 1,
+      clearanceRadius: 4.8,
+      lateralOffsetM: 3.2,
+    },
+  ],
   requiredSceneryId: 'delivery_cabin',
 };
 

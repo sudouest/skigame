@@ -667,6 +667,18 @@ export class GraphicsTracker {
   }
 
   /**
+   * Flags all tracked and cached textures and materials for GPU re-upload after WebGL context loss.
+   */
+  markAllForContextRestore(): void {
+    for (const tex of this.textures.keys()) {
+      tex.needsUpdate = true;
+    }
+    for (const mat of this.materials.keys()) {
+      mat.needsUpdate = true;
+    }
+  }
+
+  /**
    * Disposes all remaining tracked objects and cached resources on renderer shutdown.
    */
   disposeAll(): void {

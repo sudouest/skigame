@@ -662,21 +662,7 @@ export class ThreeRenderer {
     this.renderer.shadowMap.type = THREE.BasicShadowMap;
     this.renderer.shadowMap.needsUpdate = true;
 
-    this.sharedMaterials.gradientMap.needsUpdate = true;
-    this.sharedMaterials.terrainMaterial.needsUpdate = true;
-    this.sharedMaterials.propToonMaterial.needsUpdate = true;
-    this.sharedMaterials.beaconGlowMaterial.needsUpdate = true;
-    this.sharedMaterials.cabinAtlasTexture.needsUpdate = true;
-    this.sharedMaterials.cabinToonMaterial.needsUpdate = true;
-    this.sharedMaterials.cabinSmokeTexture.needsUpdate = true;
-    this.sharedMaterials.cabinSmokeMaterial.needsUpdate = true;
-    this.outlineMaterial.needsUpdate = true;
-    this.billboardAtlas.needsUpdate = true;
-    this.billboardMaterial.needsUpdate = true;
-    this.skyDome.material.needsUpdate = true;
-    this.contactShadows.shadowTexture.needsUpdate = true;
-    this.carveSprayVfx.puffTexture.needsUpdate = true;
-    (this.carveSprayVfx.instancedMesh.material as THREE.Material).needsUpdate = true;
+    this.tracker.markAllForContextRestore();
     // Re-upload all 4 CDLOD DataArrayTextures instantaneously from CPU mirrors
     this.clipmapStore.handleContextRestored(this.renderer);
   }

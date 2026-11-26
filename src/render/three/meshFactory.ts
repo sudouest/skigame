@@ -1,118 +1,15 @@
 import * as THREE from 'three';
 import { getStageDef } from '../../content/stages';
-import { buildFolkCabinGeometries } from './folkCabinModel';
+import { buildChimneySmokeQuadGeometry } from './chimneySmoke';
 import type { GraphicsUtils } from './graphicsUtils';
+import {
+  buildMergedColoredGeometry,
+  type ColoredGeometryPart,
+} from './models/proceduralModelUtils';
 import { computeSmoothNormals } from './smoothNormals';
 import type { SharedToonMaterials } from './toonMaterials';
 
-export interface ColoredGeometryPart {
-  readonly geometry: THREE.BufferGeometry;
-  readonly color: THREE.ColorRepresentation;
-  readonly tx?: number;
-  readonly ty?: number;
-  readonly tz?: number;
-  readonly rx?: number;
-  readonly ry?: number;
-  readonly rz?: number;
-  readonly sx?: number;
-  readonly sy?: number;
-  readonly sz?: number;
-}
-
-const _partMat = new THREE.Matrix4();
-const _partPos = new THREE.Vector3();
-const _partQuat = new THREE.Quaternion();
-const _partEuler = new THREE.Euler(0, 0, 0, 'YXZ');
-const _partScale = new THREE.Vector3();
-const _partColor = new THREE.Color();
-const _normalMat = new THREE.Matrix3();
-const _tmpVec = new THREE.Vector3();
-
-/**
- * Merges multiple colored primitive BufferGeometries into a single flat-shaded non-indexed
- * vertex-colored BufferGeometry and computes averaged `aSmoothNormal` for gap-free outlines.
- * Disposes temporary input part geometries immediately after merging.
- */
-export function buildMergedColoredGeometry(
-  parts: readonly ColoredGeometryPart[],
-  label: string,
-  withSmoothNormals = true,
-): THREE.BufferGeometry {
-  const nonIndexedParts: THREE.BufferGeometry[] = [];
-  let totalVertices = 0;
-
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i]!;
-    const geom = part.geometry.index ? part.geometry.toNonIndexed() : part.geometry;
-    if (geom !== part.geometry) {
-      part.geometry.dispose();
-    }
-
-    _partPos.set(part.tx ?? 0, part.ty ?? 0, part.tz ?? 0);
-    _partEuler.set(part.rx ?? 0, part.ry ?? 0, part.rz ?? 0, 'YXZ');
-    _partQuat.setFromEuler(_partEuler);
-    _partScale.set(part.sx ?? 1, part.sy ?? 1, part.sz ?? 1);
-    _partMat.compose(_partPos, _partQuat, _partScale);
-
-    const posAttr = geom.getAttribute('position');
-    if (posAttr) {
-      geom.applyMatrix4(_partMat);
-      geom.computeVertexNormals();
-      totalVertices += posAttr.count;
-    }
-
-    nonIndexedParts.push(geom);
-  }
-
-  const positions = new Float32Array(totalVertices * 3);
-  const normals = new Float32Array(totalVertices * 3);
-  const colors = new Float32Array(totalVertices * 3);
-
-  let writeOffset = 0;
-  for (let i = 0; i < nonIndexedParts.length; i++) {
-    const geom = nonIndexedParts[i]!;
-    const part = parts[i]!;
-    const posAttr = geom.getAttribute('position');
-    const normAttr = geom.getAttribute('normal');
-    _partColor.set(part.color);
-
-    if (posAttr && normAttr) {
-      for (let v = 0; v < posAttr.count; v++) {
-        const idx3 = (writeOffset + v) * 3;
-        positions[idx3] = posAttr.getX(v);
-        positions[idx3 + 1] = posAttr.getY(v);
-        positions[idx3 + 2] = posAttr.getZ(v);
-
-        _tmpVec.set(normAttr.getX(v), normAttr.getY(v), normAttr.getZ(v)).normalize();
-        normals[idx3] = _tmpVec.x;
-        normals[idx3 + 1] = _tmpVec.y;
-        normals[idx3 + 2] = _tmpVec.z;
-
-        colors[idx3] = _partColor.r;
-        colors[idx3 + 1] = _partColor.g;
-        colors[idx3 + 2] = _partColor.b;
-      }
-      writeOffset += posAttr.count;
-    }
-    geom.dispose();
-  }
-
-  // Silence unused warning if _normalMat wasn't needed
-  void _normalMat;
-
-  const merged = new THREE.BufferGeometry();
-  merged.name = label;
-  merged.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  merged.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
-  merged.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  merged.computeBoundingBox();
-  merged.computeBoundingSphere();
-
-  if (withSmoothNormals) {
-    computeSmoothNormals(merged);
-  }
-  return merged;
-}
+export { buildMergedColoredGeometry, type ColoredGeometryPart };
 
 /**
  * Builds a low-poly faceted boulder normalized to unit radius (`x,z in [-1,1]`) and
@@ -331,8 +228,6 @@ export interface ProceduralMeshAssets {
   readonly lanternGlowGeo: THREE.BufferGeometry;
   readonly deliveryArchGeo: THREE.BufferGeometry;
   readonly deliveryArchGlowGeo: THREE.BufferGeometry;
-  readonly cabinGeo: THREE.BufferGeometry;
-  readonly cabinGlowGeo: THREE.BufferGeometry;
   readonly cabinSmokeGeo: THREE.BufferGeometry;
 }
 
@@ -493,8 +388,7 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     false,
   );
 
-  // Folk Log Cabin (sculpted 3D architecture, textured atlas, glowing 4-pane windows, smoke)
-  const { cabinGeo, cabinGlowGeo, cabinSmokeGeo } = buildFolkCabinGeometries();
+  const cabinSmokeGeo = buildChimneySmokeQuadGeometry('DeliveryCabinSmokeGeo');
 
   const allGeos = [
     boulderSmallGeo,
@@ -513,8 +407,6 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     lanternGlowGeo,
     deliveryArchGeo,
     deliveryArchGlowGeo,
-    cabinGeo,
-    cabinGlowGeo,
     cabinSmokeGeo,
   ];
   for (const g of allGeos) {
@@ -538,8 +430,6 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     lanternGlowGeo,
     deliveryArchGeo,
     deliveryArchGlowGeo,
-    cabinGeo,
-    cabinGlowGeo,
     cabinSmokeGeo,
   };
 }

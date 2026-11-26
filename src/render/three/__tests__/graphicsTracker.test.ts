@@ -164,18 +164,29 @@ describe('GraphicsTracker & GraphicsUtils', () => {
 
   it('enforces that no production file in src/render/three/ bypasses GraphicsUtils', () => {
     const renderDir = path.resolve(__dirname, '..');
-    const entries = fs.readdirSync(renderDir, { withFileTypes: true });
     const violations: string[] = [];
     const forbidden = /\bnew\s+THREE\.(Mesh|InstancedMesh|Line|LineSegments|LineLoop|Points)\s*\(/;
 
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith('.ts')) continue;
-      if (entry.name === 'graphicsUtils.ts') continue;
-      const content = fs.readFileSync(path.join(renderDir, entry.name), 'utf8');
-      if (forbidden.test(content)) {
-        violations.push(entry.name);
+    const scanDir = (dir: string): void => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== '__tests__') {
+            scanDir(fullPath);
+          }
+          continue;
+        }
+        if (!entry.isFile() || !entry.name.endsWith('.ts')) continue;
+        if (fullPath === path.join(renderDir, 'graphicsUtils.ts')) continue;
+        const content = fs.readFileSync(fullPath, 'utf8');
+        if (forbidden.test(content)) {
+          violations.push(path.relative(renderDir, fullPath));
+        }
       }
-    }
+    };
+
+    scanDir(renderDir);
     expect(violations).toEqual([]);
   });
 

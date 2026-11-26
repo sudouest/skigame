@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { STAGE_SUNNY_BLUE } from '../../content/stages';
+import { createChimneySmokeAssets } from './chimneySmoke';
 import type { ClipmapDataStore } from './clipmapDataStore';
-import { createFolkCabinMaterials } from './folkCabinModel';
 import type { GraphicsUtils } from './graphicsUtils';
 
 /**
@@ -44,10 +44,59 @@ export interface SharedToonMaterials {
   readonly terrainMaterial: THREE.MeshToonMaterial;
   readonly propToonMaterial: THREE.MeshToonMaterial;
   readonly beaconGlowMaterial: THREE.MeshBasicMaterial;
-  readonly cabinAtlasTexture: THREE.Texture;
-  readonly cabinToonMaterial: THREE.MeshToonMaterial;
   readonly cabinSmokeTexture: THREE.Texture;
   readonly cabinSmokeMaterial: THREE.MeshBasicMaterial;
+}
+
+/**
+ * Patches a `MeshToonMaterial` with shared `uBiomeTint` and `uBlizzardDim` uniforms.
+ */
+export function patchToonTint(
+  mat: THREE.MeshToonMaterial,
+  sharedUniforms: SharedLightingUniforms,
+  cacheKey = 'toon-biome-blizzard-v1',
+): void {
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uBiomeTint = sharedUniforms.uBiomeTint;
+    shader.uniforms.uBlizzardDim = sharedUniforms.uBlizzardDim;
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+uniform vec3 uBiomeTint;
+uniform float uBlizzardDim;`,
+      )
+      .replace(
+        '#include <opaque_fragment>',
+        `outgoingLight *= mix(vec3(1.0), uBiomeTint, 0.25) * (1.0 - uBlizzardDim * 0.35);
+#include <opaque_fragment>`,
+      );
+  };
+  mat.customProgramCacheKey = () => cacheKey;
+}
+
+/**
+ * Creates and caches a textured `MeshToonMaterial` sharing the global 3x1 `gradientMap`
+ * and `uBiomeTint` / `uBlizzardDim` lighting uniforms.
+ */
+export function createTexturedToonMaterial(
+  gfx: GraphicsUtils,
+  map: THREE.Texture,
+  gradientMap: THREE.DataTexture,
+  sharedUniforms: SharedLightingUniforms,
+  label: string,
+): THREE.MeshToonMaterial {
+  const mat = new THREE.MeshToonMaterial({
+    color: 0xffffff,
+    map,
+    vertexColors: false,
+    gradientMap,
+  });
+  mat.name = label;
+  patchToonTint(mat, sharedUniforms, 'toon-textured-biome-blizzard-v1');
+  gfx.markAsCache(mat, label);
+  return mat;
 }
 
 /**
@@ -142,25 +191,8 @@ export function createSharedToonMaterials(gfx: GraphicsUtils): SharedToonMateria
     uMorphEnds: { value: [24, 56, 116, 240, 640] },
   };
 
-  const patchToonTint = (mat: THREE.MeshToonMaterial): void => {
-    mat.onBeforeCompile = (shader) => {
-      shader.uniforms.uBiomeTint = sharedUniforms.uBiomeTint;
-      shader.uniforms.uBlizzardDim = sharedUniforms.uBlizzardDim;
-
-      shader.fragmentShader = shader.fragmentShader
-        .replace(
-          '#include <common>',
-          `#include <common>
-uniform vec3 uBiomeTint;
-uniform float uBlizzardDim;`,
-        )
-        .replace(
-          '#include <opaque_fragment>',
-          `outgoingLight *= mix(vec3(1.0), uBiomeTint, 0.25) * (1.0 - uBlizzardDim * 0.35);
-#include <opaque_fragment>`,
-        );
-    };
-    mat.customProgramCacheKey = () => 'toon-biome-blizzard-v1';
+  const applyToonTint = (mat: THREE.MeshToonMaterial): void => {
+    patchToonTint(mat, sharedUniforms, 'toon-biome-blizzard-v1');
   };
 
   const patchTerrainCdlodToon = (mat: THREE.MeshToonMaterial): void => {
@@ -633,7 +665,7 @@ outgoingLight *= mix(vec3(1.0), uBiomeTint, 0.25) * (1.0 - uBlizzardDim * 0.35);
     gradientMap,
   });
   propToonMaterial.name = 'SharedPropToonMaterial';
-  patchToonTint(propToonMaterial);
+  applyToonTint(propToonMaterial);
   gfx.markAsCache(propToonMaterial, 'SharedPropToonMaterial');
 
   // Unlit warm glow material for Delivery Zone beacons & golden accents that pierce blizzard fog.
@@ -645,7 +677,7 @@ outgoingLight *= mix(vec3(1.0), uBiomeTint, 0.25) * (1.0 - uBlizzardDim * 0.35);
   beaconGlowMaterial.name = 'SharedBeaconGlowMaterial';
   gfx.markAsCache(beaconGlowMaterial, 'SharedBeaconGlowMaterial');
 
-  const folkCabinMaterials = createFolkCabinMaterials(gfx, gradientMap, sharedUniforms);
+  const chimneySmoke = createChimneySmokeAssets(gfx, sharedUniforms);
 
   return {
     gradientMap,
@@ -654,9 +686,7 @@ outgoingLight *= mix(vec3(1.0), uBiomeTint, 0.25) * (1.0 - uBlizzardDim * 0.35);
     terrainMaterial,
     propToonMaterial,
     beaconGlowMaterial,
-    cabinAtlasTexture: folkCabinMaterials.cabinAtlasTexture,
-    cabinToonMaterial: folkCabinMaterials.cabinToonMaterial,
-    cabinSmokeTexture: folkCabinMaterials.cabinSmokeTexture,
-    cabinSmokeMaterial: folkCabinMaterials.cabinSmokeMaterial,
+    cabinSmokeTexture: chimneySmoke.smokeTexture,
+    cabinSmokeMaterial: chimneySmoke.smokeMaterial,
   };
 }

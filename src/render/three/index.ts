@@ -14,7 +14,9 @@ export { computeSmoothNormals } from './smoothNormals';
 export {
   bindClipmapStoreToMaterial,
   createSharedToonMaterials,
+  createTexturedToonMaterial,
   NOISE_ORIGIN_MOD_PERIOD,
+  patchToonTint,
   positiveMod,
   type ClipmapShaderUniforms,
   type SharedLightingUniforms,
@@ -46,28 +48,61 @@ export {
   createCylindricalBillboardMaterial,
 } from './billboardMaterial';
 export {
-  buildFolkCabinGeometries,
-  buildMergedTexturedGeometry,
+  buildChimneySmokeQuadGeometry,
   CABIN_SMOKE_CYCLE_SEC,
   CABIN_SMOKE_PUFFS_PER_CABIN,
   CABIN_SMOKE_RISE_HEIGHT_M,
-  createFolkCabinMaterials,
-  drawFolkCabinAtlas,
+  createChimneySmokeAssets,
   drawFolkSmokeSprite,
-  FOLK_CABIN_ATLAS_SIZE,
-  FOLK_CABIN_ATLAS_TILES,
-  FOLK_CABIN_SMOKE_ORIGIN,
   FOLK_SMOKE_FRAMES,
   FOLK_SMOKE_HEIGHT,
   FOLK_SMOKE_WIDTH,
+  type ChimneySmokeAssets,
+  type FolkSmokeFrameRect,
+} from './chimneySmoke';
+export {
+  createDefaultLandmarkRegistry,
+  LandmarkModelRegistry,
+  type ChimneyEmitterAnchor,
+  type LandmarkInstanceHandle,
+  type LandmarkModelDef,
+} from './landmarkRegistry';
+export {
+  buildMergedTexturedGeometry,
+  createProceduralCanvasTexture,
+  drawFolkStar,
+  drawRoundedRectPath,
+  makeAtlasTile,
+  makeHeadlessFallbackTexture,
+  type AtlasTileRect,
+  type TexturedGeometryPart,
+  type TileMappingSpec,
+} from './models/proceduralModelUtils';
+export {
+  buildFolkAFrameGeometries,
+  createFolkAFrameLandmarkDef,
+  drawFolkAFrameAtlas,
+  FOLK_AFRAME_ATLAS_SIZE,
+  FOLK_AFRAME_ATLAS_TILES,
+  FOLK_AFRAME_SMOKE_ANCHOR,
+  type FolkAFrameAtlasTile,
+  type FolkAFrameGeometries,
+  type FolkAFrameTileName,
+} from './models/folkAFrameModel';
+export {
+  buildFolkCabinGeometries,
+  createFolkCabinLandmarkDef,
+  createFolkCabinMaterials,
+  drawFolkCabinAtlas,
+  FOLK_CABIN_ATLAS_SIZE,
+  FOLK_CABIN_ATLAS_TILES,
+  FOLK_CABIN_SMOKE_ANCHOR,
+  FOLK_CABIN_SMOKE_ORIGIN,
   type FolkCabinAtlasTile,
   type FolkCabinGeometries,
   type FolkCabinMaterials,
   type FolkCabinTileName,
-  type FolkSmokeFrameRect,
-  type TexturedGeometryPart,
-  type TileMappingSpec,
-} from './folkCabinModel';
+} from './models/folkCabinModel';
 export {
   buildMergedColoredGeometry,
   buildPresentGeometry,

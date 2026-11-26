@@ -301,6 +301,13 @@ export interface PresentDef {
   readonly glowColor: string;
 }
 
+export interface LandmarkVisualOption {
+  readonly visual: VisualSpec;
+  readonly weight: number;
+  readonly clearanceRadius?: number;
+  readonly lateralOffsetM?: number;
+}
+
 export interface DeliveryZoneDef {
   readonly id: string;
   readonly name: string;
@@ -313,6 +320,7 @@ export interface DeliveryZoneDef {
   readonly comboBonusPerGift: number;
   readonly childVisuals: readonly VisualSpec[];
   readonly landmarkVisual: VisualSpec;
+  readonly landmarkVisualPool?: readonly LandmarkVisualOption[];
   readonly requiredSceneryId?: string;
 }
 
