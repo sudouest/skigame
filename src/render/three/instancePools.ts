@@ -4,6 +4,7 @@ import { getDeliveryZoneDef } from '../../content/deliveryZones';
 import { getHazardDef, getRampDef } from '../../content/hazards';
 import { getStageDef } from '../../content/stages';
 import { clamp, lerp, lerpAngle } from '../../core/math';
+import { hashCoords2DU32 } from '../../core/rng';
 import {
   CREATURE_PHASE_ATTACK,
   CREATURE_PHASE_TELEGRAPH,
@@ -11,7 +12,13 @@ import {
 } from '../../sim/contracts';
 import type { GraphicsUtils } from './graphicsUtils';
 import type { ProceduralMeshAssets } from './meshFactory';
-import { ATLAS_FRAMES, type BillboardFrameName } from './spriteAtlas';
+import {
+  ATLAS_FRAMES,
+  FROSTED_TREE_FRAMES,
+  GREEN_TREE_FRAMES,
+  TREE_FRAME_PROPORTIONS,
+  type BillboardFrameName,
+} from './spriteAtlas';
 import type { SceneryProvider } from './sceneryCellStreamer';
 import type { SharedToonMaterials } from './toonMaterials';
 
@@ -204,8 +211,6 @@ export class InstancePools {
     const elapsed = simState.elapsedSec;
     const frostedChance =
       getStageDef(simState.activeStageId)?.layout.scenery.frostedPineChance ?? 0.2;
-    const pineHazardFrame: BillboardFrameName =
-      frostedChance >= 0.5 ? 'pine_frosted' : 'pine_green';
 
     let bSmallCount = 0;
     let bLargeCount = 0;
@@ -226,16 +231,34 @@ export class InstancePools {
         if (dynBbCount >= this.dynamicBillboards.capacity) continue;
         const hScale = hazards.scale[i] || 1;
         const tilt = triggered ? 0.55 : 1.0;
+        const absQx = Math.round((px + simState.rebase.offsetX) * 4);
+        const absQz = Math.round((pz + simState.rebase.offsetZ) * 4);
+        const hHash = hashCoords2DU32(absQx, absQz, ((hazards.segmentIds[i] ?? 0) ^ 0x7f4a7c15) >>> 0);
+        const useFrosted = (hHash & 0xffff) / 65536 < frostedChance;
+        const pool = useFrosted ? FROSTED_TREE_FRAMES : GREEN_TREE_FRAMES;
+        const frame = pool[(hHash >>> 16) % pool.length]!;
+        const flipX = ((hHash >>> 24) & 1) === 1;
+        const prop = TREE_FRAME_PROPORTIONS[frame];
+        let w: number;
+        let h: number;
+        if (prop) {
+          const baseH = 6.8 * hScale * prop.heightScale;
+          w = baseH * prop.aspect;
+          h = baseH * tilt;
+        } else {
+          w = 4.6 * hScale;
+          h = 6.8 * hScale * tilt;
+        }
         _pos.set(px, py, pz);
         _quat.identity();
-        _scale.set(4.6 * hScale, 6.8 * hScale * tilt, 1);
+        _scale.set(w, h, 1);
         _mat4.compose(_pos, _quat, _scale);
         this.dynamicBillboards.mesh.setMatrixAt(dynBbCount, _mat4);
         writeUvRect(
           this.dynamicBillboards.uvRectArray,
           dynBbCount,
-          pineHazardFrame,
-          (i & 1) === 1,
+          frame,
+          flipX,
         );
         dynBbCount++;
         continue;

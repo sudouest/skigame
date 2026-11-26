@@ -23,6 +23,7 @@ export {
 export { computeVerticalFovDeg, syncPerspectiveCamera } from './cameraSync';
 export { createSmoothOutlineMaterial, type OutlineMaterialOptions } from './outlineShader';
 export {
+  ALL_TREE_FRAMES,
   ATLAS_COLS,
   ATLAS_FRAMES,
   ATLAS_HEIGHT,
@@ -30,8 +31,15 @@ export {
   ATLAS_WIDTH,
   createCartoonSpriteAtlasTexture,
   dilateAtlasEdges,
+  FROSTED_TREE_FRAMES,
+  GREEN_TREE_FRAMES,
+  isFrostedTreeFrame,
+  isGreenTreeFrame,
+  isTreeBillboardFrame,
+  TREE_FRAME_PROPORTIONS,
   type AtlasFrameRect,
   type BillboardFrameName,
+  type TreeFrameProportion,
 } from './spriteAtlas';
 export {
   createBillboardQuadGeometry,
@@ -77,6 +85,7 @@ export {
   TerrainClipmap,
 } from './terrainClipmap';
 export {
+  applyTreeBillboardProportions,
   computeScenerySlopeSinkY,
   computeStageSceneryDensity,
   evaluateSceneryRuleFitness,

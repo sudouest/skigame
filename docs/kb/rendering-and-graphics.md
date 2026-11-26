@@ -116,7 +116,7 @@ All renderable objects and GPU resources must flow through `GraphicsUtils` (`src
   - `createSmoothOutlineMaterial()` (`side: THREE.BackSide`, `fog: true`, supports `USE_INSTANCING`) extrudes along `aSmoothNormal` clamped in clip space (`minClipOffset = 0.0025`, `maxClipOffset = 0.016`). Applied to boulders, presents, ramps, and skier body/skis (not landmarks, skier arms, or terrain); outline hulls strictly keep `castShadow = false`.
 - **2.5D Cylindrical Billboards (`billboardMaterial.ts`, `spriteAtlas.ts`):**
   - Ground-pivoted `1×1` quad (`y ∈ [0, 1]`). Patches `MeshBasicMaterial` (`alphaTest: 0.5`, `transparent: false`, `depthWrite: true`, `fog: true`, `alphaToCoverage = antialiasEnabled`) to rotate around world `+Y` only, look up per-instance `aUvRect`, and apply `uBiomeTint` / `uBlizzardDim`. Billboards strictly keep `castShadow = false`.
-  - `spriteAtlas.ts` procedurally draws a `1024×1024` `4×4` (`256 px` cell, `8 px` pad) canvas atlas (pines, children, bears, shrubs, alpine rocks, rock crags) with `dilateAtlasEdges()` RGB border dilation to prevent dark mipmap fringes.
+  - `spriteAtlas.ts` builds a `2048×1024` (`8×4` `256 px` grid, `8 px` padding) canvas atlas: `10` procedural sprites (pines, children, bears, shrubs, alpine rocks, rock crags) in rows `0–1`, plus `8` artwork tree sprites loaded asynchronously from `src/render/three/assets/treeSprites.png` (`2048×512`) into rows `2–3` with aspect-preserving UVs, immediate procedural pine fallback silhouettes, and post-load `dilateAtlasEdges()` RGB border dilation to prevent dark mipmap fringes.
 
 ---
 

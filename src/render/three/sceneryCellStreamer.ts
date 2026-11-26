@@ -15,6 +15,7 @@ import {
   type TrailWindowView,
 } from '../../sim/contracts';
 import {
+  applyTreeBillboardProportions,
   computeScenerySlopeSinkY,
   computeStageSceneryDensity,
   selectWinningSceneryRule,
@@ -488,17 +489,19 @@ export class SceneryCellStreamer implements SceneryProvider {
       }
 
       const scaleT = this.rngScratch.next();
-      const width = lerp(winner.widthRange[0], winner.widthRange[1], scaleT);
-      const height = lerp(winner.heightRange[0], winner.heightRange[1], scaleT);
-      const sinkY = computeScenerySlopeSinkY(winner.species, _sampleScratch.normalY, width);
+      const baseWidth = lerp(winner.widthRange[0], winner.widthRange[1], scaleT);
+      const baseHeight = lerp(winner.heightRange[0], winner.heightRange[1], scaleT);
+      const variantRoll = this.rngScratch.next();
+      const frame = speciesToBillboardFrame(winner.species, variantRoll);
 
       const item = rec.items[rec.itemCount++]!;
+      applyTreeBillboardProportions(frame, baseWidth, baseHeight, item);
+      const sinkY = computeScenerySlopeSinkY(winner.species, _sampleScratch.normalY, item.width);
+
       item.localX = localX;
       item.localY = _sampleScratch.heightY - originY - sinkY;
       item.localZ = localZ;
-      item.width = width;
-      item.height = height;
-      item.frame = speciesToBillboardFrame(winner.species);
+      item.frame = frame;
       item.flipX = this.rngScratch.nextBool(0.5);
     }
   }

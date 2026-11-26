@@ -63,6 +63,13 @@ import {
   type SceneryEnvSignal,
 } from '../scenerySelector';
 import {
+  ALL_TREE_FRAMES,
+  isFrostedTreeFrame,
+  isGreenTreeFrame,
+  isTreeBillboardFrame,
+  TREE_FRAME_PROPORTIONS,
+} from '../spriteAtlas';
+import {
   buildClipmapPatchBaseGeometry,
   CLIPMAP_LOD_RANGES_M,
   CLIPMAP_PATCH_TRIANGLE_COUNT,
@@ -1844,13 +1851,13 @@ describe('CDLOD TerrainClipmap, ClipmapDataStore, SceneryCellStreamer, LandmarkS
       if (wx < 0 || wx >= 32 || wz < 0 || wz >= 32) return;
       if (wx < 15.5) {
         leftCount++;
-        if (item.frame === 'pine_green' || item.frame === 'snow_shrub') leftGreenCount++;
-        if (item.frame === 'alpine_rock' || item.frame === 'rock_crag' || item.frame === 'pine_frosted') {
+        if (isGreenTreeFrame(item.frame) || item.frame === 'snow_shrub') leftGreenCount++;
+        if (item.frame === 'alpine_rock' || item.frame === 'rock_crag' || isFrostedTreeFrame(item.frame)) {
           leftRockOrFrostedCount++;
         }
       } else if (wx > 16.5) {
         rightCount++;
-        if (item.frame === 'alpine_rock' || item.frame === 'rock_crag' || item.frame === 'pine_frosted') {
+        if (item.frame === 'alpine_rock' || item.frame === 'rock_crag' || isFrostedTreeFrame(item.frame)) {
           rightRockOrFrostedCount++;
         }
       }
@@ -1888,11 +1895,21 @@ describe('CDLOD TerrainClipmap, ClipmapDataStore, SceneryCellStreamer, LandmarkS
       list.push({ wx: ox + item.localX, wz: oz + item.localZ, item: { ...item } });
     });
 
-    const isCanopy = (f: string): boolean => f === 'pine_green' || f === 'pine_frosted';
+    const isCanopy = (f: string): boolean => isTreeBillboardFrame(f);
     let minTreeDist = Infinity;
     let minItemDist = Infinity;
     let sawUnderstoryTucked = false;
+    const observedTreeFrames = new Set<string>();
     for (const cellItems of itemsByCell.values()) {
+      for (const entry of cellItems) {
+        if (isTreeBillboardFrame(entry.item.frame)) {
+          observedTreeFrames.add(entry.item.frame);
+          const prop = TREE_FRAME_PROPORTIONS[entry.item.frame];
+          if (prop) {
+            expect(entry.item.width / entry.item.height).toBeCloseTo(prop.aspect, 4);
+          }
+        }
+      }
       const trees = cellItems.filter((e) => isCanopy(e.item.frame));
       const groundProps = cellItems.filter((e) => !isCanopy(e.item.frame));
       for (let i = 0; i < cellItems.length; i++) {
@@ -1953,8 +1970,21 @@ describe('CDLOD TerrainClipmap, ClipmapDataStore, SceneryCellStreamer, LandmarkS
       if (item.frame === 'alpine_rock' || item.frame === 'rock_crag') {
         sawRockScenery = true;
       }
+      if (isTreeBillboardFrame(item.frame)) {
+        observedTreeFrames.add(item.frame);
+        const prop = TREE_FRAME_PROPORTIONS[item.frame];
+        if (prop) {
+          expect(item.width / item.height).toBeCloseTo(prop.aspect, 4);
+        }
+      }
     });
     expect(sawRockScenery).toBe(true);
+    for (const expectedTreeFrame of ALL_TREE_FRAMES) {
+      expect(
+        observedTreeFrames.has(expectedTreeFrame),
+        `expected scenery to emit tree variant ${expectedTreeFrame}`,
+      ).toBe(true);
+    }
 
     expect(blizRenderer.runLeakCheck(0, true).totalLeaks).toBe(0);
     blizRenderer.dispose();

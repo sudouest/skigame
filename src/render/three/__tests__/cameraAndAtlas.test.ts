@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { degToRad, radToDeg } from '../../../core/math';
@@ -6,12 +8,17 @@ import { computeVerticalFovDeg, syncPerspectiveCamera } from '../cameraSync';
 import { GraphicsTracker } from '../graphicsTracker';
 import { GraphicsUtils } from '../graphicsUtils';
 import {
+  ALL_TREE_FRAMES,
+  ATLAS_COLS,
   ATLAS_FRAMES,
   ATLAS_HEIGHT,
   ATLAS_ROWS,
   ATLAS_WIDTH,
   createCartoonSpriteAtlasTexture,
   dilateAtlasEdges,
+  FROSTED_TREE_FRAMES,
+  GREEN_TREE_FRAMES,
+  TREE_FRAME_PROPORTIONS,
   type BillboardFrameName,
 } from '../spriteAtlas';
 import { createSharedToonMaterials } from '../toonMaterials';
@@ -112,23 +119,59 @@ describe('Responsive Camera Sync, Toon Materials, and 2.5D Atlas Dilation', () =
     expect(atlas.isTexture).toBe(true);
     expect(atlas.colorSpace).toBe(THREE.SRGBColorSpace);
 
-    expect(ATLAS_WIDTH).toBe(1024);
+    expect(ATLAS_WIDTH).toBe(2048);
     expect(ATLAS_HEIGHT).toBe(1024);
+    expect(ATLAS_COLS).toBe(8);
     expect(ATLAS_ROWS).toBe(4);
     const frames = Object.entries(ATLAS_FRAMES) as [BillboardFrameName, (typeof ATLAS_FRAMES)['pine_green']][];
-    expect(frames.length).toBe(10);
+    expect(frames.length).toBe(18);
     const seenCells = new Set<string>();
     for (const [name, rect] of frames) {
       expect(rect.uOffset).toBeGreaterThanOrEqual(0);
       expect(rect.vOffset).toBeGreaterThanOrEqual(0);
+      expect(rect.uScale).toBeGreaterThan(0);
+      expect(rect.vScale).toBeGreaterThan(0);
       expect(rect.uOffset + rect.uScale).toBeLessThanOrEqual(1);
       expect(rect.vOffset + rect.vScale).toBeLessThanOrEqual(1);
       const cellKey = `${rect.col},${rect.row}`;
       expect(seenCells.has(cellKey), `duplicate atlas cell on ${name}`).toBe(false);
       seenCells.add(cellKey);
     }
-    expect(ATLAS_FRAMES.alpine_rock.row).toBe(2);
-    expect(ATLAS_FRAMES.rock_crag.row).toBe(2);
+    for (let i = 0; i < frames.length; i++) {
+      const [nameA, a] = frames[i]!;
+      for (let j = i + 1; j < frames.length; j++) {
+        const [nameB, b] = frames[j]!;
+        const overlapU = a.uOffset < b.uOffset + b.uScale && b.uOffset < a.uOffset + a.uScale;
+        const overlapV = a.vOffset < b.vOffset + b.vScale && b.vOffset < a.vOffset + a.vScale;
+        expect(overlapU && overlapV, `UV overlap between ${nameA} and ${nameB}`).toBe(false);
+      }
+    }
+    expect(ATLAS_FRAMES.alpine_rock.row).toBe(0);
+    expect(ATLAS_FRAMES.rock_crag.row).toBe(0);
+
+    expect(GREEN_TREE_FRAMES).toHaveLength(5);
+    expect(FROSTED_TREE_FRAMES).toHaveLength(5);
+    expect(ALL_TREE_FRAMES).toHaveLength(10);
+    expect(new Set(ALL_TREE_FRAMES).size).toBe(10);
+
+    for (const frame of ALL_TREE_FRAMES) {
+      if (frame === 'pine_green' || frame === 'pine_frosted') continue;
+      const prop = TREE_FRAME_PROPORTIONS[frame];
+      expect(prop, `missing proportions for ${frame}`).toBeDefined();
+      const rect = ATLAS_FRAMES[frame];
+      const pixelAspect = (rect.uScale * ATLAS_WIDTH) / (rect.vScale * ATLAS_HEIGHT);
+      expect(prop!.aspect).toBeCloseTo(pixelAspect, 5);
+    }
+
+    const pngPath = path.resolve(__dirname, '..', 'assets', 'treeSprites.png');
+    expect(fs.existsSync(pngPath)).toBe(true);
+    const pngBytes = fs.readFileSync(pngPath);
+    expect(pngBytes.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+    expect(pngBytes.subarray(12, 16).toString('ascii')).toBe('IHDR');
+    expect(pngBytes.readUInt32BE(16)).toBe(2048);
+    expect(pngBytes.readUInt32BE(20)).toBe(512);
+    expect(pngBytes[24]).toBe(8);
+    expect(pngBytes[25]).toBe(6);
 
     tracker.disposeAll();
   });

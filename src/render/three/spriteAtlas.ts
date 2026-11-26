@@ -1,9 +1,11 @@
+/// <reference types="vite/client" />
 import * as THREE from 'three';
+import treeSpritesUrl from './assets/treeSprites.png';
 import type { GraphicsUtils } from './graphicsUtils';
 
-export const ATLAS_WIDTH = 1024;
+export const ATLAS_WIDTH = 2048;
 export const ATLAS_HEIGHT = 1024;
-export const ATLAS_COLS = 4;
+export const ATLAS_COLS = 8;
 export const ATLAS_ROWS = 4;
 const CELL_SIZE = 256;
 const CELL_PAD_PX = 8;
@@ -18,7 +20,15 @@ export type BillboardFrameName =
   | 'child_blue'
   | 'snow_shrub'
   | 'alpine_rock'
-  | 'rock_crag';
+  | 'rock_crag'
+  | 'tree_swirling_evergreen'
+  | 'tree_scalloped_pine'
+  | 'tree_nordic_cone'
+  | 'tree_zigzag_folly'
+  | 'tree_tall_forest_pine'
+  | 'tree_wide_snow_pine'
+  | 'tree_layered_spruce'
+  | 'tree_slender_fir';
 
 export interface AtlasFrameRect {
   readonly col: number;
@@ -27,6 +37,11 @@ export interface AtlasFrameRect {
   readonly vOffset: number;
   readonly uScale: number;
   readonly vScale: number;
+}
+
+export interface TreeFrameProportion {
+  readonly aspect: number;
+  readonly heightScale: number;
 }
 
 function makeFrameRect(col: number, row: number): AtlasFrameRect {
@@ -42,6 +57,25 @@ function makeFrameRect(col: number, row: number): AtlasFrameRect {
   return { col, row, uOffset, vOffset, uScale, vScale };
 }
 
+function makePixelFrameRect(
+  col: number,
+  row: number,
+  pxX: number,
+  pxY: number,
+  pxW: number,
+  pxH: number,
+): AtlasFrameRect {
+  return {
+    col,
+    row,
+    uOffset: pxX / ATLAS_WIDTH,
+    // CanvasTexture uses flipY = true: canvas y increases downward while UV v increases upward.
+    vOffset: 1 - (pxY + pxH) / ATLAS_HEIGHT,
+    uScale: pxW / ATLAS_WIDTH,
+    vScale: pxH / ATLAS_HEIGHT,
+  };
+}
+
 export const ATLAS_FRAMES: Readonly<Record<BillboardFrameName, AtlasFrameRect>> = {
   pine_green: makeFrameRect(0, 0),
   pine_frosted: makeFrameRect(1, 0),
@@ -51,9 +85,65 @@ export const ATLAS_FRAMES: Readonly<Record<BillboardFrameName, AtlasFrameRect>> 
   bear_telegraph: makeFrameRect(1, 1),
   child_blue: makeFrameRect(2, 1),
   snow_shrub: makeFrameRect(3, 1),
-  alpine_rock: makeFrameRect(0, 2),
-  rock_crag: makeFrameRect(1, 2),
+  alpine_rock: makeFrameRect(4, 0),
+  rock_crag: makeFrameRect(5, 0),
+  tree_swirling_evergreen: makePixelFrameRect(0, 2, 28, 520, 200, 496),
+  tree_scalloped_pine: makePixelFrameRect(1, 2, 264, 657, 240, 359),
+  tree_nordic_cone: makePixelFrameRect(2, 2, 520, 634, 240, 382),
+  tree_zigzag_folly: makePixelFrameRect(3, 2, 800, 520, 192, 496),
+  tree_tall_forest_pine: makePixelFrameRect(4, 2, 1047, 520, 210, 496),
+  tree_wide_snow_pine: makePixelFrameRect(5, 2, 1288, 657, 240, 359),
+  tree_layered_spruce: makePixelFrameRect(6, 2, 1544, 661, 240, 355),
+  tree_slender_fir: makePixelFrameRect(7, 2, 1816, 520, 207, 496),
 };
+
+export const GREEN_TREE_FRAMES: readonly BillboardFrameName[] = [
+  'pine_green',
+  'tree_swirling_evergreen',
+  'tree_nordic_cone',
+  'tree_tall_forest_pine',
+  'tree_layered_spruce',
+];
+
+export const FROSTED_TREE_FRAMES: readonly BillboardFrameName[] = [
+  'pine_frosted',
+  'tree_scalloped_pine',
+  'tree_zigzag_folly',
+  'tree_wide_snow_pine',
+  'tree_slender_fir',
+];
+
+export const ALL_TREE_FRAMES: readonly BillboardFrameName[] = [
+  ...GREEN_TREE_FRAMES,
+  ...FROSTED_TREE_FRAMES,
+];
+
+export const TREE_FRAME_PROPORTIONS: Readonly<Partial<Record<BillboardFrameName, TreeFrameProportion>>> = {
+  tree_swirling_evergreen: { aspect: 200 / 496, heightScale: 1.08 },
+  tree_scalloped_pine: { aspect: 240 / 359, heightScale: 0.93 },
+  tree_nordic_cone: { aspect: 240 / 382, heightScale: 0.9 },
+  tree_zigzag_folly: { aspect: 192 / 496, heightScale: 1.05 },
+  tree_tall_forest_pine: { aspect: 210 / 496, heightScale: 1.08 },
+  tree_wide_snow_pine: { aspect: 240 / 359, heightScale: 0.93 },
+  tree_layered_spruce: { aspect: 240 / 355, heightScale: 0.9 },
+  tree_slender_fir: { aspect: 207 / 496, heightScale: 1.03 },
+};
+
+const GREEN_TREE_SET = new Set<string>(GREEN_TREE_FRAMES);
+const FROSTED_TREE_SET = new Set<string>(FROSTED_TREE_FRAMES);
+const ALL_TREE_SET = new Set<string>(ALL_TREE_FRAMES);
+
+export function isGreenTreeFrame(frame: string): boolean {
+  return GREEN_TREE_SET.has(frame);
+}
+
+export function isFrostedTreeFrame(frame: string): boolean {
+  return FROSTED_TREE_SET.has(frame);
+}
+
+export function isTreeBillboardFrame(frame: string): boolean {
+  return ALL_TREE_SET.has(frame);
+}
 
 /**
  * Propagates neighbor RGB values outward into transparent texels (`alpha === 0`)
@@ -573,8 +663,10 @@ function drawRockCragSprite(ctx: CanvasRenderingContext2D, ox: number, oy: numbe
 }
 
 /**
- * Generates the cartoon 2.5D sprite atlas texture via offscreen canvas with RGB edge dilation,
- * or falls back safely to a tiny headless DataTexture when `document` is absent (Node Vitest).
+ * Generates the cartoon 2.5D sprite atlas texture (`2048x1024`) via offscreen canvas with RGB edge
+ * dilation, draws immediate procedural pine fallbacks for the 8 bottom-half tree slots, and upgrades
+ * those slots asynchronously when `treeSprites.png` finishes decoding (or falls back safely to a tiny
+ * headless DataTexture when `document` is absent in Node Vitest).
  */
 export function createCartoonSpriteAtlasTexture(gfx: GraphicsUtils): THREE.Texture {
   if (typeof document === 'undefined') {
@@ -616,8 +708,23 @@ export function createCartoonSpriteAtlasTexture(gfx: GraphicsUtils): THREE.Textu
   drawBearSprite(ctx, 1 * CELL_SIZE, 1 * CELL_SIZE, true);
   drawChildSprite(ctx, 2 * CELL_SIZE, 1 * CELL_SIZE, '#06d6a0', '#ffbe0b', false);
   drawSnowShrubSprite(ctx, 3 * CELL_SIZE, 1 * CELL_SIZE);
-  drawAlpineRockSprite(ctx, 0 * CELL_SIZE, 2 * CELL_SIZE);
-  drawRockCragSprite(ctx, 1 * CELL_SIZE, 2 * CELL_SIZE);
+  drawAlpineRockSprite(ctx, 4 * CELL_SIZE, 0 * CELL_SIZE);
+  drawRockCragSprite(ctx, 5 * CELL_SIZE, 0 * CELL_SIZE);
+
+  // Immediate procedural pine fallback inside each of the 8 bottom-half tree rects until treeSprites.png loads.
+  for (const frame of ALL_TREE_FRAMES) {
+    if (frame === 'pine_green' || frame === 'pine_frosted') continue;
+    const rect = ATLAS_FRAMES[frame];
+    const pxX = Math.round(rect.uOffset * ATLAS_WIDTH);
+    const pxW = Math.round(rect.uScale * ATLAS_WIDTH);
+    const pxH = Math.round(rect.vScale * ATLAS_HEIGHT);
+    const pxY = Math.round((1 - rect.vOffset - rect.vScale) * ATLAS_HEIGHT);
+    ctx.save();
+    ctx.translate(pxX, pxY);
+    ctx.scale(pxW / CELL_SIZE, pxH / CELL_SIZE);
+    drawPineSprite(ctx, 0, 0, isFrostedTreeFrame(frame));
+    ctx.restore();
+  }
 
   const imgData = ctx.getImageData(0, 0, ATLAS_WIDTH, ATLAS_HEIGHT);
   dilateAtlasEdges(imgData.data, ATLAS_WIDTH, ATLAS_HEIGHT, 6);
@@ -631,5 +738,30 @@ export function createCartoonSpriteAtlasTexture(gfx: GraphicsUtils): THREE.Textu
   texture.generateMipmaps = true;
   texture.needsUpdate = true;
   gfx.markAsCache(texture, 'CartoonBillboardAtlas');
+
+  let disposed = false;
+  texture.addEventListener('dispose', () => {
+    disposed = true;
+  });
+
+  if (typeof Image !== 'undefined') {
+    const img = new Image();
+    img.decoding = 'async';
+    img.onload = () => {
+      if (disposed) return;
+      ctx.clearRect(0, 512, ATLAS_WIDTH, 512);
+      ctx.drawImage(img, 0, 512, ATLAS_WIDTH, 512);
+      // Re-dilate bottom strip after drawImage because 2D canvas premultiplied alpha zeroes transparent RGBs.
+      const bottomData = ctx.getImageData(0, 512, ATLAS_WIDTH, 512);
+      dilateAtlasEdges(bottomData.data, ATLAS_WIDTH, 512, 6);
+      ctx.putImageData(bottomData, 0, 512);
+      texture.needsUpdate = true;
+    };
+    img.onerror = () => {
+      // Keep procedural fallback silhouettes silently if image decode fails.
+    };
+    img.src = treeSpritesUrl;
+  }
+
   return texture;
 }

@@ -4,7 +4,12 @@ import type {
   StageSceneryConfig,
 } from '../../content/types';
 import { clamp, smoothstep } from '../../core/math';
-import type { BillboardFrameName } from './spriteAtlas';
+import {
+  FROSTED_TREE_FRAMES,
+  GREEN_TREE_FRAMES,
+  TREE_FRAME_PROPORTIONS,
+  type BillboardFrameName,
+} from './spriteAtlas';
 
 export type TerrainLodTier = 0 | 1;
 
@@ -142,12 +147,21 @@ export function selectWinningSceneryRule(
   return lastEligible;
 }
 
-export function speciesToBillboardFrame(species: ScenerySpeciesKind): BillboardFrameName {
+export function speciesToBillboardFrame(
+  species: ScenerySpeciesKind,
+  variantRoll01?: number,
+): BillboardFrameName {
   switch (species) {
-    case 'pine_green':
-      return 'pine_green';
-    case 'pine_frosted':
-      return 'pine_frosted';
+    case 'pine_green': {
+      if (variantRoll01 === undefined) return 'pine_green';
+      const idx = Math.floor(clamp(variantRoll01, 0, 0.999999) * GREEN_TREE_FRAMES.length);
+      return GREEN_TREE_FRAMES[idx]!;
+    }
+    case 'pine_frosted': {
+      if (variantRoll01 === undefined) return 'pine_frosted';
+      const idx = Math.floor(clamp(variantRoll01, 0, 0.999999) * FROSTED_TREE_FRAMES.length);
+      return FROSTED_TREE_FRAMES[idx]!;
+    }
     case 'snow_shrub':
       return 'snow_shrub';
     case 'alpine_rock':
@@ -158,6 +172,23 @@ export function speciesToBillboardFrame(species: ScenerySpeciesKind): BillboardF
       const _exhaustive: never = species;
       throw new Error(`Unhandled scenery species: ${String(_exhaustive)}`);
     }
+  }
+}
+
+export function applyTreeBillboardProportions(
+  frame: BillboardFrameName,
+  baseWidth: number,
+  baseHeight: number,
+  out: { width: number; height: number },
+): void {
+  const prop = TREE_FRAME_PROPORTIONS[frame];
+  if (prop) {
+    const h = baseHeight * prop.heightScale;
+    out.height = h;
+    out.width = h * prop.aspect;
+  } else {
+    out.width = baseWidth;
+    out.height = baseHeight;
   }
 }
 
