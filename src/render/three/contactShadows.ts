@@ -12,8 +12,10 @@ import { CHILD_SHADOW_RADIUS_M } from './characterSpriteAtlas';
 import type { GraphicsUtils } from './graphicsUtils';
 import {
   computeDeliveryChildPosition,
+  computeDeliveryZoneHash,
   createBillboardAnimPose,
   evaluateChildAnimPose,
+  resolveChildVariant,
   resolveChildVisualScale,
 } from './spriteAnimation';
 
@@ -261,6 +263,13 @@ diffuseColor.a *= vShadowAlpha;`,
       const childCount = zoneDef ? zoneDef.childVisuals.length : 1;
       const yaw = zones.yawRad[i]!;
       const celebTimer = zones.celebratingTimer[i]!;
+      const zoneHash = computeDeliveryZoneHash(
+        zones.posX[i]!,
+        zones.posZ[i]!,
+        simState.rebase.offsetX,
+        simState.rebase.offsetZ,
+        zones.segmentIds[i] ?? 0,
+      );
 
       for (let c = 0; c < childCount; c++) {
         if (this.activeCount >= MAX_SHADOWS) break;
@@ -274,7 +283,8 @@ diffuseColor.a *= vShadowAlpha;`,
           mountainField,
           _childPosScratch,
         );
-        evaluateChildAnimPose(simState.elapsedSec, celebTimer, c, _childPoseScratch);
+        const variant = resolveChildVariant(zoneDef, c, zoneHash);
+        evaluateChildAnimPose(simState.elapsedSec, celebTimer, c, _childPoseScratch, false, variant);
 
         let nx = 0;
         let ny = 1;

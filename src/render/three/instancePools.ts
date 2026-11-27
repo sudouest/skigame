@@ -16,9 +16,11 @@ import type { GraphicsUtils } from './graphicsUtils';
 import type { ProceduralMeshAssets } from './meshFactory';
 import {
   computeDeliveryChildPosition,
+  computeDeliveryZoneHash,
   createBillboardAnimPose,
   evaluateChildAnimPose,
   evaluateCreatureAnimEntry,
+  resolveChildVariant,
   resolveChildVisualScale,
   type CreatureAnimMetrics,
 } from './spriteAnimation';
@@ -448,6 +450,13 @@ export class InstancePools {
       const childCount = zoneDef ? zoneDef.childVisuals.length : 1;
       const yaw = zones.yawRad[i]!;
       const celebTimer = zones.celebratingTimer[i]!;
+      const zoneHash = computeDeliveryZoneHash(
+        zones.posX[i]!,
+        zones.posZ[i]!,
+        simState.rebase.offsetX,
+        simState.rebase.offsetZ,
+        zones.segmentIds[i] ?? 0,
+      );
 
       for (let c = 0; c < childCount; c++) {
         if (charBbCount >= this.characterBillboards.capacity) break;
@@ -462,8 +471,9 @@ export class InstancePools {
           _childPosScratch,
         );
         const childScale = resolveChildVisualScale(zoneDef, c);
+        const variant = resolveChildVariant(zoneDef, c, zoneHash);
         const flipX = c % 2 === 1;
-        evaluateChildAnimPose(elapsed, celebTimer, c, _childPoseScratch, flipX);
+        evaluateChildAnimPose(elapsed, celebTimer, c, _childPoseScratch, flipX, variant);
 
         _pos.set(
           _childPosScratch.x,

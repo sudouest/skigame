@@ -3,6 +3,8 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
+import { getDeliveryZoneDef } from '../../../content/deliveryZones';
+import { hashCoords2DU32 } from '../../../core/rng';
 import {
   CREATURE_PHASE_IDLE,
   CREATURE_PHASE_TELEGRAPH,
@@ -23,9 +25,12 @@ import {
   CHARACTER_ATLAS_WIDTH,
   CHARACTER_CELL_PAD_PX,
   CHARACTER_CELL_SIZE,
+  CHARACTER_SPRITE_STRIPS,
+  CHILD_VARIANT_IDS,
   copyCanvasRegionToFlippedRgba,
   createCharacterSpriteAtlasTexture,
   type CharacterFrameName,
+  type ChildVariantId,
 } from '../characterSpriteAtlas';
 import { ContactShadows } from '../contactShadows';
 import { GraphicsTracker } from '../graphicsTracker';
@@ -40,13 +45,16 @@ import {
   CHILD_CELEBRATION_STAGGER_SEC,
   CHILD_HOP_CONFIG,
   CHILD_SLOT_SPREAD_M,
+  CHILD_VARIANT_ANIM_SETS,
   computeCameraRelativeFlipX,
   computeDeliveryChildPosition,
+  computeDeliveryZoneHash,
   createBillboardAnimPose,
   evaluateBallisticHopPose,
   evaluateBearAnimPose,
   evaluateChildAnimPose,
   evaluateThreePhaseHop,
+  resolveChildVariant,
   sampleSpriteAnimFrame,
   type BallisticHopConfig,
   type SpriteAnimClip,
@@ -492,7 +500,7 @@ function createMinimalSimState(
 }
 
 describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', () => {
-  it('validates CHARACTER_ATLAS_FRAMES UV layout, flip-copy DataTexture helper, and padded/dilated 1024x256 RGBA childSprites.png', () => {
+  it('validates CHARACTER_ATLAS_FRAMES UV layout, CHARACTER_SPRITE_STRIPS, and all 4 padded/dilated 1024x256 RGBA child PNGs', () => {
     expect(CHARACTER_ATLAS_WIDTH).toBe(2048);
     expect(CHARACTER_ATLAS_HEIGHT).toBe(1024);
     expect(CHARACTER_ATLAS_COLS).toBe(8);
@@ -504,7 +512,7 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
       CharacterFrameName,
       (typeof CHARACTER_ATLAS_FRAMES)[CharacterFrameName],
     ][];
-    expect(entries).toHaveLength(6);
+    expect(entries).toHaveLength(18);
 
     const seenCells = new Set<string>();
     for (const [name, rect] of entries) {
@@ -529,21 +537,56 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
       }
     }
 
+    expect(CHARACTER_SPRITE_STRIPS).toHaveLength(4);
+    for (const strip of CHARACTER_SPRITE_STRIPS) {
+      expect(strip.frameCount).toBe(4);
+      expect(strip.col + strip.frameCount).toBeLessThanOrEqual(CHARACTER_ATLAS_COLS);
+      expect(strip.row).toBeLessThan(CHARACTER_ATLAS_ROWS);
+    }
+
     // Verify top-down -> WebGL bottom-up copy preserves dilated alpha===0 RGBs and aligns with vOffset
     const srcStrip = new Uint8ClampedArray(4 * 2 * 4);
-    // Top row (sy=0): bright orange dilated pixel with alpha = 0
     srcStrip[0] = 200;
     srcStrip[1] = 100;
     srcStrip[2] = 50;
     srcStrip[3] = 0;
     const dstAtlas = new Uint8Array(8 * 4 * 4);
     copyCanvasRegionToFlippedRgba(srcStrip, 4, 2, dstAtlas, 8, 4, 0, 0);
-    // sy=0 at dstTopY=0 maps to glY = 4 - 1 - 0 = 3
     const glIdx = (3 * 8 + 0) * 4;
     expect(dstAtlas[glIdx]).toBe(200);
     expect(dstAtlas[glIdx + 1]).toBe(100);
     expect(dstAtlas[glIdx + 2]).toBe(50);
     expect(dstAtlas[glIdx + 3]).toBe(0);
+
+    // Non-zero strip offset (col=4, row=1 -> child_ochre) aligns with CHARACTER_ATLAS_FRAMES.child_ochre_idle_0
+    const stripW = 1024;
+    const stripH = 256;
+    const ochreStrip = new Uint8ClampedArray(stripW * stripH * 4);
+    // Bottom-left pixel inside padded inner cell (x=4, y=251)
+    const ochrePx = (251 * stripW + 4) * 4;
+    ochreStrip[ochrePx] = 212;
+    ochreStrip[ochrePx + 1] = 155;
+    ochreStrip[ochrePx + 2] = 44;
+    ochreStrip[ochrePx + 3] = 255;
+    const fullAtlas = new Uint8Array(CHARACTER_ATLAS_WIDTH * CHARACTER_ATLAS_HEIGHT * 4);
+    copyCanvasRegionToFlippedRgba(
+      ochreStrip,
+      stripW,
+      stripH,
+      fullAtlas,
+      CHARACTER_ATLAS_WIDTH,
+      CHARACTER_ATLAS_HEIGHT,
+      4 * CHARACTER_CELL_SIZE,
+      1 * CHARACTER_CELL_SIZE,
+    );
+    const ochreRect = CHARACTER_ATLAS_FRAMES.child_ochre_idle_0;
+    const texX = Math.round(ochreRect.uOffset * CHARACTER_ATLAS_WIDTH);
+    const texY = Math.round(ochreRect.vOffset * CHARACTER_ATLAS_HEIGHT);
+    const outOchreIdx = (texY * CHARACTER_ATLAS_WIDTH + texX) * 4;
+    expect(fullAtlas[outOchreIdx]).toBe(212);
+    expect(fullAtlas[outOchreIdx + 1]).toBe(155);
+    expect(fullAtlas[outOchreIdx + 2]).toBe(44);
+    expect(fullAtlas[outOchreIdx + 3]).toBe(255);
 
     const tracker = new GraphicsTracker();
     const gfx = new GraphicsUtils(tracker);
@@ -554,44 +597,136 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
     expect(tracker.getStats().activeTextures).toBe(0);
     expect(tracker.getStats().cachedTextures).toBe(0);
 
-    const pngPath = path.resolve(__dirname, '..', 'assets', 'childSprites.png');
-    expect(fs.existsSync(pngPath)).toBe(true);
-    const bytes = fs.readFileSync(pngPath);
-    expect(bytes.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
-    expect(bytes.subarray(12, 16).toString('ascii')).toBe('IHDR');
-    expect(bytes.readUInt32BE(16)).toBe(1024);
-    expect(bytes.readUInt32BE(20)).toBe(256);
-    expect(bytes[24]).toBe(8);
-    expect(bytes[25]).toBe(6);
+    // Mocked-DOM async Image.onload upgrade & dispose cancellation verification
+    const createdImgs: Array<{
+      onload: (() => void) | null;
+      onerror: (() => void) | null;
+      naturalWidth: number;
+      naturalHeight: number;
+      src: string;
+    }> = [];
+    const origDoc = (globalThis as { document?: unknown }).document;
+    const origImg = (globalThis as { Image?: unknown }).Image;
+    try {
+      (globalThis as { document: unknown }).document = {
+        createElement: () => ({
+          width: 0,
+          height: 0,
+          getContext: () => ({
+            clearRect() {},
+            drawImage() {},
+            save() {},
+            restore() {},
+            beginPath() {},
+            roundRect() {},
+            arc() {},
+            ellipse() {},
+            moveTo() {},
+            lineTo() {},
+            closePath() {},
+            fill() {},
+            stroke() {},
+            getImageData: (_x: number, _y: number, w: number, h: number) => ({
+              data: new Uint8ClampedArray(w * h * 4),
+            }),
+          }),
+        }),
+      };
+      (globalThis as { Image: unknown }).Image = class MockImage {
+        decoding = 'async';
+        naturalWidth = 1024;
+        naturalHeight = 256;
+        width = 1024;
+        height = 256;
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        private _src = '';
+        get src(): string {
+          return this._src;
+        }
+        set src(v: string) {
+          this._src = v;
+          createdImgs.push(this);
+        }
+      };
 
-    // Decode RGBA pixels and verify cell border padding, artwork coverage, and RGB dilation
-    const decoded = decodeRgbaPng(bytes);
-    expect(decoded.width).toBe(1024);
-    expect(decoded.height).toBe(256);
-    for (let col = 0; col < 4; col++) {
-      let opaqueCount = 0;
-      let dilatedTransparentRgbCount = 0;
-      const cellX0 = col * CHARACTER_CELL_SIZE;
-      for (let ly = 0; ly < CHARACTER_CELL_SIZE; ly++) {
-        for (let lx = 0; lx < CHARACTER_CELL_SIZE; lx++) {
-          const i = (ly * decoded.width + (cellX0 + lx)) * 4;
-          const a = decoded.rgba[i + 3]!;
-          const inPad =
-            lx < CHARACTER_CELL_PAD_PX ||
-            lx >= CHARACTER_CELL_SIZE - CHARACTER_CELL_PAD_PX ||
-            ly < CHARACTER_CELL_PAD_PX ||
-            ly >= CHARACTER_CELL_SIZE - CHARACTER_CELL_PAD_PX;
-          if (inPad) {
-            expect(a, `cell ${col} border pixel (${lx},${ly}) must be transparent`).toBe(0);
-          }
-          if (a >= 128) opaqueCount++;
-          if (a === 0 && (decoded.rgba[i]! > 0 || decoded.rgba[i + 1]! > 0 || decoded.rgba[i + 2]! > 0)) {
-            dilatedTransparentRgbCount++;
+      const domTracker = new GraphicsTracker();
+      const domGfx = new GraphicsUtils(domTracker);
+      const domAtlas = createCharacterSpriteAtlasTexture(domGfx) as THREE.DataTexture;
+      expect(createdImgs).toHaveLength(4);
+      const verBefore = domAtlas.version;
+      createdImgs[0]!.onload?.();
+      expect(domAtlas.version).toBe(verBefore + 1);
+      // Disposing cancels subsequent strip upgrades
+      domTracker.disposeAll();
+      const verAfterDispose = domAtlas.version;
+      createdImgs[1]!.onload?.();
+      expect(domAtlas.version).toBe(verAfterDispose);
+    } finally {
+      if (origDoc === undefined) delete (globalThis as { document?: unknown }).document;
+      else (globalThis as { document?: unknown }).document = origDoc;
+      if (origImg === undefined) delete (globalThis as { Image?: unknown }).Image;
+      else (globalThis as { Image?: unknown }).Image = origImg;
+    }
+
+    const assetChecks: ReadonlyArray<{ file: string; minBrightWhites: number; minWarmHighlights: number }> = [
+      { file: 'childSprites.png', minBrightWhites: 4, minWarmHighlights: 35 },
+      { file: 'childTealSprites.png', minBrightWhites: 2, minWarmHighlights: 70 },
+      { file: 'childBlueSprites.png', minBrightWhites: 25, minWarmHighlights: 90 },
+      { file: 'childOchreSprites.png', minBrightWhites: 20, minWarmHighlights: 40 },
+    ];
+
+    for (const asset of assetChecks) {
+      const pngPath = path.resolve(__dirname, '..', 'assets', asset.file);
+      expect(fs.existsSync(pngPath), `missing ${asset.file}`).toBe(true);
+      const bytes = fs.readFileSync(pngPath);
+      expect(bytes.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+      expect(bytes.subarray(12, 16).toString('ascii')).toBe('IHDR');
+      expect(bytes.readUInt32BE(16)).toBe(1024);
+      expect(bytes.readUInt32BE(20)).toBe(256);
+      expect(bytes[24]).toBe(8);
+      expect(bytes[25]).toBe(6);
+
+      const decoded = decodeRgbaPng(bytes);
+      expect(decoded.width).toBe(1024);
+      expect(decoded.height).toBe(256);
+
+      let brightInteriorWhites = 0;
+      let brightWarmHighlights = 0;
+      for (let col = 0; col < 4; col++) {
+        let opaqueCount = 0;
+        let dilatedTransparentRgbCount = 0;
+        const cellX0 = col * CHARACTER_CELL_SIZE;
+        for (let ly = 0; ly < CHARACTER_CELL_SIZE; ly++) {
+          for (let lx = 0; lx < CHARACTER_CELL_SIZE; lx++) {
+            const i = (ly * decoded.width + (cellX0 + lx)) * 4;
+            const r = decoded.rgba[i]!;
+            const g = decoded.rgba[i + 1]!;
+            const b = decoded.rgba[i + 2]!;
+            const a = decoded.rgba[i + 3]!;
+            const inPad =
+              lx < CHARACTER_CELL_PAD_PX ||
+              lx >= CHARACTER_CELL_SIZE - CHARACTER_CELL_PAD_PX ||
+              ly < CHARACTER_CELL_PAD_PX ||
+              ly >= CHARACTER_CELL_SIZE - CHARACTER_CELL_PAD_PX;
+            if (inPad) {
+              expect(a, `${asset.file} cell ${col} border (${lx},${ly}) must be transparent`).toBe(0);
+            }
+            if (a >= 128) opaqueCount++;
+            if (a === 255 && r > 225 && g > 225 && b > 225) brightInteriorWhites++;
+            if (a === 255 && r > 210 && g > 200 && b > 185) brightWarmHighlights++;
+            if (a === 0 && (r > 0 || g > 0 || b > 0)) dilatedTransparentRgbCount++;
           }
         }
+        expect(opaqueCount, `${asset.file} cell ${col} opaque count`).toBeGreaterThan(8000);
+        expect(dilatedTransparentRgbCount, `${asset.file} cell ${col} dilation`).toBeGreaterThan(500);
       }
-      expect(opaqueCount).toBeGreaterThan(8000);
-      expect(dilatedTransparentRgbCount).toBeGreaterThan(500);
+      expect(brightInteriorWhites, `${asset.file} white teeth/snowflakes/highlights preserved`).toBeGreaterThanOrEqual(
+        asset.minBrightWhites,
+      );
+      expect(brightWarmHighlights, `${asset.file} interior light details preserved`).toBeGreaterThanOrEqual(
+        asset.minWarmHighlights,
+      );
     }
   });
 
@@ -746,29 +881,34 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
     expect(sqOut.scaleX * sqOut.scaleX * sqOut.scaleY).toBeCloseTo(1, 5);
   });
 
-  it('animates children in idle and staggered 3-hop celebration landing cleanly before timer expiry', () => {
+  it('animates all 4 child variants cleanly across idle and staggered 3-hop celebrations and resolves distinct zone siblings', () => {
     const pose = createBillboardAnimPose('child_idle_0');
 
-    evaluateChildAnimPose(0.0, 0, 0, pose);
-    expect(pose.frame).toBe('child_idle_0');
-    expect(pose.offsetY).toBe(0);
+    for (const variant of CHILD_VARIANT_IDS) {
+      const animSet = CHILD_VARIANT_ANIM_SETS[variant];
+      evaluateChildAnimPose(0.0, 0, 0, pose, false, variant);
+      expect(pose.frame).toBe(animSet.idleClip.frames[0]);
+      expect(pose.offsetY).toBe(0);
 
-    evaluateChildAnimPose(0.45, 0, 0, pose);
-    expect(pose.frame).toBe('child_idle_1');
-    expect(pose.offsetY).toBe(0);
+      evaluateChildAnimPose(0.45, 0, 0, pose, false, variant);
+      expect(pose.frame).toBe(animSet.idleClip.frames[1]);
+      expect(pose.offsetY).toBe(0);
+
+      const apexElapsed = CHILD_HOP_CONFIG.cycleDurationSec * 0.52;
+      evaluateChildAnimPose(2.0, CHILD_CELEBRATION_DURATION_SEC - apexElapsed, 0, pose, false, variant);
+      expect(pose.frame).toBe(animSet.hopConfig.airUpFrame);
+      expect(pose.offsetY).toBeGreaterThan(0.55);
+
+      evaluateChildAnimPose(2.0, CHILD_CELEBRATION_DURATION_SEC - 0.05, 1, pose, false, variant);
+      expect(pose.frame).toBe(animSet.hopConfig.crouchFrame);
+      expect(pose.offsetY).toBe(0);
+    }
 
     const apexElapsed = CHILD_HOP_CONFIG.cycleDurationSec * 0.52;
     evaluateChildAnimPose(2.0, CHILD_CELEBRATION_DURATION_SEC - apexElapsed, 0, pose, false);
-    expect(pose.frame).toBe('child_jump');
-    expect(pose.offsetY).toBeGreaterThan(0.55);
     const unflippedTilt = pose.tiltRad;
-
     evaluateChildAnimPose(2.0, CHILD_CELEBRATION_DURATION_SEC - apexElapsed, 0, pose, true);
     expect(pose.tiltRad).toBeCloseTo(-unflippedTilt, 6);
-
-    evaluateChildAnimPose(2.0, CHILD_CELEBRATION_DURATION_SEC - 0.05, 1, pose);
-    expect(pose.frame).toBe('child_crouch');
-    expect(pose.offsetY).toBe(0);
 
     const totalWindow0 = CHILD_CELEBRATION_HOP_COUNT * CHILD_HOP_CONFIG.cycleDurationSec;
     const endElapsed2 = totalWindow0 + 2 * CHILD_CELEBRATION_STAGGER_SEC;
@@ -784,12 +924,58 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
       expect(pose.offsetY).toBe(0);
     }
 
-    // Non-finite inputs never propagate NaN
     evaluateChildAnimPose(Number.NaN, Number.NaN, Number.NaN, pose);
     expect(Number.isFinite(pose.offsetY)).toBe(true);
     expect(Number.isFinite(pose.scaleX)).toBe(true);
     expect(Number.isFinite(pose.scaleY)).toBe(true);
     expect(Number.isFinite(pose.tiltRad)).toBe(true);
+
+    // resolveChildVariant guarantees distinct siblings for c=0..3 across arbitrary hashes and honors explicit pins
+    const observedSolo = new Set<ChildVariantId>();
+    for (let h = 0; h < 64; h++) {
+      const hash = hashCoords2DU32(h * 17, -h * 31, 0x517cc1b7);
+      observedSolo.add(resolveChildVariant(undefined, 0, hash));
+      const row = [
+        resolveChildVariant(undefined, 0, hash),
+        resolveChildVariant(undefined, 1, hash),
+        resolveChildVariant(undefined, 2, hash),
+        resolveChildVariant(undefined, 3, hash),
+      ];
+      expect(new Set(row).size).toBe(4);
+    }
+    expect(observedSolo.size).toBe(4);
+
+    const pinnedZone = {
+      ...getDeliveryZoneDef('village_plaza')!,
+      childVisuals: [
+        {
+          kind: 'procedural' as const,
+          preset: 'child' as const,
+          palette: ['#000000'],
+          variant: 'child_teal',
+        },
+        {
+          kind: 'procedural' as const,
+          preset: 'child' as const,
+          palette: ['#000000'],
+          variant: 'plaza_2',
+        },
+        {
+          kind: 'procedural' as const,
+          preset: 'child' as const,
+          palette: ['#000000'],
+          variant: 'plaza_3',
+        },
+      ],
+    };
+    for (let h = 0; h < 32; h++) {
+      const pHash = hashCoords2DU32(h * 13, h * 7, 0x517cc1b7);
+      const pv0 = resolveChildVariant(pinnedZone, 0, pHash);
+      const pv1 = resolveChildVariant(pinnedZone, 1, pHash);
+      const pv2 = resolveChildVariant(pinnedZone, 2, pHash);
+      expect(pv0).toBe('teal');
+      expect(new Set([pv0, pv1, pv2]).size).toBe(3);
+    }
   });
 
   it('supports sim-driven ballistic hops, NaN-safe guards, sloped child placement, and camera-relative flipping', () => {
@@ -809,7 +995,6 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
     expect(pose.frame).toBe('idle_0');
     expect(pose.tiltRad).toBe(0);
 
-    // Pre-jump crouch anticipation and post-touchdown landing squash use crouchFrame & landSquashY
     evaluateBallisticHopPose(0.1, 0, 0, 1, rabbitCfg, pose, true, 0);
     expect(pose.frame).toBe('crouch');
     expect(pose.scaleY).toBeCloseTo(0.84, 5);
@@ -819,7 +1004,6 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
     expect(pose.frame).toBe('crouch');
     expect(pose.scaleY).toBeCloseTo(0.92, 5);
 
-    // Airborne ascending moving right (+1) -> +tilt, descending moving left (-1) -> +tilt
     evaluateBallisticHopPose(0.2, 0.35, 4.5, 1, rabbitCfg, pose);
     expect(pose.frame).toBe('up');
     expect(pose.scaleY).toBeGreaterThan(1.05);
@@ -833,7 +1017,6 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
     evaluateBallisticHopPose(0.2, 0.35, 4.5, -1, rabbitCfg, pose);
     expect(pose.tiltRad).toBeLessThan(0);
 
-    // Non-finite inputs on ballistic & bear evaluators stay finite
     evaluateBallisticHopPose(Number.NaN, 0.2, Number.NaN, Number.NaN, rabbitCfg, pose);
     expect(Number.isFinite(pose.tiltRad)).toBe(true);
     expect(Number.isFinite(pose.scaleY)).toBe(true);
@@ -844,14 +1027,12 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
     expect(Number.isFinite(bearPose.scaleX)).toBe(true);
     expect(Number.isFinite(bearPose.tiltRad)).toBe(true);
 
-    // Camera-relative horizontal flip
     expect(computeCameraRelativeFlipX(-Math.PI * 0.5, 1, 0, false)).toBe(true);
     expect(computeCameraRelativeFlipX(Math.PI * 0.5, 1, 0, false)).toBe(false);
     expect(computeCameraRelativeFlipX(Math.PI, 0, 1, false)).toBe(true);
     expect(computeCameraRelativeFlipX(0, 0, 1, false)).toBe(false);
     expect(computeCameraRelativeFlipX(Math.PI, 0, 1, true)).toBe(false);
 
-    // Sloped terrain & rotated zone placement
     const slopedField = {
       ...createMinimalSimState(0, 0).mountainField,
       evaluateHeight(wx: number, wz: number) {
@@ -872,7 +1053,7 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
     );
   });
 
-  it('packs celebrating children and interpolated creatures into CharacterBillboardPool with reactive ContactShadows', () => {
+  it('packs distinct child variants (rebase-invariant) and creatures into CharacterBillboardPool with reactive ContactShadows', () => {
     const tracker = new GraphicsTracker();
     const gfx = new GraphicsUtils(tracker);
     const mats = createSharedToonMaterials(gfx);
@@ -911,18 +1092,16 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
 
     const idleShadowMat = new THREE.Matrix4();
     const idleShadowScale = new THREE.Vector3();
-    // Child 0 shadow sits at index 3 (after 1 skier + 2 creatures)
     shadows.instancedMesh.getMatrixAt(3, idleShadowMat);
     idleShadowScale.setFromMatrixScale(idleShadowMat);
     const idleShadowAlpha = (
       shadows.instancedMesh.geometry.getAttribute('aShadowAlpha') as THREE.InstancedBufferAttribute
     ).getX(3);
 
-    // Check bear 0 (index 2: telegraph + movingRight flipX + alpha=0.5 interpolation) and bear 1 (index 3: walk + unflipped)
     const bear0Mat = new THREE.Matrix4();
     charPool.getMatrixAt(2, bear0Mat);
     const bear0Pos = new THREE.Vector3().setFromMatrixPosition(bear0Mat);
-    expect(bear0Pos.x).toBeCloseTo(3.0, 4); // lerp(2, 4, 0.5)
+    expect(bear0Pos.x).toBeCloseTo(3.0, 4);
 
     const uvAttr = charPool.geometry.getAttribute('aUvRect') as THREE.InstancedBufferAttribute;
     const tiltAttr = charPool.geometry.getAttribute('aTilt') as THREE.InstancedBufferAttribute;
@@ -943,7 +1122,7 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
     expect(tiltAttr.getX(2)).toBeCloseTo(expectedBear0.tiltRad, 5);
     expect(tiltAttr.getX(3)).toBeCloseTo(expectedBear1.tiltRad, 5);
 
-    // Celebrating state at celebElapsed = 0.42s (both child 0 and child 1 are airborne in hop 1 with opposite flipX & tilt)
+    // Celebrating state at celebElapsed = 0.42s (both child 0 and child 1 are airborne in hop 1)
     const celebTimer = CHILD_CELEBRATION_DURATION_SEC - 0.42;
     const celebState = createMinimalSimState(2.0, celebTimer, true);
     pools.sync(celebState, 1, emptyScenery);
@@ -954,17 +1133,85 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
     const celebChild0Pos = new THREE.Vector3().setFromMatrixPosition(celebChild0Mat);
     expect(celebChild0Pos.y).toBeGreaterThan(0.5);
 
-    const jumpRect = CHARACTER_ATLAS_FRAMES.child_jump;
-    expect(uvAttr.getX(0)).toBeCloseTo(jumpRect.uOffset, 5);
-    expect(uvAttr.getY(0)).toBeCloseTo(jumpRect.vOffset, 5);
-    expect(uvAttr.getZ(0)).toBeCloseTo(jumpRect.uScale, 5);
-    expect(uvAttr.getW(0)).toBeCloseTo(jumpRect.vScale, 5);
+    const zoneDef = getDeliveryZoneDef('sled_duo');
+    const zHash = computeDeliveryZoneHash(-5, -20, 0, 0, 1);
+    const v0 = resolveChildVariant(zoneDef, 0, zHash);
+    const v1 = resolveChildVariant(zoneDef, 1, zHash);
+    expect(v0).not.toBe(v1);
 
-    // Child 1 is horizontally mirrored (flipX = true) and tilts opposite to child 0 in hop 1 air phase
-    expect(uvAttr.getX(1)).toBeCloseTo(jumpRect.uOffset + jumpRect.uScale, 5);
-    expect(uvAttr.getZ(1)).toBeCloseTo(-jumpRect.uScale, 5);
+    const jumpRect0 = CHARACTER_ATLAS_FRAMES[CHILD_VARIANT_ANIM_SETS[v0].hopConfig.airUpFrame];
+    const jumpRect1 = CHARACTER_ATLAS_FRAMES[CHILD_VARIANT_ANIM_SETS[v1].hopConfig.airUpFrame];
+
+    expect(uvAttr.getX(0)).toBeCloseTo(jumpRect0.uOffset, 5);
+    expect(uvAttr.getY(0)).toBeCloseTo(jumpRect0.vOffset, 5);
+    expect(uvAttr.getZ(0)).toBeCloseTo(jumpRect0.uScale, 5);
+    expect(uvAttr.getW(0)).toBeCloseTo(jumpRect0.vScale, 5);
+
+    // Child 1 is distinct variant, horizontally mirrored (flipX = true), and tilts opposite to child 0
+    expect(uvAttr.getX(1)).toBeCloseTo(jumpRect1.uOffset + jumpRect1.uScale, 5);
+    expect(uvAttr.getY(1)).toBeCloseTo(jumpRect1.vOffset, 5);
+    expect(uvAttr.getZ(1)).toBeCloseTo(-jumpRect1.uScale, 5);
+    expect(uvAttr.getW(1)).toBeCloseTo(jumpRect1.vScale, 5);
     expect(tiltAttr.getX(0)).toBeGreaterThan(0.03);
     expect(tiltAttr.getX(1)).toBeLessThan(-0.03);
+
+    // Verify floating-origin WORLD_REBASED with fractional non-power-of-two offsets preserves variant assignment
+    const rebasedState: ReadonlySimState = {
+      ...celebState,
+      rebase: {
+        ...celebState.rebase,
+        rebaseCount: 1,
+        offsetX: 37.4,
+        offsetZ: -91.25,
+      },
+      entities: {
+        ...celebState.entities,
+        deliveryZones: {
+          ...celebState.entities.deliveryZones,
+          posX: new Float32Array([-5 - 37.4]),
+          posZ: new Float32Array([-20 - -91.25]),
+        },
+      },
+    };
+    pools.sync(rebasedState, 1, emptyScenery);
+    expect(uvAttr.getX(0)).toBeCloseTo(jumpRect0.uOffset, 5);
+    expect(uvAttr.getY(0)).toBeCloseTo(jumpRect0.vOffset, 5);
+    expect(uvAttr.getX(1)).toBeCloseTo(jumpRect1.uOffset + jumpRect1.uScale, 5);
+    expect(uvAttr.getY(1)).toBeCloseTo(jumpRect1.vOffset, 5);
+
+    // Verify 3-child village_plaza packs 3 distinct variants
+    const plazaState: ReadonlySimState = {
+      ...celebState,
+      entities: {
+        ...celebState.entities,
+        creatures: { ...celebState.entities.creatures, count: 0 },
+        deliveryZones: {
+          ...celebState.entities.deliveryZones,
+          defIds: ['village_plaza'],
+        },
+      },
+    };
+    pools.sync(plazaState, 1, emptyScenery);
+    expect(charPool.count).toBe(3);
+    const plazaUvOffsets = new Set([uvAttr.getY(0), uvAttr.getY(1), uvAttr.getY(2)]);
+    const plazaUOffsets = new Set([
+      Math.round((uvAttr.getZ(0) < 0 ? uvAttr.getX(0) + uvAttr.getZ(0) : uvAttr.getX(0)) * 2048),
+      Math.round((uvAttr.getZ(1) < 0 ? uvAttr.getX(1) + uvAttr.getZ(1) : uvAttr.getX(1)) * 2048),
+      Math.round((uvAttr.getZ(2) < 0 ? uvAttr.getX(2) + uvAttr.getZ(2) : uvAttr.getX(2)) * 2048),
+    ]);
+    expect(plazaUvOffsets.size + plazaUOffsets.size).toBeGreaterThanOrEqual(4);
+    const pHash = computeDeliveryZoneHash(-5, -20, 0, 0, 1);
+    const plazaDef = getDeliveryZoneDef('village_plaza');
+    expect(
+      new Set([
+        resolveChildVariant(plazaDef, 0, pHash),
+        resolveChildVariant(plazaDef, 1, pHash),
+        resolveChildVariant(plazaDef, 2, pHash),
+      ]).size,
+    ).toBe(3);
+
+    pools.sync(celebState, 1, emptyScenery);
+    shadows.sync(celebState, 1);
 
     const celebShadowMat = new THREE.Matrix4();
     const celebShadowScale = new THREE.Vector3();

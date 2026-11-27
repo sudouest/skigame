@@ -1,11 +1,17 @@
 import type { DeliveryZoneDef, VisualSpec } from '../../content/types';
 import { clamp, lerp } from '../../core/math';
+import { hashCoords2DU32 } from '../../core/rng';
 import {
   CREATURE_PHASE_ATTACK,
   CREATURE_PHASE_TELEGRAPH,
   type MountainFieldView,
 } from '../../sim/contracts';
-import { isCharacterFrameName, type CharacterFrameName } from './characterSpriteAtlas';
+import {
+  CHILD_VARIANT_IDS,
+  isCharacterFrameName,
+  type CharacterFrameName,
+  type ChildVariantId,
+} from './characterSpriteAtlas';
 
 export const CHILD_SLOT_SPREAD_M = 1.45;
 /** Must match `zones.celebratingTimer` duration set in `src/sim/skiSimulation.ts` (`2.5`). */
@@ -46,6 +52,11 @@ export interface ThreePhaseHopConfig<TFrame extends string = CharacterFrameName>
   readonly airUpFrame: TFrame;
   readonly airDownFrame?: TFrame;
   readonly landFrame?: TFrame;
+}
+
+export interface ChildVariantAnimSet {
+  readonly idleClip: SpriteAnimClip<CharacterFrameName>;
+  readonly hopConfig: ThreePhaseHopConfig<CharacterFrameName>;
 }
 
 export interface BallisticHopConfig<TFrame extends string = CharacterFrameName> {
@@ -120,6 +131,154 @@ export const CHILD_HOP_CONFIG: ThreePhaseHopConfig<CharacterFrameName> = {
   crouchFrame: 'child_crouch',
   airUpFrame: 'child_jump',
 };
+
+function makeChildVariantAnimSet(
+  idle0: CharacterFrameName,
+  idle1: CharacterFrameName,
+  crouch: CharacterFrameName,
+  jump: CharacterFrameName,
+): ChildVariantAnimSet {
+  return {
+    idleClip: {
+      frames: [idle0, idle1],
+      fps: CHILD_IDLE_CLIP.fps,
+      mode: CHILD_IDLE_CLIP.mode,
+    },
+    hopConfig: {
+      ...CHILD_HOP_CONFIG,
+      crouchFrame: crouch,
+      airUpFrame: jump,
+    },
+  };
+}
+
+export const CHILD_VARIANT_ANIM_SETS: Readonly<Record<ChildVariantId, ChildVariantAnimSet>> = {
+  red: {
+    idleClip: CHILD_IDLE_CLIP,
+    hopConfig: CHILD_HOP_CONFIG,
+  },
+  teal: makeChildVariantAnimSet(
+    'child_teal_idle_0',
+    'child_teal_idle_1',
+    'child_teal_crouch',
+    'child_teal_jump',
+  ),
+  blue: makeChildVariantAnimSet(
+    'child_blue_idle_0',
+    'child_blue_idle_1',
+    'child_blue_crouch',
+    'child_blue_jump',
+  ),
+  ochre: makeChildVariantAnimSet(
+    'child_ochre_idle_0',
+    'child_ochre_idle_1',
+    'child_ochre_crouch',
+    'child_ochre_jump',
+  ),
+};
+
+const PINNED_CHILD_VARIANTS: Readonly<Record<string, ChildVariantId>> = {
+  child_red: 'red',
+  child_teal: 'teal',
+  child_blue: 'blue',
+  child_ochre: 'ochre',
+};
+
+function gcd(a: number, b: number): number {
+  let x = Math.abs(a);
+  let y = Math.abs(b);
+  while (y !== 0) {
+    const t = x % y;
+    x = y;
+    y = t;
+  }
+  return x || 1;
+}
+
+/**
+ * Computes a rebase-invariant 32-bit hash for a DeliveryZone's absolute world location so
+ * assigned child variants never swap during floating-origin `WORLD_REBASED`.
+ */
+export function computeDeliveryZoneHash(
+  zonePosX: number,
+  zonePosZ: number,
+  originOffsetX: number,
+  originOffsetZ: number,
+  segmentId: number,
+): number {
+  const absQx = Math.round((finiteOr(zonePosX, 0) + finiteOr(originOffsetX, 0)) * 4);
+  const absQz = Math.round((finiteOr(zonePosZ, 0) + finiteOr(originOffsetZ, 0)) * 4);
+  return hashCoords2DU32(absQx, absQz, ((segmentId | 0) ^ 0x517cc1b7) >>> 0);
+}
+
+/**
+ * Resolves a deterministic, distinct child character variant for slot `childIndex` in a
+ * DeliveryZone (honoring optional explicit pins while excluding pinned variants from unpinned
+ * sibling slots so siblings never collide).
+ */
+export function resolveChildVariant(
+  zoneDef: DeliveryZoneDef | undefined,
+  childIndex: number,
+  zoneHash: number,
+): ChildVariantId {
+  const count = CHILD_VARIANT_IDS.length;
+  const safeChildIdx = Math.max(0, Math.trunc(finiteOr(childIndex, 0)));
+  const visuals = zoneDef?.childVisuals;
+
+  const directVisual = visuals?.[safeChildIdx];
+  if (directVisual?.kind === 'procedural' && directVisual.variant) {
+    const pinned = PINNED_CHILD_VARIANTS[directVisual.variant];
+    if (pinned) return pinned;
+  }
+
+  let usedMask = 0;
+  let unpinnedOrdinal = 0;
+  if (visuals) {
+    for (let k = 0; k < visuals.length; k++) {
+      const v = visuals[k];
+      const pinned =
+        v?.kind === 'procedural' && v.variant ? PINNED_CHILD_VARIANTS[v.variant] : undefined;
+      if (pinned) {
+        const pIdx = CHILD_VARIANT_IDS.indexOf(pinned);
+        if (pIdx >= 0) {
+          usedMask |= 1 << pIdx;
+        }
+      } else if (k < safeChildIdx) {
+        unpinnedOrdinal++;
+      }
+    }
+    if (safeChildIdx >= visuals.length) {
+      unpinnedOrdinal += safeChildIdx - visuals.length;
+    }
+  } else {
+    unpinnedOrdinal = safeChildIdx;
+  }
+
+  const h = finiteOr(zoneHash, 0) >>> 0;
+  const baseIdx = h % count;
+  let step = count > 2 ? ((h >>> 8) % (count - 1)) + 1 : 1;
+  while (step < count && gcd(step, count) !== 1) {
+    step = (step + 1) % count || 1;
+  }
+
+  const allMask = (1 << count) - 1;
+  if ((usedMask & allMask) === allMask) {
+    return CHILD_VARIANT_IDS[(baseIdx + safeChildIdx * step) % count]!;
+  }
+
+  let freeSeen = 0;
+  for (let attempt = 0; attempt < count; attempt++) {
+    const candidateIdx = (baseIdx + attempt * step) % count;
+    if ((usedMask & (1 << candidateIdx)) !== 0) continue;
+    if (freeSeen === unpinnedOrdinal % count) {
+      return CHILD_VARIANT_IDS[candidateIdx]!;
+    }
+    freeSeen++;
+  }
+
+  // Fallback when more than `count` unpinned children share one zone
+  return CHILD_VARIANT_IDS[(baseIdx + unpinnedOrdinal * step) % count]!;
+}
 
 /**
  * Samples a flipbook frame deterministically from `timeSec` with zero heap allocations.
@@ -287,18 +446,20 @@ export function evaluateChildAnimPose(
   childIndex: number,
   out: BillboardAnimPose<CharacterFrameName>,
   flipX = false,
+  variant: ChildVariantId = 'red',
 ): BillboardAnimPose<CharacterFrameName> {
   const safeElapsed = finiteOr(elapsedSec, 0);
   const safeTimer = finiteOr(celebratingTimerSec, 0);
   const idx = finiteOr(childIndex, 0);
+  const animSet = CHILD_VARIANT_ANIM_SETS[variant] ?? CHILD_VARIANT_ANIM_SETS.red;
 
   if (safeTimer > 0) {
     const celebElapsed = Math.max(0, CHILD_CELEBRATION_DURATION_SEC - safeTimer);
     const staggeredT = celebElapsed - (idx % 4) * CHILD_CELEBRATION_STAGGER_SEC;
-    const totalHopWindow = CHILD_CELEBRATION_HOP_COUNT * CHILD_HOP_CONFIG.cycleDurationSec;
+    const totalHopWindow = CHILD_CELEBRATION_HOP_COUNT * animSet.hopConfig.cycleDurationSec;
 
     if (staggeredT < 0) {
-      out.frame = 'child_crouch';
+      out.frame = animSet.hopConfig.crouchFrame;
       out.offsetY = 0;
       out.scaleX = 1;
       out.scaleY = 1;
@@ -307,7 +468,7 @@ export function evaluateChildAnimPose(
     }
 
     if (staggeredT < totalHopWindow) {
-      evaluateThreePhaseHop(staggeredT, CHILD_HOP_CONFIG, out);
+      evaluateThreePhaseHop(staggeredT, animSet.hopConfig, out);
       if (flipX) {
         out.tiltRad = -out.tiltRad;
       }
@@ -315,7 +476,7 @@ export function evaluateChildAnimPose(
     }
   }
 
-  out.frame = sampleSpriteAnimFrame(CHILD_IDLE_CLIP, safeElapsed + idx * 0.43);
+  out.frame = sampleSpriteAnimFrame(animSet.idleClip, safeElapsed + idx * 0.43);
   out.offsetY = 0;
   const breathY = 1 + Math.sin(safeElapsed * 2.8 + idx * 1.9) * 0.022;
   applyVolumePreservingSquash(breathY, out);

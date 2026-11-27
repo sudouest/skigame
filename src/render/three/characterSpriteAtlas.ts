@@ -1,6 +1,9 @@
 /// <reference types="vite/client" />
 import * as THREE from 'three';
+import childBlueSpritesUrl from './assets/childBlueSprites.png';
+import childOchreSpritesUrl from './assets/childOchreSprites.png';
 import childSpritesUrl from './assets/childSprites.png';
+import childTealSpritesUrl from './assets/childTealSprites.png';
 import type { GraphicsUtils } from './graphicsUtils';
 import { dilateAtlasEdges, type AtlasFrameRect } from './spriteAtlas';
 
@@ -15,13 +18,74 @@ export const CHILD_SPRITE_BASE_WIDTH_M = 1.8;
 export const CHILD_SPRITE_BASE_HEIGHT_M = 1.8;
 export const CHILD_SHADOW_RADIUS_M = 0.62;
 
+export type ChildVariantId = 'red' | 'teal' | 'blue' | 'ochre';
+
+export const CHILD_VARIANT_IDS: readonly ChildVariantId[] = ['red', 'teal', 'blue', 'ochre'];
+
 export type CharacterFrameName =
   | 'child_idle_0'
   | 'child_idle_1'
   | 'child_crouch'
   | 'child_jump'
+  | 'child_teal_idle_0'
+  | 'child_teal_idle_1'
+  | 'child_teal_crouch'
+  | 'child_teal_jump'
+  | 'child_blue_idle_0'
+  | 'child_blue_idle_1'
+  | 'child_blue_crouch'
+  | 'child_blue_jump'
+  | 'child_ochre_idle_0'
+  | 'child_ochre_idle_1'
+  | 'child_ochre_crouch'
+  | 'child_ochre_jump'
   | 'bear_walk'
   | 'bear_telegraph';
+
+export interface CharacterSpriteStripSpec {
+  readonly id: string;
+  readonly col: number;
+  readonly row: number;
+  readonly frameCount: number;
+  readonly url: string;
+  readonly drawFallback?: (ctx: CanvasRenderingContext2D, ox: number, oy: number) => void;
+}
+
+const CHILD_FALLBACK_POSES: readonly ChildFallbackPose[] = ['idle_0', 'idle_1', 'crouch', 'jump'];
+
+function makeChildStripSpec(
+  id: ChildVariantId,
+  col: number,
+  row: number,
+  url: string,
+): CharacterSpriteStripSpec {
+  return {
+    id,
+    col,
+    row,
+    frameCount: 4,
+    url,
+    drawFallback(ctx, ox, oy) {
+      const palette = CHILD_FALLBACK_PALETTES[id];
+      for (let f = 0; f < CHILD_FALLBACK_POSES.length; f++) {
+        drawCharacterChildFallback(
+          ctx,
+          ox + f * CHARACTER_CELL_SIZE,
+          oy,
+          CHILD_FALLBACK_POSES[f]!,
+          palette,
+        );
+      }
+    },
+  };
+}
+
+export const CHARACTER_SPRITE_STRIPS: readonly CharacterSpriteStripSpec[] = [
+  makeChildStripSpec('red', 0, 0, childSpritesUrl),
+  makeChildStripSpec('teal', 4, 0, childTealSpritesUrl),
+  makeChildStripSpec('blue', 0, 1, childBlueSpritesUrl),
+  makeChildStripSpec('ochre', 4, 1, childOchreSpritesUrl),
+];
 
 function makeCharacterFrameRect(col: number, row: number): AtlasFrameRect {
   const padU = CHARACTER_CELL_PAD_PX / CHARACTER_ATLAS_WIDTH;
@@ -41,8 +105,20 @@ export const CHARACTER_ATLAS_FRAMES: Readonly<Record<CharacterFrameName, AtlasFr
   child_idle_1: makeCharacterFrameRect(1, 0),
   child_crouch: makeCharacterFrameRect(2, 0),
   child_jump: makeCharacterFrameRect(3, 0),
-  bear_walk: makeCharacterFrameRect(0, 1),
-  bear_telegraph: makeCharacterFrameRect(1, 1),
+  child_teal_idle_0: makeCharacterFrameRect(4, 0),
+  child_teal_idle_1: makeCharacterFrameRect(5, 0),
+  child_teal_crouch: makeCharacterFrameRect(6, 0),
+  child_teal_jump: makeCharacterFrameRect(7, 0),
+  child_blue_idle_0: makeCharacterFrameRect(0, 1),
+  child_blue_idle_1: makeCharacterFrameRect(1, 1),
+  child_blue_crouch: makeCharacterFrameRect(2, 1),
+  child_blue_jump: makeCharacterFrameRect(3, 1),
+  child_ochre_idle_0: makeCharacterFrameRect(4, 1),
+  child_ochre_idle_1: makeCharacterFrameRect(5, 1),
+  child_ochre_crouch: makeCharacterFrameRect(6, 1),
+  child_ochre_jump: makeCharacterFrameRect(7, 1),
+  bear_walk: makeCharacterFrameRect(0, 2),
+  bear_telegraph: makeCharacterFrameRect(1, 2),
 };
 
 export function isCharacterFrameName(frame: string): frame is CharacterFrameName {
@@ -51,11 +127,51 @@ export function isCharacterFrameName(frame: string): frame is CharacterFrameName
 
 type ChildFallbackPose = 'idle_0' | 'idle_1' | 'crouch' | 'jump';
 
+interface ChildFallbackPalette {
+  readonly coat: string;
+  readonly scarf: string;
+  readonly beanie: string;
+  readonly pom: string;
+  readonly mitten: string;
+}
+
+const CHILD_FALLBACK_PALETTES: Readonly<Record<ChildVariantId, ChildFallbackPalette>> = {
+  red: {
+    coat: '#a62c2b',
+    scarf: '#c43c35',
+    beanie: '#243b55',
+    pom: '#d99b38',
+    mitten: '#2c5e4f',
+  },
+  teal: {
+    coat: '#2e6f5e',
+    scarf: '#8e3b68',
+    beanie: '#f0e2c8',
+    pom: '#9e3545',
+    mitten: '#2c5e4f',
+  },
+  blue: {
+    coat: '#2f5388',
+    scarf: '#c7642a',
+    beanie: '#a84226',
+    pom: '#a84226',
+    mitten: '#2c5e4f',
+  },
+  ochre: {
+    coat: '#c98e27',
+    scarf: '#2c7576',
+    beanie: '#3d5860',
+    pom: '#e5d4b3',
+    mitten: '#263a47',
+  },
+};
+
 function drawCharacterChildFallback(
   ctx: CanvasRenderingContext2D,
   ox: number,
   oy: number,
   pose: ChildFallbackPose,
+  palette: ChildFallbackPalette,
 ): void {
   const cx = ox + CHARACTER_CELL_SIZE * 0.5;
   const bottom = oy + CHARACTER_CELL_SIZE - 8;
@@ -93,7 +209,7 @@ function drawCharacterChildFallback(
   ctx.stroke();
 
   // Trailing scarf tail
-  ctx.fillStyle = '#a62c2b';
+  ctx.fillStyle = palette.scarf;
   ctx.beginPath();
   if (pose === 'idle_0') {
     ctx.moveTo(cx - 26, bottom - 126);
@@ -113,7 +229,7 @@ function drawCharacterChildFallback(
   // Raised arms (drawn behind torso) when not crouching
   if (!isCrouch) {
     const raiseY = isJump ? 196 : 164;
-    ctx.fillStyle = '#a62c2b';
+    ctx.fillStyle = palette.coat;
     ctx.beginPath();
     ctx.moveTo(cx - 30, bottom - 116);
     ctx.lineTo(cx - 66, bottom - raiseY);
@@ -132,7 +248,7 @@ function drawCharacterChildFallback(
     ctx.fill();
     ctx.stroke();
 
-    ctx.fillStyle = '#2c5e4f';
+    ctx.fillStyle = palette.mitten;
     ctx.beginPath();
     ctx.arc(cx - 60, bottom - raiseY - 6, 11, 0, Math.PI * 2);
     ctx.arc(cx + 60, bottom - raiseY - 6, 11, 0, Math.PI * 2);
@@ -141,7 +257,7 @@ function drawCharacterChildFallback(
   }
 
   // Parka torso
-  ctx.fillStyle = '#a62c2b';
+  ctx.fillStyle = palette.coat;
   ctx.beginPath();
   ctx.roundRect(cx - 34, bottom - 130 + crouchDrop, 68, 70, 18);
   ctx.fill();
@@ -149,14 +265,14 @@ function drawCharacterChildFallback(
 
   // Front-held crouched arms & mittens drawn OVER torso
   if (isCrouch) {
-    ctx.fillStyle = '#a62c2b';
+    ctx.fillStyle = palette.coat;
     ctx.beginPath();
     ctx.roundRect(cx - 42, bottom - 116 + crouchDrop, 18, 36, 8);
     ctx.roundRect(cx + 24, bottom - 116 + crouchDrop, 18, 36, 8);
     ctx.fill();
     ctx.stroke();
 
-    ctx.fillStyle = '#2c5e4f';
+    ctx.fillStyle = palette.mitten;
     ctx.beginPath();
     ctx.arc(cx - 20, bottom - 94 + crouchDrop, 11, 0, Math.PI * 2);
     ctx.arc(cx + 20, bottom - 94 + crouchDrop, 11, 0, Math.PI * 2);
@@ -165,7 +281,7 @@ function drawCharacterChildFallback(
   }
 
   // Scarf collar
-  ctx.fillStyle = '#c43c35';
+  ctx.fillStyle = palette.scarf;
   ctx.beginPath();
   ctx.roundRect(cx - 28, bottom - 140 + crouchDrop, 56, 18, 8);
   ctx.fill();
@@ -195,16 +311,16 @@ function drawCharacterChildFallback(
   }
   ctx.stroke();
 
-  // Beanie + ochre pom-pom
+  // Beanie + pom-pom
   ctx.lineWidth = 6;
-  ctx.fillStyle = '#243b55';
+  ctx.fillStyle = palette.beanie;
   ctx.beginPath();
   ctx.arc(cx, headY - 12, 29, Math.PI, 0);
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
 
-  ctx.fillStyle = '#d99b38';
+  ctx.fillStyle = palette.pom;
   ctx.beginPath();
   ctx.arc(cx - 12, headY - 46, 12, 0, Math.PI * 2);
   ctx.fill();
@@ -228,7 +344,6 @@ function drawCharacterBearFallback(
   ctx.strokeStyle = '#1b130e';
   ctx.lineWidth = 6;
 
-  // Ears
   ctx.fillStyle = '#6f4528';
   ctx.beginPath();
   ctx.arc(cx - 38, bottom - 182, 16, 0, Math.PI * 2);
@@ -236,7 +351,6 @@ function drawCharacterBearFallback(
   ctx.fill();
   ctx.stroke();
 
-  // Legs
   ctx.fillStyle = '#5c3a21';
   ctx.beginPath();
   ctx.roundRect(cx - 46, bottom - 56, 30, 52, 10);
@@ -244,20 +358,17 @@ function drawCharacterBearFallback(
   ctx.fill();
   ctx.stroke();
 
-  // Chunky torso
   ctx.fillStyle = '#754829';
   ctx.beginPath();
   ctx.ellipse(cx, bottom - 100, 62, 68, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
 
-  // Belly patch
   ctx.fillStyle = '#c89f78';
   ctx.beginPath();
   ctx.ellipse(cx, bottom - 96, 36, 44, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Paws (raised in telegraph!)
   ctx.fillStyle = '#5c3a21';
   if (telegraph) {
     ctx.beginPath();
@@ -273,27 +384,23 @@ function drawCharacterBearFallback(
     ctx.stroke();
   }
 
-  // Head
   ctx.fillStyle = '#7c4d2b';
   ctx.beginPath();
   ctx.arc(cx, bottom - 162, 42, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
 
-  // Snout
   ctx.fillStyle = '#e6ccb2';
   ctx.beginPath();
   ctx.ellipse(cx, bottom - 148, 22, 16, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
 
-  // Nose
   ctx.fillStyle = '#1b130e';
   ctx.beginPath();
   ctx.ellipse(cx, bottom - 154, 9, 6, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Eyes (glowing amber warning eyes during telegraph)
   ctx.fillStyle = telegraph ? '#ffaa33' : '#1b130e';
   ctx.beginPath();
   ctx.arc(cx - 15, bottom - 170, telegraph ? 6 : 4.5, 0, Math.PI * 2);
@@ -338,8 +445,8 @@ export function copyCanvasRegionToFlippedRgba(
 /**
  * Generates the dedicated 2.5D animated character sprite atlas (`2048x1024`, 8x4 cells of 256x256)
  * backed by `THREE.DataTexture` (preserving dilated `alpha === 0` RGB edges without Canvas2D
- * premultiplication loss), drawing immediate procedural fallbacks and upgrading the child strip
- * asynchronously once `childSprites.png` decodes.
+ * premultiplication loss), drawing immediate procedural fallbacks and upgrading each strip in
+ * `CHARACTER_SPRITE_STRIPS` asynchronously once decoded.
  */
 export function createCharacterSpriteAtlasTexture(gfx: GraphicsUtils): THREE.Texture {
   if (typeof document === 'undefined') {
@@ -373,12 +480,15 @@ export function createCharacterSpriteAtlasTexture(gfx: GraphicsUtils): THREE.Tex
 
   ctx.clearRect(0, 0, CHARACTER_ATLAS_WIDTH, CHARACTER_ATLAS_HEIGHT);
 
-  drawCharacterChildFallback(ctx, 0 * CHARACTER_CELL_SIZE, 0 * CHARACTER_CELL_SIZE, 'idle_0');
-  drawCharacterChildFallback(ctx, 1 * CHARACTER_CELL_SIZE, 0 * CHARACTER_CELL_SIZE, 'idle_1');
-  drawCharacterChildFallback(ctx, 2 * CHARACTER_CELL_SIZE, 0 * CHARACTER_CELL_SIZE, 'crouch');
-  drawCharacterChildFallback(ctx, 3 * CHARACTER_CELL_SIZE, 0 * CHARACTER_CELL_SIZE, 'jump');
-  drawCharacterBearFallback(ctx, 0 * CHARACTER_CELL_SIZE, 1 * CHARACTER_CELL_SIZE, false);
-  drawCharacterBearFallback(ctx, 1 * CHARACTER_CELL_SIZE, 1 * CHARACTER_CELL_SIZE, true);
+  for (const strip of CHARACTER_SPRITE_STRIPS) {
+    strip.drawFallback?.(
+      ctx,
+      strip.col * CHARACTER_CELL_SIZE,
+      strip.row * CHARACTER_CELL_SIZE,
+    );
+  }
+  drawCharacterBearFallback(ctx, 0 * CHARACTER_CELL_SIZE, 2 * CHARACTER_CELL_SIZE, false);
+  drawCharacterBearFallback(ctx, 1 * CHARACTER_CELL_SIZE, 2 * CHARACTER_CELL_SIZE, true);
 
   const imgData = ctx.getImageData(0, 0, CHARACTER_ATLAS_WIDTH, CHARACTER_ATLAS_HEIGHT);
   dilateAtlasEdges(imgData.data, CHARACTER_ATLAS_WIDTH, CHARACTER_ATLAS_HEIGHT, 6);
@@ -417,42 +527,46 @@ export function createCharacterSpriteAtlasTexture(gfx: GraphicsUtils): THREE.Tex
   });
 
   if (typeof Image !== 'undefined') {
-    const img = new Image();
-    img.decoding = 'async';
-    img.onload = () => {
-      if (disposed) return;
-      const srcW = img.naturalWidth || img.width;
-      const srcH = img.naturalHeight || img.height;
-      if (srcW !== 1024 || srcH !== 256) {
-        return;
-      }
+    for (const strip of CHARACTER_SPRITE_STRIPS) {
+      const expectedW = strip.frameCount * CHARACTER_CELL_SIZE;
+      const expectedH = CHARACTER_CELL_SIZE;
+      const img = new Image();
+      img.decoding = 'async';
+      img.onload = () => {
+        if (disposed) return;
+        const srcW = img.naturalWidth || img.width;
+        const srcH = img.naturalHeight || img.height;
+        if (srcW !== expectedW || srcH !== expectedH) {
+          return;
+        }
 
-      const stripCanvas = document.createElement('canvas');
-      stripCanvas.width = 1024;
-      stripCanvas.height = 256;
-      const stripCtx = stripCanvas.getContext('2d');
-      if (!stripCtx) return;
+        const stripCanvas = document.createElement('canvas');
+        stripCanvas.width = expectedW;
+        stripCanvas.height = expectedH;
+        const stripCtx = stripCanvas.getContext('2d');
+        if (!stripCtx) return;
 
-      stripCtx.clearRect(0, 0, 1024, 256);
-      stripCtx.drawImage(img, 0, 0, 1024, 256);
-      const topStrip = stripCtx.getImageData(0, 0, 1024, 256);
-      dilateAtlasEdges(topStrip.data, 1024, 256, 6);
-      copyCanvasRegionToFlippedRgba(
-        topStrip.data,
-        1024,
-        256,
-        atlasPixels,
-        CHARACTER_ATLAS_WIDTH,
-        CHARACTER_ATLAS_HEIGHT,
-        0,
-        0,
-      );
-      texture.needsUpdate = true;
-    };
-    img.onerror = () => {
-      // Keep procedural child fallbacks silently if image decode fails.
-    };
-    img.src = childSpritesUrl;
+        stripCtx.clearRect(0, 0, expectedW, expectedH);
+        stripCtx.drawImage(img, 0, 0, expectedW, expectedH);
+        const stripData = stripCtx.getImageData(0, 0, expectedW, expectedH);
+        dilateAtlasEdges(stripData.data, expectedW, expectedH, 6);
+        copyCanvasRegionToFlippedRgba(
+          stripData.data,
+          expectedW,
+          expectedH,
+          atlasPixels,
+          CHARACTER_ATLAS_WIDTH,
+          CHARACTER_ATLAS_HEIGHT,
+          strip.col * CHARACTER_CELL_SIZE,
+          strip.row * CHARACTER_CELL_SIZE,
+        );
+        texture.needsUpdate = true;
+      };
+      img.onerror = () => {
+        // Keep procedural fallback silently if image decode fails.
+      };
+      img.src = strip.url;
+    }
   }
 
   return texture;
