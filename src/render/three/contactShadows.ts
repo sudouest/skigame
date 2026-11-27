@@ -1,7 +1,17 @@
 import * as THREE from 'three';
+import { getSkierDef } from '../../content/characters';
 import { getCreatureDef } from '../../content/creatures';
 import { getDeliveryZoneDef } from '../../content/deliveryZones';
 import { getHazardDef } from '../../content/hazards';
+import {
+  CHARACTER_SCALE_TUNING,
+  extractVisualScale,
+  resolveChildScaleMultiplier,
+  resolveChildSlotSpreadMultiplier,
+  resolveCreatureScaleMultiplier,
+  resolveSkierVisualScale,
+  type CharacterScaleTuning,
+} from '../../content/visibilityTuning';
 import { clamp, lerp } from '../../core/math';
 import {
   createMountainSampleOut,
@@ -11,6 +21,7 @@ import {
 import { CHILD_SHADOW_RADIUS_M } from './characterSpriteAtlas';
 import type { GraphicsUtils } from './graphicsUtils';
 import {
+  CHILD_SLOT_SPREAD_M,
   computeDeliveryChildPosition,
   computeDeliveryZoneHash,
   createBillboardAnimPose,
@@ -80,10 +91,15 @@ export class ContactShadows {
   private readonly presentCacheNx = new Float32Array(MAX_SHADOWS);
   private readonly presentCacheNy = new Float32Array(MAX_SHADOWS);
   private readonly presentCacheNz = new Float32Array(MAX_SHADOWS);
+  private readonly scaleTuning: CharacterScaleTuning;
   private lastMountainField: MountainFieldView | null = null;
   private activeCount = 0;
 
-  constructor(gfx: GraphicsUtils) {
+  constructor(
+    gfx: GraphicsUtils,
+    scaleTuning: CharacterScaleTuning = CHARACTER_SCALE_TUNING,
+  ) {
+    this.scaleTuning = scaleTuning;
     this.shadowTexture = createShadowBlobTexture(gfx);
 
     const planeGeo = new THREE.PlaneGeometry(2, 2);
@@ -199,6 +215,10 @@ diffuseColor.a *= vShadowAlpha;`,
     const skY = lerp(prevS.posY, currS.posY, t);
     const skZ = lerp(prevS.posZ, currS.posZ, t);
     const skGroundY = lerp(prevS.groundY, currS.groundY, t);
+    const skierVisualScale = resolveSkierVisualScale(
+      extractVisualScale(getSkierDef(simState.skierId)?.visual),
+      this.scaleTuning,
+    );
     this.pushShadow(
       skX,
       skGroundY,
@@ -206,7 +226,7 @@ diffuseColor.a *= vShadowAlpha;`,
       currS.normalX,
       currS.normalY,
       currS.normalZ,
-      0.95,
+      0.95 * skierVisualScale,
       skY - skGroundY,
       0.32,
     );
@@ -232,6 +252,7 @@ diffuseColor.a *= vShadowAlpha;`,
     }
 
     // 3. Creatures (interpolated pos + terrain normal + airborne clearance)
+    const creatureScaleMult = resolveCreatureScaleMultiplier(this.scaleTuning);
     const creatures = simState.entities.creatures;
     for (let i = 0; i < creatures.count; i++) {
       if (this.activeCount >= MAX_SHADOWS) break;
@@ -247,7 +268,7 @@ diffuseColor.a *= vShadowAlpha;`,
         creatures.normalX[i]!,
         creatures.normalY[i]!,
         creatures.normalZ[i]!,
-        r * 1.15,
+        r * 1.15 * creatureScaleMult,
         cy - creatures.groundY[i]!,
         0.58,
       );
@@ -256,6 +277,8 @@ diffuseColor.a *= vShadowAlpha;`,
     const mountainField = simState.mountainField;
 
     // 4. DeliveryZone Children (prioritized before static presents; terrain-normal aligned + jump fade)
+    const childScaleMult = resolveChildScaleMultiplier(this.scaleTuning);
+    const childSpreadM = CHILD_SLOT_SPREAD_M * resolveChildSlotSpreadMultiplier(this.scaleTuning);
     const zones = simState.entities.deliveryZones;
     for (let i = 0; i < zones.count; i++) {
       if (this.activeCount >= MAX_SHADOWS) break;
@@ -282,6 +305,7 @@ diffuseColor.a *= vShadowAlpha;`,
           childCount,
           mountainField,
           _childPosScratch,
+          childSpreadM,
         );
         const variant = resolveChildVariant(zoneDef, c, zoneHash);
         evaluateChildAnimPose(simState.elapsedSec, celebTimer, c, _childPoseScratch, false, variant);
@@ -305,8 +329,8 @@ diffuseColor.a *= vShadowAlpha;`,
           nx,
           ny,
           nz,
-          CHILD_SHADOW_RADIUS_M * childScale,
-          _childPoseScratch.offsetY * 2.2,
+          CHILD_SHADOW_RADIUS_M * childScale * childScaleMult,
+          _childPoseScratch.offsetY * childScaleMult * 2.2,
           0.52,
         );
       }

@@ -1,4 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import {
+  BASE_CHILD_SLOT_SPREAD_M,
+  CAMERA_FRAMING_TUNING,
+  CHARACTER_SCALE_TUNING,
+  LEGACY_CAMERA_FRAMING_TUNING,
+  resolveChildSlotSpreadMultiplier,
+} from '../../content/visibilityTuning';
+import { getDeliveryZoneDef } from '../../content/deliveryZones';
 import { FIXED_DT } from '../../core/fixedLoop';
 import { CameraRig } from '../cameraRig';
 import { createMutablePlayerIntent, createSpineFrameOut, createSurfaceSample } from '../contracts';
@@ -985,6 +993,133 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
       prevCamYaw = cy;
     }
     expect(maxWalkYawJump).toBeLessThan(0.12);
+
+    // 1b. Parametric CameraRig framing brings chase camera closer by default and reverts when disabled
+    const tightRig = new CameraRig(CAMERA_FRAMING_TUNING);
+    const legacyRig = new CameraRig({ ...CAMERA_FRAMING_TUNING, enabled: false });
+    const zeroSkier = { ...baseState.currSkier, speed: 12 };
+    const fastSkier = { ...baseState.currSkier, speed: 36 };
+    tightRig.reset(zeroSkier, surface, surfaceQuery);
+    legacyRig.reset(zeroSkier, surface, surfaceQuery);
+    const tightDist0 = Math.hypot(
+      tightRig.currCamera.posX - zeroSkier.posX,
+      tightRig.currCamera.posZ - zeroSkier.posZ,
+    );
+    const legacyDist0 = Math.hypot(
+      legacyRig.currCamera.posX - zeroSkier.posX,
+      legacyRig.currCamera.posZ - zeroSkier.posZ,
+    );
+    expect(tightDist0).toBeCloseTo(CAMERA_FRAMING_TUNING.resetTrailDistM, 3);
+    expect(legacyDist0).toBeCloseTo(LEGACY_CAMERA_FRAMING_TUNING.resetTrailDistM, 3);
+    expect(tightDist0).toBeLessThan(legacyDist0);
+    expect(tightRig.currCamera.posY).toBeLessThan(legacyRig.currCamera.posY);
+    const tightLook0 = Math.hypot(
+      tightRig.currCamera.lookAtX - zeroSkier.posX,
+      tightRig.currCamera.lookAtZ - zeroSkier.posZ,
+    );
+    const legacyLook0 = Math.hypot(
+      legacyRig.currCamera.lookAtX - zeroSkier.posX,
+      legacyRig.currCamera.lookAtZ - zeroSkier.posZ,
+    );
+    expect(tightLook0).toBeCloseTo(CAMERA_FRAMING_TUNING.lookAheadM, 3);
+    expect(legacyLook0).toBeCloseTo(LEGACY_CAMERA_FRAMING_TUNING.lookAheadM, 3);
+
+    for (let i = 0; i < 120; i++) {
+      tightRig.capturePrevious();
+      legacyRig.capturePrevious();
+      tightRig.update(FIXED_DT, fastSkier, surface, surfaceQuery);
+      legacyRig.update(FIXED_DT, fastSkier, surface, surfaceQuery);
+    }
+    const tightSteadyDist = Math.hypot(
+      tightRig.currCamera.posX - fastSkier.posX,
+      tightRig.currCamera.posZ - fastSkier.posZ,
+    );
+    const legacySteadyDist = Math.hypot(
+      legacyRig.currCamera.posX - fastSkier.posX,
+      legacyRig.currCamera.posZ - fastSkier.posZ,
+    );
+    expect(tightSteadyDist).toBeLessThan(legacySteadyDist);
+    expect(tightRig.currCamera.posY).toBeLessThan(legacyRig.currCamera.posY);
+    expect(tightRig.currCamera.speedFovBoostDeg).toBeCloseTo(
+      CAMERA_FRAMING_TUNING.maxSpeedFovBoostDeg,
+      1,
+    );
+    expect(legacyRig.currCamera.speedFovBoostDeg).toBeCloseTo(
+      LEGACY_CAMERA_FRAMING_TUNING.maxSpeedFovBoostDeg,
+      1,
+    );
+
+    // 1c. SkiSimulationOptions.cameraFraming forwards DI framing cleanly
+    const legacySim = new SkiSimulation({
+      seed: 22,
+      startStageId: 'sunny-blue',
+      cameraFraming: { ...CAMERA_FRAMING_TUNING, enabled: false },
+    });
+    const lsState = legacySim.getState();
+    const lsDist = Math.hypot(
+      lsState.currCamera.posX - lsState.currSkier.posX,
+      lsState.currCamera.posZ - lsState.currSkier.posZ,
+    );
+    expect(lsDist).toBeCloseTo(LEGACY_CAMERA_FRAMING_TUNING.resetTrailDistM, 3);
+    legacySim.dispose();
+
+    // 1d. Village plaza children stay outside cabin OBB colliders across both wide and narrow stages
+    const effectiveSpread =
+      BASE_CHILD_SLOT_SPREAD_M * resolveChildSlotSpreadMultiplier(CHARACTER_SCALE_TUNING);
+    let checkedPlazas = 0;
+    for (const stageId of ['powder-bowl', 'icy-black'] as const) {
+      for (let sSeed = 1; sSeed <= 20; sSeed++) {
+        const plazaSim = new SkiSimulation({ seed: sSeed, startStageId: stageId });
+        const ps = plazaSim.getState();
+        const zones = ps.entities.deliveryZones;
+        const structs = ps.entities.structures;
+        for (let zi = 0; zi < zones.count; zi++) {
+          if (zones.defIds[zi] !== 'village_plaza') continue;
+          const zx = zones.posX[zi]!;
+          const zz = zones.posZ[zi]!;
+          const zYaw = zones.yawRad[zi]!;
+          const segId = zones.segmentIds[zi]!;
+          let bestSi = -1;
+          let bestD2 = Infinity;
+          for (let si = 0; si < structs.count; si++) {
+            if (structs.segmentIds[si] !== segId) continue;
+            const d2 = (structs.posX[si]! - zx) ** 2 + (structs.posZ[si]! - zz) ** 2;
+            if (d2 < bestD2) {
+              bestD2 = d2;
+              bestSi = si;
+            }
+          }
+          expect(bestSi).toBeGreaterThanOrEqual(0);
+          const sx = structs.posX[bestSi]!;
+          const sz = structs.posZ[bestSi]!;
+          const sYaw = structs.yawRad[bestSi]!;
+          const hw = structs.halfWidth[bestSi]!;
+          const hd = structs.halfDepth[bestSi]!;
+          const cosY = Math.cos(sYaw);
+          const sinY = Math.sin(sYaw);
+          const childCount = getDeliveryZoneDef('village_plaza')?.childVisuals.length ?? 3;
+          for (let c = 0; c < childCount; c++) {
+            const spread = (c - (childCount - 1) * 0.5) * effectiveSpread;
+            const cx = zx + Math.cos(zYaw) * spread;
+            const cz = zz - Math.sin(zYaw) * spread;
+            const dx = cx - sx;
+            const dz = cz - sz;
+            const lx = dx * cosY - dz * sinY;
+            const lz = dx * sinY + dz * cosY;
+            const qx = Math.abs(lx) - hw;
+            const qz = Math.abs(lz) - hd;
+            const signedDist =
+              Math.hypot(Math.max(qx, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qz), 0);
+            expect(signedDist).toBeGreaterThan(0.3);
+          }
+          checkedPlazas++;
+        }
+        plazaSim.dispose();
+        if (checkedPlazas >= 4) break;
+      }
+    }
+    expect(checkedPlazas).toBeGreaterThanOrEqual(2);
+
     sim.dispose();
 
     // 2. Deep chasm trap still triggers chasm_fall wipeout even if currSkier.walking === true

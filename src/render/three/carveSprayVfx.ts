@@ -1,4 +1,9 @@
 import * as THREE from 'three';
+import {
+  CHARACTER_SCALE_TUNING,
+  resolveSkierVisualScale,
+  type CharacterScaleTuning,
+} from '../../content/visibilityTuning';
 import { clamp } from '../../core/math';
 import type { SkierPose, SurfaceType } from '../../sim/contracts';
 import type { GraphicsUtils } from './graphicsUtils';
@@ -98,6 +103,7 @@ export class CarveSprayVfx {
 
   private readonly alphas = new Float32Array(MAX_CARVE_SPRAY_PARTICLES);
   private readonly alphaAttr: THREE.InstancedBufferAttribute;
+  private readonly scaleTuning: CharacterScaleTuning;
 
   private activeCount = 0;
   private emitAccum = 0;
@@ -105,8 +111,13 @@ export class CarveSprayVfx {
   private hasPrevPose = false;
   private rngState = 0x9e3779b9;
 
-  constructor(gfx: GraphicsUtils, scene: THREE.Scene) {
+  constructor(
+    gfx: GraphicsUtils,
+    scene: THREE.Scene,
+    scaleTuning: CharacterScaleTuning = CHARACTER_SCALE_TUNING,
+  ) {
     this.gfx = gfx;
+    this.scaleTuning = scaleTuning;
     this.puffTexture = createPuffTexture(gfx);
 
     const quadGeo = new THREE.PlaneGeometry(1, 1);
@@ -316,9 +327,14 @@ diffuseColor.a *= vParticleAlpha;`,
     surfaceType: SurfaceType,
     blizzardDim = 0,
     camera?: THREE.Camera,
+    skierVisualScale?: number,
   ): void {
     const safeDt = Math.min(0.1, Math.max(0, dt));
     const dim = 1 - clamp(blizzardDim, 0, 1) * 0.35;
+    const scale =
+      skierVisualScale !== undefined && Number.isFinite(skierVisualScale) && skierVisualScale > 0
+        ? skierVisualScale
+        : resolveSkierVisualScale(1.0, this.scaleTuning);
 
     const fwdX = -Math.sin(skierPose.headingRad);
     const fwdZ = -Math.cos(skierPose.headingRad);
@@ -347,12 +363,13 @@ diffuseColor.a *= vParticleAlpha;`,
         const fwdSin = Math.sin(angle);
         const latSpeed = this.nextRange(2.4, 5.4) * impactBoost;
         this.fillSurfaceStyle(surfaceType, dim);
-        const edgeSide = sideCos >= 0 ? 0.24 : -0.24;
+        const edgeSide = (sideCos >= 0 ? 0.24 : -0.24) * scale;
+        const fwdOffset = fwdSin * 0.25 * scale;
 
         this.spawnParticle(
-          skierPose.posX + rx * edgeSide + fwdX * fwdSin * 0.25,
+          skierPose.posX + rx * edgeSide + fwdX * fwdOffset,
           skierPose.posY + 0.12 + ry * edgeSide,
-          skierPose.posZ + rz * edgeSide + fwdZ * fwdSin * 0.25,
+          skierPose.posZ + rz * edgeSide + fwdZ * fwdOffset,
           skierPose.velX * 0.2 + rx * sideCos * latSpeed + fwdX * fwdSin * latSpeed * 0.6,
           skierPose.velY * 0.1 + ny * this.nextRange(1.8, 4.0) * impactBoost,
           skierPose.velZ * 0.2 + rz * sideCos * latSpeed + fwdZ * fwdSin * latSpeed * 0.6,
@@ -392,8 +409,8 @@ diffuseColor.a *= vParticleAlpha;`,
             outSign = skierPose.carveAngleRad >= 0 ? -1 : 1;
           }
 
-          const skiOffset = outSign * (0.24 + this.nextRange(0.0, 0.14));
-          const tailOffset = this.nextRange(-0.15, 0.55);
+          const skiOffset = outSign * (0.24 + this.nextRange(0.0, 0.14)) * scale;
+          const tailOffset = this.nextRange(-0.15, 0.55) * scale;
           const outwardSpeed =
             (2.2 + clamp(intensity * 0.14, 0, 6.0)) * this.nextRange(0.75, 1.25);
           const loftSpeed =

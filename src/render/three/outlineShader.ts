@@ -1,4 +1,9 @@
 import * as THREE from 'three';
+import {
+  computePortraitAspectFactor,
+  OUTLINE_VISIBILITY_TUNING,
+  type OutlineVisibilityTuning,
+} from '../../content/visibilityTuning';
 import type { GraphicsUtils } from './graphicsUtils';
 
 export interface OutlineMaterialOptions {
@@ -93,6 +98,59 @@ void main() {
 `,
   });
 
+  material.userData.baseOutlineWidth = outlineWidth;
+  material.userData.baseMinClipOffset = minClipOffset;
+  material.userData.baseMaxClipOffset = maxClipOffset;
+
   gfx.markAsCache(material, 'SmoothNormalInvertedHullOutline');
   return material;
+}
+
+/**
+ * Scales smooth-normal outline uniforms idempotently from stored base values so
+ * 3D silhouettes stay crisp on narrow portrait mobile screens without compounding on resize.
+ */
+export function syncOutlineMaterialForAspect(
+  material: THREE.ShaderMaterial,
+  aspect: number,
+  tuning: OutlineVisibilityTuning = OUTLINE_VISIBILITY_TUNING,
+): number {
+  const rawBaseWidth = material.userData.baseOutlineWidth;
+  const rawBaseMin = material.userData.baseMinClipOffset;
+  const rawBaseMax = material.userData.baseMaxClipOffset;
+  const baseWidth =
+    typeof rawBaseWidth === 'number' && Number.isFinite(rawBaseWidth) ? rawBaseWidth : 0.045;
+  const baseMin =
+    typeof rawBaseMin === 'number' && Number.isFinite(rawBaseMin) ? rawBaseMin : 0.0025;
+  const baseMax =
+    typeof rawBaseMax === 'number' && Number.isFinite(rawBaseMax) ? rawBaseMax : 0.016;
+
+  let scale = 1.0;
+  let nextMin = baseMin;
+  let nextMax = Math.max(baseMin, baseMax);
+
+  if (tuning.enabled) {
+    const baseWScale = Number.isFinite(tuning.baseWidthScale)
+      ? Math.max(0.1, tuning.baseWidthScale)
+      : 1.0;
+    const portraitBoost = Number.isFinite(tuning.portraitBoostScale)
+      ? Math.max(0, tuning.portraitBoostScale)
+      : 0.45;
+    scale = Math.max(0.1, baseWScale + portraitBoost * computePortraitAspectFactor(aspect));
+    const ceiling =
+      Number.isFinite(tuning.maxClipOffsetCeiling) && tuning.maxClipOffsetCeiling > 0
+        ? tuning.maxClipOffsetCeiling
+        : 0.024;
+    nextMin = Math.min(ceiling, baseMin * scale);
+    nextMax = Math.max(nextMin, Math.min(ceiling, baseMax * scale));
+  }
+
+  const uWidth = material.uniforms.uOutlineWidth;
+  const uMin = material.uniforms.uMinClipOffset;
+  const uMax = material.uniforms.uMaxClipOffset;
+  if (uWidth) uWidth.value = baseWidth * scale;
+  if (uMin) uMin.value = nextMin;
+  if (uMax) uMax.value = nextMax;
+
+  return scale;
 }

@@ -1,4 +1,9 @@
 import * as THREE from 'three';
+import {
+  DEFAULT_VISIBILITY_TUNING,
+  resolveActiveCameraFraming,
+  type VisibilityTuning,
+} from '../../content/visibilityTuning';
 import type { EventBus, Unsubscribe } from '../../core/eventBus';
 import type { Profiler } from '../../core/profiler';
 import type { ReadonlySimState, SimEvents } from '../../sim/contracts';
@@ -21,7 +26,7 @@ import { GraphicsUtils } from './graphicsUtils';
 import { InstancePools } from './instancePools';
 import { LandmarkStreamer } from './landmarkStreamer';
 import { createProceduralMeshAssets } from './meshFactory';
-import { createSmoothOutlineMaterial } from './outlineShader';
+import { createSmoothOutlineMaterial, syncOutlineMaterialForAspect } from './outlineShader';
 import { SceneryCellStreamer } from './sceneryCellStreamer';
 import { SkierRig } from './skierRig';
 import { SkiTracks } from './skiTracks';
@@ -70,6 +75,10 @@ const LIGHT_UP_X = LIGHT_BACK_Y * LIGHT_RIGHT_Z - LIGHT_BACK_Z * LIGHT_RIGHT_Y;
 const LIGHT_UP_Y = LIGHT_BACK_Z * LIGHT_RIGHT_X - LIGHT_BACK_X * LIGHT_RIGHT_Z;
 const LIGHT_UP_Z = LIGHT_BACK_X * LIGHT_RIGHT_Y - LIGHT_BACK_Y * LIGHT_RIGHT_X;
 
+export function sanitizeViewportDim(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value > 0 ? Math.max(1, value) : fallback;
+}
+
 export interface ThreeRendererOptions {
   readonly maxPixelRatio?: number;
   readonly initialWidth?: number;
@@ -78,6 +87,13 @@ export interface ThreeRendererOptions {
   readonly nowSec?: () => number;
   readonly nowMs?: () => number;
   readonly assetWaiter?: (modelId: string) => Promise<void> | null;
+  /**
+   * Optional visibility tuning bundle for rendering subsystems (`portraitFov`, `characterScale`,
+   * `outline`). Note: `SkiSimulationOptions.cameraFraming` is authoritative for `CameraRig` in
+   * simulation; `ThreeRenderer` only reads `visibilityTuning.cameraFraming` for initial
+   * pre-`sync()` camera setup.
+   */
+  readonly visibilityTuning?: VisibilityTuning;
 }
 
 export interface ThreeRendererStats {
@@ -133,10 +149,11 @@ export class ThreeRenderer {
   private readonly debugOverlay: DebugOverlay3D;
 
   private readonly unsubscribers: Unsubscribe[] = [];
+  private readonly visibilityTuning: VisibilityTuning;
   private viewportWidth: number;
   private viewportHeight: number;
   private aspect: number;
-  private lastMinHFovDeg = 66;
+  private lastMinHFovDeg: number;
   private lastSpeedFovBoostDeg = 0;
   private lastRebaseCount = 0;
   private lastOriginOffsetX = 0;
@@ -167,16 +184,25 @@ export class ThreeRenderer {
     this.profiler = profiler;
     this.nowMs = options.nowMs ?? (() => performance.now());
     this.maxPixelRatio = options.maxPixelRatio ?? 2;
+    this.visibilityTuning = options.visibilityTuning ?? DEFAULT_VISIBILITY_TUNING;
+    this.lastMinHFovDeg = resolveActiveCameraFraming(
+      this.visibilityTuning.cameraFraming,
+    ).minHorizontalFovDeg;
 
-    this.viewportWidth = Math.max(1, options.initialWidth ?? container?.clientWidth ?? 1280);
-    this.viewportHeight = Math.max(1, options.initialHeight ?? container?.clientHeight ?? 720);
+    this.viewportWidth = sanitizeViewportDim(options.initialWidth ?? container?.clientWidth, 1280);
+    this.viewportHeight = sanitizeViewportDim(options.initialHeight ?? container?.clientHeight, 720);
     this.aspect = this.viewportWidth / this.viewportHeight;
 
     this.tracker = new GraphicsTracker({ nowSec: options.nowSec });
     this.gfx = new GraphicsUtils(this.tracker);
     this.scene = new THREE.Scene();
 
-    const initialVfov = computeVerticalFovDeg(this.lastMinHFovDeg, 0, this.aspect);
+    const initialVfov = computeVerticalFovDeg(
+      this.lastMinHFovDeg,
+      0,
+      this.aspect,
+      this.visibilityTuning.portraitFov,
+    );
     this.camera = new THREE.PerspectiveCamera(initialVfov, this.aspect, CAMERA_NEAR_M, CAMERA_FAR_M);
 
     const canCreateWebGL =
@@ -236,6 +262,11 @@ export class ThreeRenderer {
     // Shared Materials & Assets
     this.sharedMaterials = createSharedToonMaterials(this.gfx);
     this.outlineMaterial = createSmoothOutlineMaterial(this.gfx);
+    syncOutlineMaterialForAspect(
+      this.outlineMaterial,
+      this.aspect,
+      this.visibilityTuning.outline,
+    );
     this.billboardAtlas = createCartoonSpriteAtlasTexture(this.gfx);
     this.billboardMaterial = createCylindricalBillboardMaterial(
       this.gfx,
@@ -281,10 +312,17 @@ export class ThreeRenderer {
       billboardQuadGeo,
       meshAssets,
       this.characterBillboardMaterial,
+      this.visibilityTuning.characterScale,
     );
     this.scene.add(this.instancePools.rootGroup);
 
-    this.skierRig = new SkierRig(this.gfx, this.sharedMaterials, this.outlineMaterial);
+    this.skierRig = new SkierRig(
+      this.gfx,
+      this.sharedMaterials,
+      this.outlineMaterial,
+      'skier_alpine',
+      this.visibilityTuning.characterScale,
+    );
     this.scene.add(this.skierRig.rootGroup);
 
     this.backpackStack = new BackpackStack(
@@ -297,10 +335,13 @@ export class ThreeRenderer {
     this.tossedPresents = new TossedPresents(this.gfx, this.sharedMaterials, meshAssets);
     this.scene.add(this.tossedPresents.rootGroup);
 
-    this.contactShadows = new ContactShadows(this.gfx);
+    this.contactShadows = new ContactShadows(
+      this.gfx,
+      this.visibilityTuning.characterScale,
+    );
     this.scene.add(this.contactShadows.instancedMesh);
 
-    this.skiTracks = new SkiTracks(this.gfx);
+    this.skiTracks = new SkiTracks(this.gfx, 512, this.visibilityTuning.characterScale);
     this.scene.add(this.skiTracks.mesh);
 
     this.snowVfx = new SnowVfx(
@@ -312,7 +353,11 @@ export class ThreeRenderer {
     );
 
     this.skyDome = new SkyDome(this.gfx, this.scene);
-    this.carveSprayVfx = new CarveSprayVfx(this.gfx, this.scene);
+    this.carveSprayVfx = new CarveSprayVfx(
+      this.gfx,
+      this.scene,
+      this.visibilityTuning.characterScale,
+    );
 
     this.debugOverlay = new DebugOverlay3D(this.gfx);
     this.scene.add(this.debugOverlay.rootGroup);
@@ -363,8 +408,8 @@ export class ThreeRenderer {
 
   resize(width: number, height: number): void {
     if (this.disposed) return;
-    this.viewportWidth = Math.max(1, width);
-    this.viewportHeight = Math.max(1, height);
+    this.viewportWidth = sanitizeViewportDim(width, this.viewportWidth);
+    this.viewportHeight = sanitizeViewportDim(height, this.viewportHeight);
     this.aspect = this.viewportWidth / this.viewportHeight;
 
     this.camera.aspect = this.aspect;
@@ -372,8 +417,14 @@ export class ThreeRenderer {
       this.lastMinHFovDeg,
       this.lastSpeedFovBoostDeg,
       this.aspect,
+      this.visibilityTuning.portraitFov,
     );
     this.camera.updateProjectionMatrix();
+    syncOutlineMaterialForAspect(
+      this.outlineMaterial,
+      this.aspect,
+      this.visibilityTuning.outline,
+    );
 
     if (this.renderer) {
       const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
@@ -441,6 +492,7 @@ export class ThreeRenderer {
       simState.currCamera,
       alpha,
       this.aspect,
+      this.visibilityTuning.portraitFov,
     );
 
     const camDx = simState.currCamera.lookAtX - simState.currCamera.posX;
@@ -482,6 +534,7 @@ export class ThreeRenderer {
       simState.surfaceSample.surfaceType,
       this.sharedMaterials.sharedUniforms.uBlizzardDim.value,
       this.camera,
+      this.skierRig.visualScale,
     );
     this.debugOverlay.sync(simState);
 

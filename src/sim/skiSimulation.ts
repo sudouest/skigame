@@ -9,6 +9,7 @@ import { getHazardDef } from '../content/hazards';
 import { getPresentDef } from '../content/presents';
 import { WEATHER_BLIZZARD } from '../content/stages';
 import type { SkierDef, WeatherProfile } from '../content/types';
+import type { CameraFramingTuning } from '../content/visibilityTuning';
 import { CameraRig } from './cameraRig';
 import {
   createSpineFrameOut,
@@ -65,6 +66,8 @@ export interface SkiSimulationOptions {
   readonly physicsRuntime?: JoltRuntime;
   /** Optional custom Layer B WorldContactSolver override. */
   readonly contactSolver?: WorldContactSolver;
+  /** Optional chase camera framing tuning override. */
+  readonly cameraFraming?: CameraFramingTuning;
 }
 
 interface MutableSimState {
@@ -325,7 +328,7 @@ export class SkiSimulation {
       this.ownsContactSolver = true;
     }
     this.creatureSystem = new CreatureSystem();
-    this.cameraRig = new CameraRig();
+    this.cameraRig = new CameraRig(options.cameraFraming);
     this.debugDrawBuffer = new DebugDrawBuffer();
     this.debugDrawBuffer.enabled = Boolean(options.debugDrawEnabled);
 

@@ -1,13 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CAMERA_FRAMING_TUNING,
+  CHARACTER_SCALE_TUNING,
   CREATURES,
   DEFAULT_SCENERY_TIER_RULES,
+  DEFAULT_VISIBILITY_TUNING,
   DELIVERY_ZONES,
   HAZARDS,
+  LEGACY_CAMERA_FRAMING_TUNING,
+  OUTLINE_VISIBILITY_TUNING,
+  PORTRAIT_FOV_TUNING,
   PRESENTS,
   SKIERS,
   STAGES,
   WEATHER_PROFILES,
+  computePortraitAspectFactor,
+  extractVisualScale,
   getAllStages,
   getCreatureDef,
   getDeliveryZoneDef,
@@ -15,6 +23,11 @@ import {
   getPresentDef,
   getSkierDef,
   getStageDef,
+  resolveActiveCameraFraming,
+  resolveChildScaleMultiplier,
+  resolveChildSlotSpreadMultiplier,
+  resolveCreatureScaleMultiplier,
+  resolveSkierVisualScale,
 } from './index';
 
 describe('content registries & invariants', () => {
@@ -185,5 +198,104 @@ describe('content registries & invariants', () => {
     expect(getSkierDef('skier_alpine')).toBeDefined();
     expect(getSkierDef('skier_carver')).toBeDefined();
     expect(Object.keys(SKIERS)).toHaveLength(2);
+  });
+
+  it('exposes parametric visibility tuning defaults, clean enabled=false toggles, and NaN/bounds sanitization', () => {
+    expect(DEFAULT_VISIBILITY_TUNING.portraitFov).toBe(PORTRAIT_FOV_TUNING);
+    expect(DEFAULT_VISIBILITY_TUNING.characterScale).toBe(CHARACTER_SCALE_TUNING);
+    expect(DEFAULT_VISIBILITY_TUNING.cameraFraming).toBe(CAMERA_FRAMING_TUNING);
+    expect(DEFAULT_VISIBILITY_TUNING.outline).toBe(OUTLINE_VISIBILITY_TUNING);
+
+    expect(PORTRAIT_FOV_TUNING.enabled).toBe(true);
+    expect(PORTRAIT_FOV_TUNING.hardMaxVerticalFovDeg).toBeGreaterThanOrEqual(
+      PORTRAIT_FOV_TUNING.maxBaseVerticalFovDeg,
+    );
+
+    expect(resolveSkierVisualScale(1.0, CHARACTER_SCALE_TUNING)).toBeCloseTo(
+      CHARACTER_SCALE_TUNING.skierScale,
+      6,
+    );
+    expect(resolveSkierVisualScale(1.2, { ...CHARACTER_SCALE_TUNING, enabled: false })).toBeCloseTo(
+      1.2,
+      6,
+    );
+    expect(resolveSkierVisualScale(Number.NaN, { ...CHARACTER_SCALE_TUNING, skierScale: -2 })).toBe(
+      1.0,
+    );
+
+    expect(resolveChildScaleMultiplier(CHARACTER_SCALE_TUNING)).toBeCloseTo(
+      CHARACTER_SCALE_TUNING.childScale,
+      6,
+    );
+    expect(resolveChildScaleMultiplier({ ...CHARACTER_SCALE_TUNING, enabled: false })).toBe(1.0);
+    expect(resolveChildScaleMultiplier({ ...CHARACTER_SCALE_TUNING, childScale: Number.NaN })).toBe(
+      1.0,
+    );
+    expect(resolveChildScaleMultiplier({ ...CHARACTER_SCALE_TUNING, childScale: 0 })).toBe(1.0);
+    expect(resolveChildSlotSpreadMultiplier(CHARACTER_SCALE_TUNING)).toBeCloseTo(
+      CHARACTER_SCALE_TUNING.childSlotSpreadScale,
+      6,
+    );
+    expect(resolveChildSlotSpreadMultiplier({ ...CHARACTER_SCALE_TUNING, enabled: false })).toBe(
+      1.0,
+    );
+    expect(
+      resolveChildSlotSpreadMultiplier({ ...CHARACTER_SCALE_TUNING, childSlotSpreadScale: -1 }),
+    ).toBe(1.0);
+    expect(resolveCreatureScaleMultiplier(CHARACTER_SCALE_TUNING)).toBeCloseTo(
+      CHARACTER_SCALE_TUNING.creatureScale,
+      6,
+    );
+    expect(resolveCreatureScaleMultiplier({ ...CHARACTER_SCALE_TUNING, enabled: false })).toBe(1.0);
+    expect(resolveCreatureScaleMultiplier({ ...CHARACTER_SCALE_TUNING, creatureScale: -0.5 })).toBe(
+      1.0,
+    );
+
+    expect(extractVisualScale(undefined)).toBe(1.0);
+    expect(extractVisualScale(getSkierDef('skier_alpine')?.visual)).toBe(1.0);
+    expect(extractVisualScale(getPresentDef('gift_golden')?.visual)).toBe(1.2);
+    expect(
+      extractVisualScale({
+        kind: 'billboard',
+        atlasId: 'a',
+        frame: 'f',
+        width: 2,
+        height: 2,
+      }),
+    ).toBe(1.0);
+
+    expect(resolveActiveCameraFraming(CAMERA_FRAMING_TUNING)).toEqual(CAMERA_FRAMING_TUNING);
+    expect(resolveActiveCameraFraming({ ...CAMERA_FRAMING_TUNING, enabled: false })).toBe(
+      LEGACY_CAMERA_FRAMING_TUNING,
+    );
+    const sanitizedFraming = resolveActiveCameraFraming({
+      ...CAMERA_FRAMING_TUNING,
+      trailDistMinM: 12,
+      trailDistMaxM: 8,
+      resetTrailDistM: 25,
+      baseHeightMinM: 5,
+      baseHeightMaxM: 2,
+      resetBaseHeightM: 0.5,
+      maxSpeedFovBoostDeg: -4,
+      lookAheadM: Number.NaN,
+    });
+    expect(sanitizedFraming.trailDistMaxM).toBeGreaterThanOrEqual(sanitizedFraming.trailDistMinM);
+    expect(sanitizedFraming.resetTrailDistM).toBeGreaterThanOrEqual(sanitizedFraming.trailDistMinM);
+    expect(sanitizedFraming.resetTrailDistM).toBeLessThanOrEqual(sanitizedFraming.trailDistMaxM);
+    expect(sanitizedFraming.baseHeightMaxM).toBeGreaterThanOrEqual(sanitizedFraming.baseHeightMinM);
+    expect(sanitizedFraming.resetBaseHeightM).toBeGreaterThanOrEqual(
+      sanitizedFraming.baseHeightMinM,
+    );
+    expect(sanitizedFraming.resetBaseHeightM).toBeLessThanOrEqual(sanitizedFraming.baseHeightMaxM);
+    expect(sanitizedFraming.maxSpeedFovBoostDeg).toBe(
+      CAMERA_FRAMING_TUNING.maxSpeedFovBoostDeg,
+    );
+    expect(sanitizedFraming.lookAheadM).toBe(CAMERA_FRAMING_TUNING.lookAheadM);
+
+    expect(computePortraitAspectFactor(16 / 9)).toBe(0);
+    expect(computePortraitAspectFactor(1.0)).toBe(0);
+    expect(computePortraitAspectFactor(9 / 16)).toBeGreaterThan(0.7);
+    expect(computePortraitAspectFactor(9 / 20)).toBe(1.0);
+    expect(computePortraitAspectFactor(Number.NaN)).toBe(0);
   });
 });

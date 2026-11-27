@@ -1,4 +1,5 @@
 import type { DeliveryZoneDef, VisualSpec } from '../../content/types';
+import { BASE_CHILD_SLOT_SPREAD_M } from '../../content/visibilityTuning';
 import { clamp, lerp } from '../../core/math';
 import { hashCoords2DU32 } from '../../core/rng';
 import {
@@ -13,7 +14,7 @@ import {
   type ChildVariantId,
 } from './characterSpriteAtlas';
 
-export const CHILD_SLOT_SPREAD_M = 1.45;
+export const CHILD_SLOT_SPREAD_M = BASE_CHILD_SLOT_SPREAD_M;
 /** Must match `zones.celebratingTimer` duration set in `src/sim/skiSimulation.ts` (`2.5`). */
 export const CHILD_CELEBRATION_DURATION_SEC = 2.5;
 export const CHILD_CELEBRATION_HOP_COUNT = 3;
@@ -648,9 +649,11 @@ export function computeDeliveryChildPosition(
   childCount: number,
   mountainField: MountainFieldView | undefined,
   outPos: { x: number; y: number; z: number },
+  slotSpreadM = CHILD_SLOT_SPREAD_M,
 ): void {
   const safeYaw = finiteOr(zoneYawRad, 0);
-  const spread = (childIndex - (childCount - 1) * 0.5) * CHILD_SLOT_SPREAD_M;
+  const effectiveSpread = finiteOr(slotSpreadM, CHILD_SLOT_SPREAD_M);
+  const spread = (childIndex - (childCount - 1) * 0.5) * effectiveSpread;
   const x = finiteOr(zonePosX, 0) + Math.cos(safeYaw) * spread;
   const z = finiteOr(zonePosZ, 0) - Math.sin(safeYaw) * spread;
   let y = finiteOr(zonePosY, 0);

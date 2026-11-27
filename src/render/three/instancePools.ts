@@ -3,6 +3,13 @@ import { getCreatureDef } from '../../content/creatures';
 import { getDeliveryZoneDef } from '../../content/deliveryZones';
 import { getHazardDef, getRampDef } from '../../content/hazards';
 import { getStageDef } from '../../content/stages';
+import {
+  CHARACTER_SCALE_TUNING,
+  resolveChildScaleMultiplier,
+  resolveChildSlotSpreadMultiplier,
+  resolveCreatureScaleMultiplier,
+  type CharacterScaleTuning,
+} from '../../content/visibilityTuning';
 import { FIXED_DT } from '../../core/fixedLoop';
 import { clamp, lerp, lerpAngle } from '../../core/math';
 import { hashCoords2DU32 } from '../../core/rng';
@@ -15,6 +22,7 @@ import {
 import type { GraphicsUtils } from './graphicsUtils';
 import type { ProceduralMeshAssets } from './meshFactory';
 import {
+  CHILD_SLOT_SPREAD_M,
   computeDeliveryChildPosition,
   computeDeliveryZoneHash,
   createBillboardAnimPose,
@@ -142,6 +150,7 @@ export class InstancePools {
   private readonly dynamicBillboards: BillboardMeshWrapper;
   private readonly characterBillboards: BillboardMeshWrapper;
   private readonly staticBillboards: BillboardMeshWrapper;
+  private readonly scaleTuning: CharacterScaleTuning;
   private staticPackCount = 0;
   private lastSceneryRevision = -1;
 
@@ -177,7 +186,9 @@ export class InstancePools {
     billboardQuadGeo: THREE.BufferGeometry,
     assets: ProceduralMeshAssets,
     characterBillboardMat?: THREE.Material,
+    scaleTuning: CharacterScaleTuning = CHARACTER_SCALE_TUNING,
   ) {
+    this.scaleTuning = scaleTuning;
     this.rootGroup = new THREE.Group();
     this.rootGroup.name = 'InstancePoolsRoot';
 
@@ -443,6 +454,10 @@ export class InstancePools {
     const camRightX = -camFwdZ;
     const camRightZ = camFwdX;
 
+    const childScaleMult = resolveChildScaleMultiplier(this.scaleTuning);
+    const childSpreadM = CHILD_SLOT_SPREAD_M * resolveChildSlotSpreadMultiplier(this.scaleTuning);
+    const creatureScaleMult = resolveCreatureScaleMultiplier(this.scaleTuning);
+
     let charBbCount = 0;
     const zones = simState.entities.deliveryZones;
     for (let i = 0; i < zones.count; i++) {
@@ -469,21 +484,24 @@ export class InstancePools {
           childCount,
           simState.mountainField,
           _childPosScratch,
+          childSpreadM,
         );
         const childScale = resolveChildVisualScale(zoneDef, c);
         const variant = resolveChildVariant(zoneDef, c, zoneHash);
         const flipX = c % 2 === 1;
         evaluateChildAnimPose(elapsed, celebTimer, c, _childPoseScratch, flipX, variant);
 
+        const finalChildScale = childScale * childScaleMult;
+
         _pos.set(
           _childPosScratch.x,
-          _childPosScratch.y + _childPoseScratch.offsetY,
+          _childPosScratch.y + _childPoseScratch.offsetY * childScaleMult,
           _childPosScratch.z,
         );
         _quat.identity();
         _scale.set(
-          CHILD_SPRITE_BASE_WIDTH_M * childScale * _childPoseScratch.scaleX,
-          CHILD_SPRITE_BASE_HEIGHT_M * childScale * _childPoseScratch.scaleY,
+          CHILD_SPRITE_BASE_WIDTH_M * finalChildScale * _childPoseScratch.scaleX,
+          CHILD_SPRITE_BASE_HEIGHT_M * finalChildScale * _childPoseScratch.scaleY,
           1,
         );
         _mat4.compose(_pos, _quat, _scale);
@@ -533,11 +551,11 @@ export class InstancePools {
         continue;
       }
 
-      _pos.set(cx, cy + _creaturePoseScratch.offsetY, cz);
+      _pos.set(cx, cy + _creaturePoseScratch.offsetY * creatureScaleMult, cz);
       _quat.identity();
       _scale.set(
-        _creatureMetricsScratch.baseWidthM * _creaturePoseScratch.scaleX,
-        _creatureMetricsScratch.baseHeightM * _creaturePoseScratch.scaleY,
+        _creatureMetricsScratch.baseWidthM * creatureScaleMult * _creaturePoseScratch.scaleX,
+        _creatureMetricsScratch.baseHeightM * creatureScaleMult * _creaturePoseScratch.scaleY,
         1,
       );
       _mat4.compose(_pos, _quat, _scale);

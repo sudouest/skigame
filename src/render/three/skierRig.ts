@@ -1,5 +1,11 @@
 import * as THREE from 'three';
 import { getSkierDef } from '../../content/characters';
+import {
+  CHARACTER_SCALE_TUNING,
+  extractVisualScale,
+  resolveSkierVisualScale,
+  type CharacterScaleTuning,
+} from '../../content/visibilityTuning';
 import { clamp, lerp, lerpAngle } from '../../core/math';
 import type { ReadonlySimState } from '../../sim/contracts';
 import type { GraphicsUtils } from './graphicsUtils';
@@ -27,21 +33,25 @@ export class SkierRig {
   private readonly rightArmGroup: THREE.Group;
 
   private activeSkierId = '';
+  private currentVisualScale = 1.0;
   private skiBankRad = 0;
   private walkBlend = 0;
   private readonly gfx: GraphicsUtils;
   private readonly materials: SharedToonMaterials;
   private readonly outlineMat: THREE.Material;
+  private readonly scaleTuning: CharacterScaleTuning;
 
   constructor(
     gfx: GraphicsUtils,
     materials: SharedToonMaterials,
     outlineMat: THREE.Material,
     initialSkierId = 'skier_alpine',
+    scaleTuning: CharacterScaleTuning = CHARACTER_SCALE_TUNING,
   ) {
     this.gfx = gfx;
     this.materials = materials;
     this.outlineMat = outlineMat;
+    this.scaleTuning = scaleTuning;
 
     this.rootGroup = new THREE.Group();
     this.rootGroup.name = 'SkierRoot';
@@ -98,9 +108,18 @@ export class SkierRig {
     this.buildMeshes(initialSkierId);
   }
 
+  get visualScale(): number {
+    return this.currentVisualScale;
+  }
+
   private buildMeshes(skierId: string): void {
     this.activeSkierId = skierId;
     const def = getSkierDef(skierId);
+    this.currentVisualScale = resolveSkierVisualScale(
+      extractVisualScale(def?.visual),
+      this.scaleTuning,
+    );
+    this.rootGroup.scale.setScalar(this.currentVisualScale);
     const palette =
       def?.visual.kind === 'procedural'
         ? def.visual.palette

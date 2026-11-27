@@ -2,11 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
+import {
+  OUTLINE_VISIBILITY_TUNING,
+  PORTRAIT_FOV_TUNING,
+} from '../../../content/visibilityTuning';
 import { degToRad, radToDeg } from '../../../core/math';
 import type { CameraPose } from '../../../sim/contracts';
 import { computeVerticalFovDeg, syncPerspectiveCamera } from '../cameraSync';
 import { GraphicsTracker } from '../graphicsTracker';
 import { GraphicsUtils } from '../graphicsUtils';
+import { createSmoothOutlineMaterial, syncOutlineMaterialForAspect } from '../outlineShader';
 import {
   ALL_TREE_FRAMES,
   ATLAS_COLS,
@@ -24,25 +29,118 @@ import {
 import { createSharedToonMaterials } from '../toonMaterials';
 
 describe('Responsive Camera Sync, Toon Materials, and 2.5D Atlas Dilation', () => {
-  it('computes vertical FOV preserving minHorizontalFovDeg + speedFovBoostDeg on 9:16 portrait screens', () => {
-    const minHFov = 66;
-    const speedBoost = 8;
+  it('caps portrait VFOV smoothly by default while preserving Hor+ framing on landscape and legacy mode when disabled', () => {
+    const minHFov = 72;
+    const speedBoost = 10;
     const portraitAspect = 9 / 16;
+    const tallPhoneAspect = 9 / 19.5;
 
-    const vfovDeg = computeVerticalFovDeg(minHFov, speedBoost, portraitAspect);
-    const effectiveHFovDeg = radToDeg(
-      2 * Math.atan(Math.tan(degToRad(vfovDeg) * 0.5) * portraitAspect),
-    );
+    // 1. Default aspect-aware portrait mode caps wide-angle miniaturization & responds to speed boost
+    const vfovIdle = computeVerticalFovDeg(minHFov, 0, portraitAspect);
+    const vfovFast = computeVerticalFovDeg(minHFov, speedBoost, portraitAspect);
+    const vfovTallPhone = computeVerticalFovDeg(minHFov, 0, tallPhoneAspect);
+    expect(vfovIdle).toBeCloseTo(PORTRAIT_FOV_TUNING.maxBaseVerticalFovDeg, 2);
+    expect(vfovFast).toBeGreaterThan(vfovIdle);
+    expect(vfovFast).toBeLessThanOrEqual(PORTRAIT_FOV_TUNING.hardMaxVerticalFovDeg);
+    expect(vfovTallPhone).toBeCloseTo(PORTRAIT_FOV_TUNING.maxBaseVerticalFovDeg, 2);
 
-    expect(effectiveHFovDeg).toBeCloseTo(minHFov + speedBoost, 2);
-    expect(vfovDeg).toBeGreaterThan(95);
-
+    // 2. Landscape 16:9 stays Hor+ and obeys base minimum vertical FOV
     const landscapeAspect = 16 / 9;
     const landscapeVfov = computeVerticalFovDeg(minHFov, speedBoost, landscapeAspect);
     const landscapeHFov = radToDeg(
       2 * Math.atan(Math.tan(degToRad(landscapeVfov) * 0.5) * landscapeAspect),
     );
     expect(landscapeHFov).toBeGreaterThanOrEqual(minHFov + speedBoost);
+    expect(landscapeVfov).toBeGreaterThanOrEqual(PORTRAIT_FOV_TUNING.baseMinVerticalFovDeg);
+
+    // 3. Disabling portrait FOV cap restores exact legacy Hor+ math
+    const legacyTuning = { ...PORTRAIT_FOV_TUNING, enabled: false };
+    const legacyVfov = computeVerticalFovDeg(66, 8, portraitAspect, legacyTuning);
+    const legacyEffectiveHFov = radToDeg(
+      2 * Math.atan(Math.tan(degToRad(legacyVfov) * 0.5) * portraitAspect),
+    );
+    expect(legacyEffectiveHFov).toBeCloseTo(66 + 8, 2);
+    expect(legacyVfov).toBeGreaterThan(95);
+
+    // 4. Edge-case sanitization: NaN / <= 0 aspect, negative speedBoost, out-of-range clamp bounds
+    expect(computeVerticalFovDeg(72, -10, portraitAspect)).toBeCloseTo(
+      computeVerticalFovDeg(72, 0, portraitAspect),
+      5,
+    );
+    expect(computeVerticalFovDeg(72, -10, 16 / 9)).toBeGreaterThanOrEqual(
+      PORTRAIT_FOV_TUNING.baseMinVerticalFovDeg,
+    );
+    expect(Number.isFinite(computeVerticalFovDeg(72, 0, 0))).toBe(true);
+    expect(Number.isFinite(computeVerticalFovDeg(72, 0, Number.NaN))).toBe(true);
+    const extremeBounds = computeVerticalFovDeg(72, 20, portraitAspect, {
+      ...PORTRAIT_FOV_TUNING,
+      minVerticalFovDeg: -10,
+      hardMaxVerticalFovDeg: 220,
+    });
+    expect(extremeBounds).toBeGreaterThanOrEqual(1);
+    expect(extremeBounds).toBeLessThanOrEqual(175);
+
+    const safeCam = new THREE.PerspectiveCamera(60, 16 / 9, 0.25, 400);
+    const poseZero: CameraPose = {
+      posX: 0,
+      posY: 4,
+      posZ: 10,
+      lookAtX: 0,
+      lookAtY: 1,
+      lookAtZ: -10,
+      rollRad: 0,
+      minHorizontalFovDeg: 72,
+      speedFovBoostDeg: 0,
+    };
+    syncPerspectiveCamera(safeCam, poseZero, poseZero, 1, Number.NaN);
+    expect(Number.isFinite(safeCam.aspect) && safeCam.aspect > 0).toBe(true);
+    expect(Number.isFinite(safeCam.fov)).toBe(true);
+    syncPerspectiveCamera(safeCam, poseZero, poseZero, 1, 0);
+    expect(safeCam.aspect).toBeCloseTo(16 / 9, 5);
+  });
+
+  it('scales smooth-normal outline uniforms idempotently for portrait aspects and resets cleanly when disabled', () => {
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const mat = createSmoothOutlineMaterial(gfx, {
+      outlineWidth: 0.045,
+      minClipOffset: 0.0025,
+      maxClipOffset: 0.016,
+    });
+
+    const landscapeScale = syncOutlineMaterialForAspect(mat, 16 / 9);
+    expect(landscapeScale).toBeCloseTo(1.0, 5);
+    expect(mat.uniforms.uOutlineWidth!.value).toBeCloseTo(0.045, 6);
+    expect(mat.uniforms.uMinClipOffset!.value).toBeCloseTo(0.0025, 6);
+    expect(mat.uniforms.uMaxClipOffset!.value).toBeCloseTo(0.016, 6);
+
+    const portraitScale = syncOutlineMaterialForAspect(mat, 9 / 19.5);
+    expect(portraitScale).toBeGreaterThan(1.3);
+    const widthAfterFirst = mat.uniforms.uOutlineWidth!.value as number;
+    expect(widthAfterFirst).toBeCloseTo(0.045 * portraitScale, 6);
+    expect(mat.uniforms.uMaxClipOffset!.value).toBeLessThanOrEqual(
+      OUTLINE_VISIBILITY_TUNING.maxClipOffsetCeiling,
+    );
+
+    // Repeated resize calls must remain strictly idempotent (never compound)
+    syncOutlineMaterialForAspect(mat, 9 / 19.5);
+    expect(mat.uniforms.uOutlineWidth!.value).toBeCloseTo(widthAfterFirst, 6);
+
+    // Invalid aspect values stay finite at 1.0x base outline scale
+    expect(syncOutlineMaterialForAspect(mat, Number.NaN)).toBe(1.0);
+    expect(syncOutlineMaterialForAspect(mat, -1)).toBe(1.0);
+
+    // Disabling outline portrait scaling restores base uniform values cleanly
+    const disabledScale = syncOutlineMaterialForAspect(mat, 9 / 19.5, {
+      ...OUTLINE_VISIBILITY_TUNING,
+      enabled: false,
+    });
+    expect(disabledScale).toBe(1.0);
+    expect(mat.uniforms.uOutlineWidth!.value).toBeCloseTo(0.045, 6);
+    expect(mat.uniforms.uMinClipOffset!.value).toBeCloseTo(0.0025, 6);
+    expect(mat.uniforms.uMaxClipOffset!.value).toBeCloseTo(0.016, 6);
+
+    tracker.disposeAll();
   });
 
   it('interpolates prevCamera -> currCamera with alpha', () => {

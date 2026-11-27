@@ -23,7 +23,11 @@ export {
   type SharedToonMaterials,
 } from './toonMaterials';
 export { computeVerticalFovDeg, syncPerspectiveCamera } from './cameraSync';
-export { createSmoothOutlineMaterial, type OutlineMaterialOptions } from './outlineShader';
+export {
+  createSmoothOutlineMaterial,
+  syncOutlineMaterialForAspect,
+  type OutlineMaterialOptions,
+} from './outlineShader';
 export {
   ALL_TREE_FRAMES,
   ATLAS_COLS,

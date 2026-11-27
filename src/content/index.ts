@@ -6,3 +6,4 @@ export * from './creatures';
 export * from './presents';
 export * from './deliveryZones';
 export * from './characters';
+export * from './visibilityTuning';

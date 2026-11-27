@@ -1,4 +1,11 @@
 import * as THREE from 'three';
+import { getSkierDef } from '../../content/characters';
+import {
+  CHARACTER_SCALE_TUNING,
+  extractVisualScale,
+  resolveSkierVisualScale,
+  type CharacterScaleTuning,
+} from '../../content/visibilityTuning';
 import { clamp } from '../../core/math';
 import type { ReadonlySimState } from '../../sim/contracts';
 import type { GraphicsUtils } from './graphicsUtils';
@@ -23,8 +30,14 @@ export class SkiTracks {
   private readonly posAttr: THREE.BufferAttribute;
   private readonly trackDataAttr: THREE.BufferAttribute;
   private readonly geometry: THREE.BufferGeometry;
+  private readonly scaleTuning: CharacterScaleTuning;
 
-  constructor(gfx: GraphicsUtils, maxCapacity = 512) {
+  constructor(
+    gfx: GraphicsUtils,
+    maxCapacity = 512,
+    scaleTuning: CharacterScaleTuning = CHARACTER_SCALE_TUNING,
+  ) {
+    this.scaleTuning = scaleTuning;
     this.maxSamples = Math.max(2, maxCapacity);
     // Two tracks (left + right), 2 edge vertices per sample per track = 4 verts/sample
     const vertCount = this.maxSamples * 4;
@@ -160,6 +173,12 @@ diffuseColor.a = ageFade * feather * clamp((trough * 0.54 + lip * 0.38) * intens
 
     const cap = tracks.capacity;
     const oldest = (((tracks.head - count) % cap) + cap) % cap;
+    const skierScale = resolveSkierVisualScale(
+      extractVisualScale(getSkierDef(simState.skierId)?.visual),
+      this.scaleTuning,
+    );
+    const halfStance = TRACK_HALF_STANCE * skierScale;
+    const baseHalfWidth = SKI_TRACK_HALF_WIDTH * skierScale;
     const liveCarve = clamp(
       Math.abs(simState.currSkier.carveAngleRad) * 1.4 + (simState.currSkier.braking ? 0.6 : 0),
       0,
@@ -203,20 +222,20 @@ diffuseColor.a = ageFade * feather * clamp((trough * 0.54 + lip * 0.38) * intens
         turnIntensity = Math.max(turnIntensity, liveCarve);
       }
 
-      const halfW = validEdge ? SKI_TRACK_HALF_WIDTH * (1 + turnIntensity * 0.55) : 0;
+      const halfW = validEdge ? baseHalfWidth * (1 + turnIntensity * 0.55) : 0;
       const ox = px + nx * TRACK_NORMAL_OFFSET;
       const oy = py + ny * TRACK_NORMAL_OFFSET;
       const oz = pz + nz * TRACK_NORMAL_OFFSET;
 
       const freshness = validEdge ? 1 - clamp(age / TRACK_MAX_AGE_SEC, 0, 1) : 0;
 
-      const lCenterX = ox - rx * TRACK_HALF_STANCE;
-      const lCenterY = oy - ry * TRACK_HALF_STANCE;
-      const lCenterZ = oz - rz * TRACK_HALF_STANCE;
+      const lCenterX = ox - rx * halfStance;
+      const lCenterY = oy - ry * halfStance;
+      const lCenterZ = oz - rz * halfStance;
 
-      const rCenterX = ox + rx * TRACK_HALF_STANCE;
-      const rCenterY = oy + ry * TRACK_HALF_STANCE;
-      const rCenterZ = oz + rz * TRACK_HALF_STANCE;
+      const rCenterX = ox + rx * halfStance;
+      const rCenterY = oy + ry * halfStance;
+      const rCenterZ = oz + rz * halfStance;
 
       const vBase = k * 12; // 4 verts * 3 floats
 

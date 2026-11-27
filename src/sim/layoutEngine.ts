@@ -6,6 +6,11 @@ import { getDeliveryZoneDef } from '../content/deliveryZones';
 import { getHazardDef, getRampDef } from '../content/hazards';
 import { getPresentDef } from '../content/presents';
 import {
+  BASE_CHILD_SLOT_SPREAD_M,
+  CHARACTER_SCALE_TUNING,
+  resolveChildSlotSpreadMultiplier,
+} from '../content/visibilityTuning';
+import {
   resolveLandmarkWorldYaw,
   type DeliveryZoneDef,
   type HazardDef,
@@ -464,32 +469,9 @@ export class LayoutEngine {
     const hw = this.scratchFrame.halfWidth;
     const safeX = segment.sampleSafeX(s);
     const side: 1 | -1 = safeX >= 0 ? -1 : 1;
-    // Place children near safeX within deliveryRadius (7.5-9.0m) so safeX stays inside zone
-    const zoneX = clamp(safeX + side * 4.2, -(hw - 2.4), hw - 2.4);
-
-    this.samplePlacementSurface(segment, s, zoneX, mountainField);
     const zoneYaw = this.scratchFrame.yawRad + side * 0.45;
 
-    const idx = pools.deliveryZones.add(
-      def.id,
-      segment.id,
-      this.scratchPlacement.posX,
-      this.scratchPlacement.posY,
-      this.scratchPlacement.posZ,
-      zoneYaw,
-      def.deliveryRadius,
-      def.deliveryLength,
-    );
-    if (idx < 0) return false;
-
-    this.segmentOccupationGrid.insert(
-      idx,
-      this.scratchPlacement.posX,
-      this.scratchPlacement.posZ,
-      def.deliveryRadius + 2.5,
-    );
-
-    // Emit SegmentLandmarkRequirement for LandmarkStreamer (cabin/chalet/lantern/arch beside children)
+    // Resolve landmark visual/collider spec before finalizing zoneX so multi-child plazas stay clear of cabin OBBs.
     let chosenVisual = def.landmarkVisual;
     let chosenYawPolicy: LandmarkYawPolicy = def.landmarkYawPolicy ?? 'none';
     let chosenCollider: LandmarkColliderSpec | undefined = def.landmarkCollider;
@@ -512,18 +494,58 @@ export class LayoutEngine {
         ? clamp(chosenVisual.scale ?? 1, 0.5, 2)
         : 1;
 
-    let landmarkX = clamp(zoneX + side * lateralOffsetM, -(hw + 2.0), hw + 2.0);
+    const childCount = Math.max(1, def.childVisuals.length);
+    const effectiveChildSpreadM =
+      BASE_CHILD_SLOT_SPREAD_M * resolveChildSlotSpreadMultiplier(CHARACTER_SCALE_TUNING);
+    const outerChildHalfSpanM = (childCount - 1) * 0.5 * effectiveChildSpreadM * Math.cos(0.45);
+
+    let structExtentR = 0;
+    let requiredZoneClearance = lateralOffsetM;
     if (chosenCollider) {
       const offX = chosenCollider.offsetX ?? 0;
       const offZ = chosenCollider.offsetZ ?? 0;
-      const structExtentR =
+      structExtentR =
         (Math.hypot(chosenCollider.halfWidth, chosenCollider.halfDepth) + Math.hypot(offX, offZ)) *
         scale;
+      requiredZoneClearance = Math.max(
+        lateralOffsetM,
+        structExtentR + outerChildHalfSpanM + 0.65,
+      );
+    }
+
+    // Place children near safeX within deliveryRadius (7.5-9.0m) so safeX stays inside zone
+    let zoneX = clamp(safeX + side * 4.2, -(hw - 2.4), hw - 2.4);
+    let landmarkX = clamp(zoneX + side * requiredZoneClearance, -(hw + 2.0), hw + 2.0);
+    if (chosenCollider) {
       if (Math.abs(landmarkX - safeX) < structExtentR + 2.5) {
         landmarkX = clamp(safeX + side * (structExtentR + 2.6), -(hw + 2.0), hw + 2.0);
       }
+      if ((landmarkX - zoneX) * side < requiredZoneClearance) {
+        zoneX = clamp(landmarkX - side * requiredZoneClearance, -(hw - 2.4), hw - 2.4);
+      }
       clearanceRadius = Math.max(clearanceRadius, structExtentR + 0.5);
     }
+
+    this.samplePlacementSurface(segment, s, zoneX, mountainField);
+
+    const idx = pools.deliveryZones.add(
+      def.id,
+      segment.id,
+      this.scratchPlacement.posX,
+      this.scratchPlacement.posY,
+      this.scratchPlacement.posZ,
+      zoneYaw,
+      def.deliveryRadius,
+      def.deliveryLength,
+    );
+    if (idx < 0) return false;
+
+    this.segmentOccupationGrid.insert(
+      idx,
+      this.scratchPlacement.posX,
+      this.scratchPlacement.posZ,
+      def.deliveryRadius + 2.5,
+    );
 
     this.samplePlacementSurface(segment, s, landmarkX, mountainField);
     const landmarkReq: SegmentLandmarkRequirement = {

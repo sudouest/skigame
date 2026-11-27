@@ -4,6 +4,7 @@ import zlib from 'node:zlib';
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { getDeliveryZoneDef } from '../../../content/deliveryZones';
+import { CHARACTER_SCALE_TUNING } from '../../../content/visibilityTuning';
 import { hashCoords2DU32 } from '../../../core/rng';
 import {
   CREATURE_PHASE_IDLE,
@@ -26,6 +27,9 @@ import {
   CHARACTER_CELL_PAD_PX,
   CHARACTER_CELL_SIZE,
   CHARACTER_SPRITE_STRIPS,
+  CHILD_SHADOW_RADIUS_M,
+  CHILD_SPRITE_BASE_HEIGHT_M,
+  CHILD_SPRITE_BASE_WIDTH_M,
   CHILD_VARIANT_IDS,
   copyCanvasRegionToFlippedRgba,
   createCharacterSpriteAtlasTexture,
@@ -1228,5 +1232,169 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
     expect(tracker.getStats().activeObjects).toBe(0);
     expect(tracker.getStats().activeGeometries).toBe(0);
     expect(tracker.getStats().activeMaterials).toBe(0);
+  });
+
+  it('applies parametric CharacterScaleTuning consistently across InstancePools and ContactShadows', () => {
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const mats = createSharedToonMaterials(gfx);
+    const outlineMat = new THREE.MeshBasicMaterial();
+    gfx.markAsCache(outlineMat, 'TestScaleOutline');
+    const bbMat = new THREE.MeshBasicMaterial();
+    gfx.markAsCache(bbMat, 'TestScaleSceneryBb');
+    const charMat = new THREE.MeshBasicMaterial();
+    gfx.markAsCache(charMat, 'TestScaleCharBb');
+    const bbQuad = createBillboardQuadGeometry(gfx);
+    const assets = createProceduralMeshAssets(gfx);
+
+    const disabledScale = { ...CHARACTER_SCALE_TUNING, enabled: false };
+
+    const scaledPools = new InstancePools(
+      gfx,
+      mats,
+      outlineMat,
+      bbMat,
+      bbQuad,
+      assets,
+      charMat,
+      CHARACTER_SCALE_TUNING,
+    );
+    const scaledShadows = new ContactShadows(gfx, CHARACTER_SCALE_TUNING);
+
+    const legacyPools = new InstancePools(
+      gfx,
+      mats,
+      outlineMat,
+      bbMat,
+      bbQuad,
+      assets,
+      charMat,
+      disabledScale,
+    );
+    const legacyShadows = new ContactShadows(gfx, disabledScale);
+
+    const emptyScenery: SceneryProvider = {
+      sceneryRevision: 1,
+      forEachActiveScenery() {
+        // Empty
+      },
+    };
+
+    const base = createMinimalSimState(0, 0, true);
+    const farState: ReadonlySimState = {
+      ...base,
+      entities: {
+        ...base.entities,
+        deliveryZones: {
+          ...base.entities.deliveryZones,
+          posZ: new Float32Array([-45]),
+        },
+      },
+    };
+
+    scaledPools.sync(farState, 1, emptyScenery);
+    scaledShadows.sync(farState, 1);
+    legacyPools.sync(farState, 1, emptyScenery);
+    legacyShadows.sync(farState, 1);
+
+    const scaledCharPool = scaledPools.rootGroup.getObjectByName(
+      'CharacterBillboardPool',
+    ) as THREE.InstancedMesh;
+    const legacyCharPool = legacyPools.rootGroup.getObjectByName(
+      'CharacterBillboardPool',
+    ) as THREE.InstancedMesh;
+
+    const mScaled = new THREE.Matrix4();
+    const sScaled = new THREE.Vector3();
+    const pScaled = new THREE.Vector3();
+    scaledCharPool.getMatrixAt(0, mScaled);
+    mScaled.decompose(pScaled, new THREE.Quaternion(), sScaled);
+
+    const mLegacy = new THREE.Matrix4();
+    const sLegacy = new THREE.Vector3();
+    const pLegacy = new THREE.Vector3();
+    legacyCharPool.getMatrixAt(0, mLegacy);
+    mLegacy.decompose(pLegacy, new THREE.Quaternion(), sLegacy);
+
+    expect(sLegacy.x).toBeCloseTo(CHILD_SPRITE_BASE_WIDTH_M, 2);
+    expect(sLegacy.y).toBeCloseTo(CHILD_SPRITE_BASE_HEIGHT_M, 2);
+    expect(sScaled.x).toBeCloseTo(sLegacy.x * CHARACTER_SCALE_TUNING.childScale, 4);
+    expect(sScaled.y).toBeCloseTo(sLegacy.y * CHARACTER_SCALE_TUNING.childScale, 4);
+
+    // Child spread scales by childSlotSpreadScale and matches ContactShadows XZ position identically
+    const mScaled1 = new THREE.Matrix4();
+    const pScaled1 = new THREE.Vector3();
+    scaledCharPool.getMatrixAt(1, mScaled1);
+    pScaled1.setFromMatrixPosition(mScaled1);
+    expect(pScaled1.x - pScaled.x).toBeCloseTo(
+      CHILD_SLOT_SPREAD_M * CHARACTER_SCALE_TUNING.childSlotSpreadScale,
+      4,
+    );
+
+    const shadowMat0 = new THREE.Matrix4();
+    const shadowScale0 = new THREE.Vector3();
+    const shadowPos0 = new THREE.Vector3();
+    // Index 3 = child 0 shadow (0: skier, 1: bear0, 2: bear1, 3: child0)
+    scaledShadows.instancedMesh.getMatrixAt(3, shadowMat0);
+    shadowMat0.decompose(shadowPos0, new THREE.Quaternion(), shadowScale0);
+
+    const legacyShadowMat0 = new THREE.Matrix4();
+    const legacyShadowScale0 = new THREE.Vector3();
+    legacyShadows.instancedMesh.getMatrixAt(3, legacyShadowMat0);
+    legacyShadowScale0.setFromMatrixScale(legacyShadowMat0);
+
+    expect(shadowPos0.x).toBeCloseTo(pScaled.x, 4);
+    expect(shadowPos0.z).toBeCloseTo(pScaled.z, 4);
+    expect(legacyShadowScale0.x).toBeCloseTo(CHILD_SHADOW_RADIUS_M, 4);
+    expect(shadowScale0.x).toBeCloseTo(
+      legacyShadowScale0.x * CHARACTER_SCALE_TUNING.childScale,
+      4,
+    );
+
+    // Skier shadow scales by skierScale vs 0.95 when disabled
+    const skierShadowScaledMat = new THREE.Matrix4();
+    const skierShadowScaledScale = new THREE.Vector3();
+    scaledShadows.instancedMesh.getMatrixAt(0, skierShadowScaledMat);
+    skierShadowScaledScale.setFromMatrixScale(skierShadowScaledMat);
+
+    const skierShadowLegacyMat = new THREE.Matrix4();
+    const skierShadowLegacyScale = new THREE.Vector3();
+    legacyShadows.instancedMesh.getMatrixAt(0, skierShadowLegacyMat);
+    skierShadowLegacyScale.setFromMatrixScale(skierShadowLegacyMat);
+
+    expect(skierShadowLegacyScale.x).toBeCloseTo(0.95, 4);
+    expect(skierShadowScaledScale.x).toBeCloseTo(0.95 * CHARACTER_SCALE_TUNING.skierScale, 4);
+
+    // Bear billboard & contact shadow both apply creatureScale consistently
+    const bearScaledMat = new THREE.Matrix4();
+    const bearScaledScale = new THREE.Vector3();
+    scaledCharPool.getMatrixAt(2, bearScaledMat);
+    bearScaledScale.setFromMatrixScale(bearScaledMat);
+
+    const bearLegacyMat = new THREE.Matrix4();
+    const bearLegacyScale = new THREE.Vector3();
+    legacyCharPool.getMatrixAt(2, bearLegacyMat);
+    bearLegacyScale.setFromMatrixScale(bearLegacyMat);
+
+    const bearShadowScaledMat = new THREE.Matrix4();
+    const bearShadowScaledScale = new THREE.Vector3();
+    scaledShadows.instancedMesh.getMatrixAt(1, bearShadowScaledMat);
+    bearShadowScaledScale.setFromMatrixScale(bearShadowScaledMat);
+
+    const bearShadowLegacyMat = new THREE.Matrix4();
+    const bearShadowLegacyScale = new THREE.Vector3();
+    legacyShadows.instancedMesh.getMatrixAt(1, bearShadowLegacyMat);
+    bearShadowLegacyScale.setFromMatrixScale(bearShadowLegacyMat);
+
+    expect(bearScaledScale.x).toBeCloseTo(
+      bearLegacyScale.x * CHARACTER_SCALE_TUNING.creatureScale,
+      4,
+    );
+    expect(bearShadowScaledScale.x / bearShadowLegacyScale.x).toBeCloseTo(
+      CHARACTER_SCALE_TUNING.creatureScale,
+      4,
+    );
+
+    tracker.disposeAll();
   });
 });

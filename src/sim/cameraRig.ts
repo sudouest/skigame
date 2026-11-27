@@ -1,3 +1,8 @@
+import {
+  CAMERA_FRAMING_TUNING,
+  resolveActiveCameraFraming,
+  type CameraFramingTuning,
+} from '../content/visibilityTuning';
 import { clamp, damp, lerp, lerpAngle } from '../core/math';
 import type { CameraPose, SkierPose, SurfaceQueryView, SurfaceSample } from './contracts';
 
@@ -36,11 +41,16 @@ export class CameraRig {
   readonly prevCamera: MutableCameraPose = createMutableCameraPose();
   readonly currCamera: MutableCameraPose = createMutableCameraPose();
 
+  private readonly framing: CameraFramingTuning;
   private chaseHeadingRad = 0;
   private crestLiftM = 0;
   private crestLookDropM = 0;
   private walkCameraBlend = 0;
   private initialized = false;
+
+  constructor(framingTuning: CameraFramingTuning = CAMERA_FRAMING_TUNING) {
+    this.framing = resolveActiveCameraFraming(framingTuning);
+  }
 
   reset(skier: SkierPose, surface: SurfaceSample, surfaceQuery?: SurfaceQueryView): void {
     this.initialized = true;
@@ -52,7 +62,7 @@ export class CameraRig {
     const fwdX = -Math.sin(this.chaseHeadingRad);
     const fwdZ = -Math.cos(this.chaseHeadingRad);
 
-    const trailDist = 10.2;
+    const trailDist = this.framing.resetTrailDistM;
     const trailUphillSlope = surface.valid
       ? Math.max(
           0,
@@ -66,7 +76,7 @@ export class CameraRig {
 
     const targetPosX = skier.posX - fwdX * trailDist;
     const targetPosZ = skier.posZ - fwdZ * trailDist;
-    let targetPosY = Math.max(skier.posY, surface.groundY) + slopeRise + 3.6;
+    let targetPosY = Math.max(skier.posY, surface.groundY) + slopeRise + this.framing.resetBaseHeightM;
     if (surfaceQuery) {
       targetPosY = Math.max(
         targetPosY,
@@ -85,9 +95,10 @@ export class CameraRig {
       );
     }
 
-    const lookAtX = skier.posX + fwdX * 18.0;
-    const lookAtY = skier.posY + tangentYOrDefault(surface) * 18.0 + 0.6;
-    const lookAtZ = skier.posZ + fwdZ * 18.0;
+    const lookAheadM = this.framing.lookAheadM;
+    const lookAtX = skier.posX + fwdX * lookAheadM;
+    const lookAtY = skier.posY + tangentYOrDefault(surface) * lookAheadM + 0.6;
+    const lookAtZ = skier.posZ + fwdZ * lookAheadM;
 
     this.currCamera.posX = targetPosX;
     this.currCamera.posY = targetPosY;
@@ -96,7 +107,7 @@ export class CameraRig {
     this.currCamera.lookAtY = lookAtY;
     this.currCamera.lookAtZ = lookAtZ;
     this.currCamera.rollRad = 0;
-    this.currCamera.minHorizontalFovDeg = 72;
+    this.currCamera.minHorizontalFovDeg = this.framing.minHorizontalFovDeg;
     this.currCamera.speedFovBoostDeg = 0;
 
     this.capturePrevious();
@@ -175,8 +186,9 @@ export class CameraRig {
     this.crestLookDropM = damp(this.crestLookDropM, targetLookDrop, 4.5, dt);
 
     const speedRatio = clamp((skier.speed - 12) / 24, 0, 1);
-    const trailDist = lerp(9.4, 11.4, speedRatio);
-    const baseHeight = lerp(3.4, 4.0, speedRatio) + this.crestLiftM;
+    const trailDist = lerp(this.framing.trailDistMinM, this.framing.trailDistMaxM, speedRatio);
+    const baseHeight =
+      lerp(this.framing.baseHeightMinM, this.framing.baseHeightMaxM, speedRatio) + this.crestLiftM;
     const trailUphillSlope = surface.valid
       ? Math.max(
           0,
@@ -221,11 +233,11 @@ export class CameraRig {
       }
     }
 
-    // Look ~18m ahead of skier so skier torso never blocks obstacles directly in front
-    const lookAheadM = 18.0;
+    // Look ahead of skier so skier torso never blocks obstacles directly in front
+    const lookAheadM = this.framing.lookAheadM;
     const desiredLookX = skier.posX + fwdX * lookAheadM;
     const desiredLookZ = skier.posZ + fwdZ * lookAheadM;
-    const ahead18Y = surfaceQuery.evaluateHeight(desiredLookX, desiredLookZ);
+    const aheadLookY = surfaceQuery.evaluateHeight(desiredLookX, desiredLookZ);
     const lookSlope = surface.valid
       ? clamp(
           -(fwdX * surface.normalX + fwdZ * surface.normalZ) / Math.max(0.35, surface.normalY),
@@ -235,7 +247,7 @@ export class CameraRig {
       : tangentYOrDefault(surface);
 
     const desiredLookY =
-      Math.max(ahead18Y, skier.posY + lookSlope * lookAheadM) + 0.6 - this.crestLookDropM;
+      Math.max(aheadLookY, skier.posY + lookSlope * lookAheadM) + 0.6 - this.crestLookDropM;
 
     const lookLambda = 11.5;
     this.currCamera.lookAtX = damp(this.currCamera.lookAtX, desiredLookX, lookLambda, dt);
@@ -248,10 +260,10 @@ export class CameraRig {
       7.5,
       dt,
     );
-    this.currCamera.minHorizontalFovDeg = 72;
+    this.currCamera.minHorizontalFovDeg = this.framing.minHorizontalFovDeg;
     this.currCamera.speedFovBoostDeg = damp(
       this.currCamera.speedFovBoostDeg,
-      speedRatio * 14,
+      speedRatio * this.framing.maxSpeedFovBoostDeg,
       4.0,
       dt,
     );

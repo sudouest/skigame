@@ -2,6 +2,10 @@ import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_SCENERY_TIER_RULES } from '../../../content/sceneryRules';
 import {
+  CHARACTER_SCALE_TUNING,
+  DEFAULT_VISIBILITY_TUNING,
+} from '../../../content/visibilityTuning';
+import {
   STAGE_BLIZZARD_RIDGE,
   STAGE_ICY_BLACK,
   STAGE_POWDER_BOWL,
@@ -53,6 +57,7 @@ import { createTrailGateAssets, createTrailGateObject } from '../models/trailGat
 import { createSmoothOutlineMaterial } from '../outlineShader';
 import { CAMERA_FAR_M, ThreeRenderer } from '../renderer';
 import { SkierRig } from '../skierRig';
+import { SkiTracks } from '../skiTracks';
 import { CarveSprayVfx } from '../carveSprayVfx';
 import {
   SceneryCellStreamer,
@@ -2545,6 +2550,132 @@ describe('CDLOD TerrainClipmap, ClipmapDataStore, SceneryCellStreamer, LandmarkS
 
     rig.dispose();
     sprayVfx.dispose();
+    tracker.disposeAll();
+    const stats = tracker.getStats();
+    expect(stats.activeObjects).toBe(0);
+    expect(stats.activeGeometries).toBe(0);
+    expect(stats.activeMaterials).toBe(0);
+    expect(stats.activeTextures).toBe(0);
+  });
+
+  it('scales SkierRig, SkiTracks stance, and portrait outlines via VisibilityTuning and reverts cleanly when disabled', () => {
+    const tracker = new GraphicsTracker();
+    const gfx = new GraphicsUtils(tracker);
+    const shared = createSharedToonMaterials(gfx);
+    const outlineMat = createSmoothOutlineMaterial(gfx);
+
+    const scaledRig = new SkierRig(gfx, shared, outlineMat, 'skier_alpine', CHARACTER_SCALE_TUNING);
+    const legacyRig = new SkierRig(gfx, shared, outlineMat, 'skier_alpine', {
+      ...CHARACTER_SCALE_TUNING,
+      enabled: false,
+    });
+    expect(scaledRig.visualScale).toBeCloseTo(CHARACTER_SCALE_TUNING.skierScale, 5);
+    expect(scaledRig.rootGroup.scale.x).toBeCloseTo(CHARACTER_SCALE_TUNING.skierScale, 5);
+    expect(scaledRig.rootGroup.scale.y).toBeCloseTo(CHARACTER_SCALE_TUNING.skierScale, 5);
+    expect(scaledRig.rootGroup.scale.z).toBeCloseTo(CHARACTER_SCALE_TUNING.skierScale, 5);
+    expect(legacyRig.visualScale).toBeCloseTo(1.0, 5);
+    expect(legacyRig.rootGroup.scale.x).toBeCloseTo(1.0, 5);
+
+    const scaledTracks = new SkiTracks(gfx, 64, CHARACTER_SCALE_TUNING);
+    const legacyTracks = new SkiTracks(gfx, 64, {
+      ...CHARACTER_SCALE_TUNING,
+      enabled: false,
+    });
+    const simState = createMockSimState();
+    scaledTracks.sync(simState);
+    legacyTracks.sync(simState);
+
+    const readStanceWidth = (tracks: SkiTracks): number => {
+      const pos = tracks.mesh.geometry.getAttribute('position') as THREE.BufferAttribute;
+      const leftCenterX = (pos.getX(0) + pos.getX(1)) * 0.5;
+      const rightCenterX = (pos.getX(2) + pos.getX(3)) * 0.5;
+      return rightCenterX - leftCenterX;
+    };
+    const legacyStance = readStanceWidth(legacyTracks);
+    const scaledStance = readStanceWidth(scaledTracks);
+    expect(legacyStance).toBeCloseTo(0.44, 4);
+    expect(scaledStance).toBeCloseTo(0.44 * CHARACTER_SCALE_TUNING.skierScale, 4);
+
+    // ThreeRenderer wires portrait FOV, outline aspect boost, and resize idempotence with 0 leaks
+    const renderer = new ThreeRenderer(null, new EventBus<SimEvents>(), undefined, {
+      headless: true,
+      initialWidth: 390,
+      initialHeight: 844,
+      visibilityTuning: DEFAULT_VISIBILITY_TUNING,
+    });
+    expect(renderer.camera.fov).toBeLessThanOrEqual(
+      DEFAULT_VISIBILITY_TUNING.portraitFov.hardMaxVerticalFovDeg,
+    );
+    renderer.sync(simState, 0.5, 1 / 60, 50);
+    renderer.resize(390, 844);
+    expect(renderer.camera.fov).toBeLessThanOrEqual(
+      DEFAULT_VISIBILITY_TUNING.portraitFov.hardMaxVerticalFovDeg,
+    );
+    // NaN / <= 0 resize dimensions must not corrupt camera projection
+    renderer.resize(Number.NaN, 0);
+    expect(Number.isFinite(renderer.camera.aspect) && renderer.camera.aspect > 0).toBe(true);
+    expect(Number.isFinite(renderer.camera.fov)).toBe(true);
+
+    // End-to-end A/B toggle with all visibility flags disabled reverts cleanly
+    const legacyRenderer = new ThreeRenderer(null, new EventBus<SimEvents>(), undefined, {
+      headless: true,
+      initialWidth: 390,
+      initialHeight: 844,
+      visibilityTuning: {
+        portraitFov: { ...DEFAULT_VISIBILITY_TUNING.portraitFov, enabled: false },
+        characterScale: { ...DEFAULT_VISIBILITY_TUNING.characterScale, enabled: false },
+        cameraFraming: { ...DEFAULT_VISIBILITY_TUNING.cameraFraming, enabled: false },
+        outline: { ...DEFAULT_VISIBILITY_TUNING.outline, enabled: false },
+      },
+    });
+    expect(legacyRenderer.camera.fov).toBeGreaterThan(95);
+    legacyRenderer.sync(simState, 0.5, 1 / 60, 50);
+
+    // CarveSprayVfx scales lateral and longitudinal particle spawn offsets proportionally to skierVisualScale
+    const sprayScene = new THREE.Scene();
+    const scaledSpray = new CarveSprayVfx(gfx, sprayScene, CHARACTER_SCALE_TUNING);
+    const legacySpray = new CarveSprayVfx(gfx, sprayScene, {
+      ...CHARACTER_SCALE_TUNING,
+      enabled: false,
+    });
+    const sprayPose = {
+      ...simState.currSkier,
+      posX: 0,
+      posY: 0,
+      posZ: 0,
+      velX: 0,
+      velY: 0,
+      velZ: 0,
+      headingRad: 0,
+      normalX: 0,
+      normalY: 1,
+      normalZ: 0,
+      grounded: true,
+      walking: false,
+      speed: 22,
+      carveAngleRad: 0.6,
+      braking: false,
+    };
+    scaledSpray.update(1 / 30, sprayPose, 'packed', 0, undefined, CHARACTER_SCALE_TUNING.skierScale);
+    legacySpray.update(1 / 30, sprayPose, 'packed', 0, undefined, 1.0);
+    expect(scaledSpray.instancedMesh.count).toBeGreaterThan(0);
+    expect(scaledSpray.instancedMesh.count).toBe(legacySpray.instancedMesh.count);
+    const mSprayS = new THREE.Matrix4();
+    const mSprayL = new THREE.Matrix4();
+    const pSprayS = new THREE.Vector3();
+    const pSprayL = new THREE.Vector3();
+    scaledSpray.instancedMesh.getMatrixAt(0, mSprayS);
+    legacySpray.instancedMesh.getMatrixAt(0, mSprayL);
+    pSprayS.setFromMatrixPosition(mSprayS);
+    pSprayL.setFromMatrixPosition(mSprayL);
+    expect(Math.abs(pSprayS.x)).toBeGreaterThan(Math.abs(pSprayL.x));
+
+    scaledSpray.dispose();
+    legacySpray.dispose();
+    scaledRig.dispose();
+    legacyRig.dispose();
+    legacyRenderer.dispose();
+    renderer.dispose();
     tracker.disposeAll();
     const stats = tracker.getStats();
     expect(stats.activeObjects).toBe(0);
