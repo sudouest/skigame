@@ -486,9 +486,24 @@ export function evaluateChildAnimPose(
   return out;
 }
 
+export const BEAR_WALK_CLIP: SpriteAnimClip<CharacterFrameName> = {
+  frames: [
+    'bear_walk',
+    'bear_walk_1',
+    'bear_walk_2',
+    'bear_walk_3',
+    'bear_walk_4',
+    'bear_walk_5',
+    'bear_walk_6',
+    'bear_walk_7',
+  ],
+  fps: 10,
+  mode: 'loop',
+};
+
 /**
- * Evaluates procedural waddle & telegraph pulse for patrolling mountain bears,
- * returning screen-space CCW `tiltRad` (compensated for horizontal mirroring `flipX`).
+ * Evaluates idle breathing, rearing telegraph roar, and 8-frame looping walk for patrolling
+ * mountain bears, returning screen-space CCW `tiltRad` (compensated for horizontal mirroring `flipX`).
  */
 export function evaluateBearAnimPose(
   elapsedSec: number,
@@ -501,15 +516,34 @@ export function evaluateBearAnimPose(
   const safeElapsed = finiteOr(elapsedSec, 0);
   const safeProgress = clampFinite(telegraphProgress, 0, 1, 0);
   const idx = finiteOr(creatureIndex, 0);
-  const isTelegraph =
-    phaseCode === CREATURE_PHASE_TELEGRAPH || phaseCode === CREATURE_PHASE_ATTACK;
-  const pulse = isTelegraph ? 1 + 0.14 * safeProgress : 1;
-  out.frame = isTelegraph ? 'bear_telegraph' : 'bear_walk';
-  out.offsetY = Math.abs(Math.sin(safeElapsed * 8.5 + idx * 2.1)) * 0.12;
-  out.scaleX = pulse;
-  out.scaleY = pulse;
-  const waddleTilt = Math.sin(safeElapsed * 8.5 + idx * 2.1) * 0.07;
-  out.tiltRad = flipX ? -waddleTilt : waddleTilt;
+
+  if (phaseCode === CREATURE_PHASE_TELEGRAPH) {
+    const pulse = 1 + 0.12 * safeProgress;
+    out.frame = 'bear_telegraph';
+    out.offsetY = Math.sin(safeProgress * Math.PI) * 0.08;
+    out.scaleX = pulse;
+    out.scaleY = pulse;
+    const roarTilt = Math.sin(safeElapsed * 14.0 + idx * 2.1) * 0.05;
+    out.tiltRad = flipX ? -roarTilt : roarTilt;
+    return out;
+  }
+
+  if (phaseCode === CREATURE_PHASE_ATTACK) {
+    out.frame = sampleSpriteAnimFrame(BEAR_WALK_CLIP, safeElapsed + idx * 0.27);
+    out.offsetY = Math.abs(Math.sin(safeElapsed * 8.5 + idx * 2.1)) * 0.03;
+    out.scaleX = 1;
+    out.scaleY = 1;
+    const waddleTilt = Math.sin(safeElapsed * 8.5 + idx * 2.1) * 0.025;
+    out.tiltRad = flipX ? -waddleTilt : waddleTilt;
+    return out;
+  }
+
+  out.frame = 'bear_idle';
+  out.offsetY = 0;
+  const breathY = 1 + Math.sin(safeElapsed * 2.4 + idx * 1.7) * 0.018;
+  applyVolumePreservingSquash(breathY, out);
+  const idleTilt = Math.sin(safeElapsed * 1.6 + idx * 2.1) * 0.02;
+  out.tiltRad = flipX ? -idleTilt : idleTilt;
   return out;
 }
 
@@ -517,7 +551,7 @@ const CREATURE_BILLBOARD_SPECS: Readonly<Record<string, CreatureBillboardSpec>> 
   bear_patrol: {
     baseWidthM: 2.55,
     baseHeightM: 2.75,
-    spriteFacesRight: false,
+    spriteFacesRight: true,
     evaluate(
       elapsedSec,
       phaseCode,

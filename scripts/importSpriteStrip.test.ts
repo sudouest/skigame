@@ -1,12 +1,15 @@
 import zlib from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import {
+  computeEvenFrameIndices,
   decodeRgbaPng,
   detectPoseSpans,
   dilateRgbaEdges,
   encodeRgbaPng,
+  isVideoFilePath,
   keyOutBackground,
   parseCliArgs,
+  processSpriteFramesRgba,
   processSpriteStripRgba,
   renderPreviewSheet,
 } from './importSpriteStrip';
@@ -341,5 +344,92 @@ describe('scripts/importSpriteStrip reusable sprite importer', () => {
     expect(() => parseCliArgs(['--in', 'a.jpg', '--out', 'b.png', '--pad', '128', '--cell-size', '256'])).toThrow(
       /--pad \(128\) must be less than half/,
     );
+
+    // Video defaults & trim/keep/anchor-y CLI flags
+    const vidParsed = parseCliArgs([
+      '--in',
+      'walk.mov',
+      '--out',
+      'walk.png',
+      '--start-sec',
+      '0.2',
+      '--end-sec',
+      '1.4',
+      '--anchor-y',
+      'shared-ground',
+    ]);
+    expect(vidParsed.options.expectedFrames).toBe(8);
+    expect(vidParsed.options.startSec).toBe(0.2);
+    expect(vidParsed.options.endSec).toBe(1.4);
+    expect(vidParsed.options.anchorYMode).toBe('shared-ground');
+
+    const keepParsed = parseCliArgs(['--in', 'sheet.jpg', '--out', 'subset.png', '--frames', '5', '--keep', '0,1']);
+    expect(keepParsed.options.keepIndices).toEqual([0, 1]);
+
+    expect(() =>
+      parseCliArgs(['--in', 'walk.mov', '--out', 'walk.png', '--start-sec', '1.5', '--end-sec', '1.0']),
+    ).toThrow(/--end-sec/);
+  });
+
+  it('supports video frame sampling, isolated frame packing (shared-ground & per-frame), and keepIndices', () => {
+    expect(isVideoFilePath('clip.mov')).toBe(true);
+    expect(isVideoFilePath('clip.MP4')).toBe(true);
+    expect(isVideoFilePath('strip.png')).toBe(false);
+    expect(computeEvenFrameIndices(39, 8)).toEqual([0, 4, 9, 14, 19, 24, 29, 34]);
+    expect(computeEvenFrameIndices(10, 4)).toEqual([0, 2, 5, 7]);
+
+    // 2 isolated frames: frame 0 grounded at y=50, frame 1 hopping higher at y=40
+    const fw = 64;
+    const fh = 64;
+    const f0 = makeSolidRgba(fw, fh, 255, 255, 255, 255);
+    fillRectRgba(f0, fw, 24, 20, 16, 30, 35, 35, 40, 255);
+    fillRectRgba(f0, fw, 26, 22, 12, 26, 140, 90, 50, 255);
+
+    const f1 = makeSolidRgba(fw, fh, 255, 255, 255, 255);
+    fillRectRgba(f1, fw, 24, 10, 16, 30, 35, 35, 40, 255);
+    fillRectRgba(f1, fw, 26, 12, 12, 26, 140, 90, 50, 255);
+
+    const resShared = processSpriteFramesRgba(
+      [
+        { width: fw, height: fh, rgba: f0 },
+        { width: fw, height: fh, rgba: f1 },
+      ],
+      { cellSize: 64, padPx: 4, anchorYMode: 'shared-ground', dilatePasses: 2 },
+    );
+    expect(resShared.width).toBe(128);
+    expect(resShared.height).toBe(64);
+    expect(resShared.poses).toHaveLength(2);
+
+    // Measure lowest opaque pixel in cell 0 vs cell 1: in shared-ground mode, frame 1 stays higher!
+    const lowestOpaqueY = (buf: Uint8Array, w: number, col: number, cs: number): number => {
+      let maxY = -1;
+      for (let y = 0; y < cs; y++) {
+        for (let x = 0; x < cs; x++) {
+          if (buf[(y * w + col * cs + x) * 4 + 3]! >= 128 && y > maxY) {
+            maxY = y;
+          }
+        }
+      }
+      return maxY;
+    };
+    const y0Shared = lowestOpaqueY(resShared.rgba, resShared.width, 0, 64);
+    const y1Shared = lowestOpaqueY(resShared.rgba, resShared.width, 1, 64);
+    expect(y1Shared).toBeLessThan(y0Shared - 4);
+
+    // Verify keepIndices trims a 3-pose strip down to 2 poses cleanly
+    const stripW = 180;
+    const stripH = 64;
+    const strip = makeSolidRgba(stripW, stripH, 255, 255, 255, 255);
+    fillRectRgba(strip, stripW, 12, 12, 24, 40, 40, 40, 40, 255);
+    fillRectRgba(strip, stripW, 72, 12, 24, 40, 40, 40, 40, 255);
+    fillRectRgba(strip, stripW, 132, 12, 24, 40, 40, 40, 40, 255);
+    const kept = processSpriteStripRgba(strip, stripW, stripH, {
+      expectedFrames: 3,
+      keepIndices: [0, 2],
+      cellSize: 64,
+      padPx: 4,
+    });
+    expect(kept.width).toBe(128);
+    expect(kept.poses).toHaveLength(2);
   });
 });

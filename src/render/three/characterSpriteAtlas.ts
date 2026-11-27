@@ -1,5 +1,7 @@
 /// <reference types="vite/client" />
 import * as THREE from 'three';
+import bearSpritesUrl from './assets/bearSprites.png';
+import bearWalkSpritesUrl from './assets/bearWalkSprites.png';
 import childBlueSpritesUrl from './assets/childBlueSprites.png';
 import childOchreSpritesUrl from './assets/childOchreSprites.png';
 import childSpritesUrl from './assets/childSprites.png';
@@ -39,8 +41,16 @@ export type CharacterFrameName =
   | 'child_ochre_idle_1'
   | 'child_ochre_crouch'
   | 'child_ochre_jump'
+  | 'bear_idle'
+  | 'bear_telegraph'
   | 'bear_walk'
-  | 'bear_telegraph';
+  | 'bear_walk_1'
+  | 'bear_walk_2'
+  | 'bear_walk_3'
+  | 'bear_walk_4'
+  | 'bear_walk_5'
+  | 'bear_walk_6'
+  | 'bear_walk_7';
 
 export interface CharacterSpriteStripSpec {
   readonly id: string;
@@ -85,6 +95,29 @@ export const CHARACTER_SPRITE_STRIPS: readonly CharacterSpriteStripSpec[] = [
   makeChildStripSpec('teal', 4, 0, childTealSpritesUrl),
   makeChildStripSpec('blue', 0, 1, childBlueSpritesUrl),
   makeChildStripSpec('ochre', 4, 1, childOchreSpritesUrl),
+  {
+    id: 'bear',
+    col: 0,
+    row: 2,
+    frameCount: 2,
+    url: bearSpritesUrl,
+    drawFallback(ctx, ox, oy) {
+      drawCharacterBearFallback(ctx, ox + 0 * CHARACTER_CELL_SIZE, oy, false);
+      drawCharacterBearFallback(ctx, ox + 1 * CHARACTER_CELL_SIZE, oy, true);
+    },
+  },
+  {
+    id: 'bear_walk',
+    col: 0,
+    row: 3,
+    frameCount: 8,
+    url: bearWalkSpritesUrl,
+    drawFallback(ctx, ox, oy) {
+      for (let f = 0; f < 8; f++) {
+        drawCharacterBearFallback(ctx, ox + f * CHARACTER_CELL_SIZE, oy, false);
+      }
+    },
+  },
 ];
 
 function makeCharacterFrameRect(col: number, row: number): AtlasFrameRect {
@@ -117,8 +150,16 @@ export const CHARACTER_ATLAS_FRAMES: Readonly<Record<CharacterFrameName, AtlasFr
   child_ochre_idle_1: makeCharacterFrameRect(5, 1),
   child_ochre_crouch: makeCharacterFrameRect(6, 1),
   child_ochre_jump: makeCharacterFrameRect(7, 1),
-  bear_walk: makeCharacterFrameRect(0, 2),
+  bear_idle: makeCharacterFrameRect(0, 2),
   bear_telegraph: makeCharacterFrameRect(1, 2),
+  bear_walk: makeCharacterFrameRect(0, 3),
+  bear_walk_1: makeCharacterFrameRect(1, 3),
+  bear_walk_2: makeCharacterFrameRect(2, 3),
+  bear_walk_3: makeCharacterFrameRect(3, 3),
+  bear_walk_4: makeCharacterFrameRect(4, 3),
+  bear_walk_5: makeCharacterFrameRect(5, 3),
+  bear_walk_6: makeCharacterFrameRect(6, 3),
+  bear_walk_7: makeCharacterFrameRect(7, 3),
 };
 
 export function isCharacterFrameName(frame: string): frame is CharacterFrameName {
@@ -487,8 +528,6 @@ export function createCharacterSpriteAtlasTexture(gfx: GraphicsUtils): THREE.Tex
       strip.row * CHARACTER_CELL_SIZE,
     );
   }
-  drawCharacterBearFallback(ctx, 0 * CHARACTER_CELL_SIZE, 2 * CHARACTER_CELL_SIZE, false);
-  drawCharacterBearFallback(ctx, 1 * CHARACTER_CELL_SIZE, 2 * CHARACTER_CELL_SIZE, true);
 
   const imgData = ctx.getImageData(0, 0, CHARACTER_ATLAS_WIDTH, CHARACTER_ATLAS_HEIGHT);
   dilateAtlasEdges(imgData.data, CHARACTER_ATLAS_WIDTH, CHARACTER_ATLAS_HEIGHT, 6);

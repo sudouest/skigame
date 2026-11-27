@@ -7,6 +7,7 @@ import { getDeliveryZoneDef } from '../../../content/deliveryZones';
 import { CHARACTER_SCALE_TUNING } from '../../../content/visibilityTuning';
 import { hashCoords2DU32 } from '../../../core/rng';
 import {
+  CREATURE_PHASE_ATTACK,
   CREATURE_PHASE_IDLE,
   CREATURE_PHASE_TELEGRAPH,
   createSurfaceSample,
@@ -504,7 +505,7 @@ function createMinimalSimState(
 }
 
 describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', () => {
-  it('validates CHARACTER_ATLAS_FRAMES UV layout, CHARACTER_SPRITE_STRIPS, and all 4 padded/dilated 1024x256 RGBA child PNGs', () => {
+  it('validates CHARACTER_ATLAS_FRAMES UV layout, CHARACTER_SPRITE_STRIPS, and all 5 padded/dilated 1024x256 RGBA character PNGs', () => {
     expect(CHARACTER_ATLAS_WIDTH).toBe(2048);
     expect(CHARACTER_ATLAS_HEIGHT).toBe(1024);
     expect(CHARACTER_ATLAS_COLS).toBe(8);
@@ -516,7 +517,7 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
       CharacterFrameName,
       (typeof CHARACTER_ATLAS_FRAMES)[CharacterFrameName],
     ][];
-    expect(entries).toHaveLength(18);
+    expect(entries).toHaveLength(26);
 
     const seenCells = new Set<string>();
     for (const [name, rect] of entries) {
@@ -541,9 +542,9 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
       }
     }
 
-    expect(CHARACTER_SPRITE_STRIPS).toHaveLength(4);
+    expect(CHARACTER_SPRITE_STRIPS).toHaveLength(6);
     for (const strip of CHARACTER_SPRITE_STRIPS) {
-      expect(strip.frameCount).toBe(4);
+      expect(strip.frameCount).toBeGreaterThanOrEqual(2);
       expect(strip.col + strip.frameCount).toBeLessThanOrEqual(CHARACTER_ATLAS_COLS);
       expect(strip.row).toBeLessThan(CHARACTER_ATLAS_ROWS);
     }
@@ -657,7 +658,7 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
       const domTracker = new GraphicsTracker();
       const domGfx = new GraphicsUtils(domTracker);
       const domAtlas = createCharacterSpriteAtlasTexture(domGfx) as THREE.DataTexture;
-      expect(createdImgs).toHaveLength(4);
+      expect(createdImgs).toHaveLength(6);
       const verBefore = domAtlas.version;
       createdImgs[0]!.onload?.();
       expect(domAtlas.version).toBe(verBefore + 1);
@@ -673,31 +674,39 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
       else (globalThis as { Image?: unknown }).Image = origImg;
     }
 
-    const assetChecks: ReadonlyArray<{ file: string; minBrightWhites: number; minWarmHighlights: number }> = [
-      { file: 'childSprites.png', minBrightWhites: 4, minWarmHighlights: 35 },
-      { file: 'childTealSprites.png', minBrightWhites: 2, minWarmHighlights: 70 },
-      { file: 'childBlueSprites.png', minBrightWhites: 25, minWarmHighlights: 90 },
-      { file: 'childOchreSprites.png', minBrightWhites: 20, minWarmHighlights: 40 },
+    const assetChecks: ReadonlyArray<{
+      file: string;
+      frameCount: number;
+      minBrightWhites: number;
+      minWarmHighlights: number;
+    }> = [
+      { file: 'childSprites.png', frameCount: 4, minBrightWhites: 4, minWarmHighlights: 35 },
+      { file: 'childTealSprites.png', frameCount: 4, minBrightWhites: 2, minWarmHighlights: 70 },
+      { file: 'childBlueSprites.png', frameCount: 4, minBrightWhites: 25, minWarmHighlights: 90 },
+      { file: 'childOchreSprites.png', frameCount: 4, minBrightWhites: 20, minWarmHighlights: 40 },
+      { file: 'bearSprites.png', frameCount: 2, minBrightWhites: 0, minWarmHighlights: 0 },
+      { file: 'bearWalkSprites.png', frameCount: 8, minBrightWhites: 0, minWarmHighlights: 0 },
     ];
 
     for (const asset of assetChecks) {
+      const expectedW = asset.frameCount * CHARACTER_CELL_SIZE;
       const pngPath = path.resolve(__dirname, '..', 'assets', asset.file);
       expect(fs.existsSync(pngPath), `missing ${asset.file}`).toBe(true);
       const bytes = fs.readFileSync(pngPath);
       expect(bytes.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
       expect(bytes.subarray(12, 16).toString('ascii')).toBe('IHDR');
-      expect(bytes.readUInt32BE(16)).toBe(1024);
+      expect(bytes.readUInt32BE(16)).toBe(expectedW);
       expect(bytes.readUInt32BE(20)).toBe(256);
       expect(bytes[24]).toBe(8);
       expect(bytes[25]).toBe(6);
 
       const decoded = decodeRgbaPng(bytes);
-      expect(decoded.width).toBe(1024);
+      expect(decoded.width).toBe(expectedW);
       expect(decoded.height).toBe(256);
 
       let brightInteriorWhites = 0;
       let brightWarmHighlights = 0;
-      for (let col = 0; col < 4; col++) {
+      for (let col = 0; col < asset.frameCount; col++) {
         let opaqueCount = 0;
         let dilatedTransparentRgbCount = 0;
         const cellX0 = col * CHARACTER_CELL_SIZE;
@@ -1025,7 +1034,33 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
     expect(Number.isFinite(pose.tiltRad)).toBe(true);
     expect(Number.isFinite(pose.scaleY)).toBe(true);
 
-    const bearPose = createBillboardAnimPose('bear_walk');
+    const bearPose = createBillboardAnimPose('bear_idle');
+    evaluateBearAnimPose(0.5, CREATURE_PHASE_IDLE, 0, 0, bearPose);
+    expect(bearPose.frame).toBe('bear_idle');
+    expect(bearPose.offsetY).toBe(0);
+
+    evaluateBearAnimPose(0.5, CREATURE_PHASE_TELEGRAPH, 0.5, 0, bearPose);
+    expect(bearPose.frame).toBe('bear_telegraph');
+    expect(bearPose.scaleY).toBeGreaterThan(1.0);
+
+    // 8-frame looping walk cycle: bear_walk -> bear_walk_1..7 -> wraps back to bear_walk
+    const expectedWalkFrames: CharacterFrameName[] = [
+      'bear_walk',
+      'bear_walk_1',
+      'bear_walk_2',
+      'bear_walk_3',
+      'bear_walk_4',
+      'bear_walk_5',
+      'bear_walk_6',
+      'bear_walk_7',
+    ];
+    for (let k = 0; k < expectedWalkFrames.length; k++) {
+      evaluateBearAnimPose((k + 0.1) / 10, CREATURE_PHASE_ATTACK, 1, 0, bearPose);
+      expect(bearPose.frame).toBe(expectedWalkFrames[k]);
+    }
+    evaluateBearAnimPose(8.1 / 10, CREATURE_PHASE_ATTACK, 1, 0, bearPose);
+    expect(bearPose.frame).toBe('bear_walk');
+
     evaluateBearAnimPose(Number.NaN, CREATURE_PHASE_TELEGRAPH, Number.NaN, 0, bearPose);
     expect(Number.isFinite(bearPose.offsetY)).toBe(true);
     expect(Number.isFinite(bearPose.scaleX)).toBe(true);
@@ -1110,19 +1145,21 @@ describe('2.5D Character Sprite Atlas, Procedural Animation & Contact Shadows', 
     const uvAttr = charPool.geometry.getAttribute('aUvRect') as THREE.InstancedBufferAttribute;
     const tiltAttr = charPool.geometry.getAttribute('aTilt') as THREE.InstancedBufferAttribute;
 
+    // Bear 0 moves screen-right (heading -pi/2) with spriteFacesRight=true -> unflipped bear_telegraph
     const bearTeleRect = CHARACTER_ATLAS_FRAMES.bear_telegraph;
-    expect(uvAttr.getX(2)).toBeCloseTo(bearTeleRect.uOffset + bearTeleRect.uScale, 5);
-    expect(uvAttr.getZ(2)).toBeCloseTo(-bearTeleRect.uScale, 5);
+    expect(uvAttr.getX(2)).toBeCloseTo(bearTeleRect.uOffset, 5);
+    expect(uvAttr.getZ(2)).toBeCloseTo(bearTeleRect.uScale, 5);
 
-    const bearWalkRect = CHARACTER_ATLAS_FRAMES.bear_walk;
-    expect(uvAttr.getX(3)).toBeCloseTo(bearWalkRect.uOffset, 5);
-    expect(uvAttr.getZ(3)).toBeCloseTo(bearWalkRect.uScale, 5);
+    // Bear 1 moves screen-left (heading +pi/2) with spriteFacesRight=true -> flipped bear_idle
+    const bearIdleRect = CHARACTER_ATLAS_FRAMES.bear_idle;
+    expect(uvAttr.getX(3)).toBeCloseTo(bearIdleRect.uOffset + bearIdleRect.uScale, 5);
+    expect(uvAttr.getZ(3)).toBeCloseTo(-bearIdleRect.uScale, 5);
     expect(Math.abs(tiltAttr.getX(2))).toBeGreaterThan(0);
 
-    const expectedBear0 = createBillboardAnimPose('bear_walk');
-    const expectedBear1 = createBillboardAnimPose('bear_walk');
-    evaluateBearAnimPose(2.0, CREATURE_PHASE_TELEGRAPH, 0.75, 0, expectedBear0, true);
-    evaluateBearAnimPose(2.0, CREATURE_PHASE_IDLE, 0, 1, expectedBear1, false);
+    const expectedBear0 = createBillboardAnimPose('bear_idle');
+    const expectedBear1 = createBillboardAnimPose('bear_idle');
+    evaluateBearAnimPose(2.0, CREATURE_PHASE_TELEGRAPH, 0.75, 0, expectedBear0, false);
+    evaluateBearAnimPose(2.0, CREATURE_PHASE_IDLE, 0, 1, expectedBear1, true);
     expect(tiltAttr.getX(2)).toBeCloseTo(expectedBear0.tiltRad, 5);
     expect(tiltAttr.getX(3)).toBeCloseTo(expectedBear1.tiltRad, 5);
 

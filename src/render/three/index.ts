@@ -69,6 +69,7 @@ export {
 } from './characterSpriteAtlas';
 export {
   applyVolumePreservingSquash,
+  BEAR_WALK_CLIP,
   CHILD_CELEBRATION_DURATION_SEC,
   CHILD_CELEBRATION_HOP_COUNT,
   CHILD_CELEBRATION_STAGGER_SEC,

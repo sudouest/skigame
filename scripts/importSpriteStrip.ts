@@ -7,6 +7,21 @@ import zlib from 'node:zlib';
 export type BackgroundKeyMode = 'auto' | 'border' | 'none';
 export type OutlineMatteMode = 'auto' | 'dark-ink' | 'bg-decontaminate' | 'none';
 export type PoseAnchorMode = 'band-core' | 'core' | 'bbox';
+export type VerticalAnchorMode = 'per-frame' | 'shared-ground';
+
+export interface RgbaFrame {
+  readonly width: number;
+  readonly height: number;
+  readonly rgba: Uint8Array;
+}
+
+export interface VideoMetadata {
+  readonly width: number;
+  readonly height: number;
+  readonly durationSec: number;
+  readonly fps: number;
+  readonly frameCount: number;
+}
 
 export interface PixelPoint {
   readonly x: number;
@@ -59,6 +74,10 @@ export interface SpriteStripImportOptions extends BackgroundKeyOptions, PoseDete
   readonly fillRatio?: number;
   readonly scale?: number;
   readonly dilatePasses?: number;
+  readonly anchorYMode?: VerticalAnchorMode;
+  readonly keepIndices?: readonly number[];
+  readonly startSec?: number;
+  readonly endSec?: number;
 }
 
 export interface SpriteStripImportResult {
@@ -267,6 +286,170 @@ export function decodeRgbaPng(pngBytes: Uint8Array): {
   }
 
   return { width, height, rgba };
+}
+
+const VIDEO_EXTENSIONS = new Set(['.mov', '.mp4', '.m4v', '.webm', '.mkv', '.avi', '.gif']);
+
+export function isVideoFilePath(filePath: string): boolean {
+  return VIDEO_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
+/**
+ * Computes `sampleCount` evenly-spaced 0-based frame indices across `[0, totalFrames)` suitable
+ * for seamless loop extraction (omitting the duplicate end frame).
+ */
+export function computeEvenFrameIndices(totalFrames: number, sampleCount: number): number[] {
+  if (!Number.isInteger(totalFrames) || totalFrames <= 0) {
+    throw new Error(`Invalid totalFrames: ${totalFrames}`);
+  }
+  if (!Number.isInteger(sampleCount) || sampleCount <= 0) {
+    throw new Error(`Invalid sampleCount: ${sampleCount}`);
+  }
+  const indices: number[] = [];
+  for (let k = 0; k < sampleCount; k++) {
+    indices.push(Math.min(totalFrames - 1, Math.floor((k * totalFrames) / sampleCount)));
+  }
+  return indices;
+}
+
+function parseFpsFraction(raw: string): number {
+  const trimmed = raw.trim();
+  if (!trimmed) return 24;
+  const parts = trimmed.split('/');
+  if (parts.length === 2) {
+    const num = Number(parts[0]);
+    const den = Number(parts[1]);
+    if (Number.isFinite(num) && Number.isFinite(den) && num > 0 && den > 0) {
+      return num / den;
+    }
+  }
+  const val = Number(trimmed);
+  return Number.isFinite(val) && val > 0 ? val : 24;
+}
+
+export function probeVideoMetadata(filePath: string): VideoMetadata {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Input video not found: ${filePath}`);
+  }
+  const out = execFileSync(
+    'ffprobe',
+    [
+      '-v',
+      'error',
+      '-select_streams',
+      'v:0',
+      '-show_entries',
+      'stream=width,height,r_frame_rate,nb_frames,duration',
+      '-of',
+      'default=noprint_wrappers=1',
+      filePath,
+    ],
+    { encoding: 'utf8' },
+  );
+  const map = new Map<string, string>();
+  for (const line of out.split(/\r?\n/)) {
+    const eq = line.indexOf('=');
+    if (eq > 0) {
+      map.set(line.slice(0, eq).trim(), line.slice(eq + 1).trim());
+    }
+  }
+  const width = Number.parseInt(map.get('width') ?? '', 10);
+  const height = Number.parseInt(map.get('height') ?? '', 10);
+  const fps = parseFpsFraction(map.get('r_frame_rate') ?? '24/1');
+  const durationSec = Number(map.get('duration') ?? '0');
+  const rawNbFrames = Number.parseInt(map.get('nb_frames') ?? '', 10);
+  const frameCount =
+    Number.isFinite(rawNbFrames) && rawNbFrames > 0
+      ? rawNbFrames
+      : Number.isFinite(durationSec) && durationSec > 0
+        ? Math.max(1, Math.round(durationSec * fps))
+        : 0;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error(`Failed to probe video dimensions for ${filePath}`);
+  }
+  if (frameCount <= 0) {
+    throw new Error(`Failed to determine video frame count for ${filePath}`);
+  }
+  return {
+    width,
+    height,
+    durationSec: Number.isFinite(durationSec) && durationSec > 0 ? durationSec : frameCount / fps,
+    fps,
+    frameCount,
+  };
+}
+
+/**
+ * Extracts `sampleCount` evenly-spaced RGBA frames from a video file (optionally trimmed to
+ * `[startSec, endSec)`) via `ffmpeg`.
+ */
+export function extractVideoFramesViaFfmpeg(
+  filePath: string,
+  sampleCount: number,
+  startSec = 0,
+  endSec?: number,
+): RgbaFrame[] {
+  const meta = probeVideoMetadata(filePath);
+  const safeStart = Math.max(0, startSec);
+  const safeEnd = endSec !== undefined ? Math.min(meta.durationSec, endSec) : meta.durationSec;
+  if (safeEnd <= safeStart) {
+    throw new Error(`Invalid video trim window: startSec=${safeStart} >= endSec=${safeEnd}`);
+  }
+
+  const startFrame = Math.min(meta.frameCount - 1, Math.max(0, Math.round(safeStart * meta.fps)));
+  const endFrameExclusive = Math.min(
+    meta.frameCount,
+    Math.max(startFrame + 1, Math.round(safeEnd * meta.fps)),
+  );
+  const windowFrames = endFrameExclusive - startFrame;
+  const relIndices = computeEvenFrameIndices(windowFrames, sampleCount);
+  const absIndices = relIndices.map((r) => startFrame + r);
+  const uniqueAbs = Array.from(new Set(absIndices));
+  const selectExpr = uniqueAbs.map((idx) => `eq(n\\,${idx})`).join('+');
+
+  const raw = execFileSync(
+    'ffmpeg',
+    [
+      '-v',
+      'error',
+      '-i',
+      filePath,
+      '-vf',
+      `select=${selectExpr}`,
+      '-vsync',
+      '0',
+      '-f',
+      'rawvideo',
+      '-pix_fmt',
+      'rgba',
+      '-',
+    ],
+    { maxBuffer: 256 * 1024 * 1024 },
+  );
+
+  const frameBytes = meta.width * meta.height * 4;
+  const extractedCount = Math.floor(raw.length / frameBytes);
+  if (extractedCount === 0) {
+    throw new Error(`ffmpeg extracted 0 video frames from ${filePath}`);
+  }
+
+  const uniqueFrames = new Map<number, Uint8Array>();
+  for (let i = 0; i < Math.min(uniqueAbs.length, extractedCount); i++) {
+    const start = i * frameBytes;
+    const buf = new Uint8Array(frameBytes);
+    buf.set(raw.subarray(start, start + frameBytes));
+    uniqueFrames.set(uniqueAbs[i]!, buf);
+  }
+
+  const fallbackBuf = uniqueFrames.values().next().value!;
+  return absIndices.map((absIdx) => {
+    const src = uniqueFrames.get(absIdx) ?? fallbackBuf;
+    return {
+      width: meta.width,
+      height: meta.height,
+      rgba: new Uint8Array(src),
+    };
+  });
 }
 
 /**
@@ -1107,9 +1290,22 @@ export function processSpriteStripRgba(
 
   const work = new Uint8Array(inputRgba);
   const bgKeyResult = keyOutBackground(work, width, height, options);
-  const poses = detectPoseSpans(work, width, height, options, true);
-  if (poses.length === 0) {
+  const detectedPoses = detectPoseSpans(work, width, height, options, true);
+  if (detectedPoses.length === 0) {
     throw new Error('No pose frames detected in sprite strip');
+  }
+
+  let poses = detectedPoses;
+  if (options.keepIndices && options.keepIndices.length > 0) {
+    poses = options.keepIndices.map((origIdx, newIdx) => {
+      const p = detectedPoses[origIdx];
+      if (!p) {
+        throw new Error(
+          `--keep index ${origIdx} out of range (detected ${detectedPoses.length} poses)`,
+        );
+      }
+      return { ...p, index: newIdx };
+    });
   }
 
   let scale = options.scale;
@@ -1132,6 +1328,11 @@ export function processSpriteStripRgba(
     throw new Error(`Computed invalid sprite scale: ${scale}`);
   }
 
+  const sharedMaxY1 =
+    options.anchorYMode === 'shared-ground'
+      ? Math.max(...poses.map((p) => p.y1))
+      : undefined;
+
   const outWidth = poses.length * cellSize;
   const outHeight = cellSize;
   const outRgba = new Uint8Array(outWidth * outHeight * 4);
@@ -1140,7 +1341,7 @@ export function processSpriteStripRgba(
     const pose = poses[col]!;
     const dstCx = col * cellSize + cellSize * 0.5;
     const srcCx = pose.anchorX;
-    const srcYBot = pose.y1;
+    const srcYBot = sharedMaxY1 ?? pose.y1;
 
     for (let dy = padPx; dy < cellSize - padPx; dy++) {
       for (let dx = padPx; dx < cellSize - padPx; dx++) {
@@ -1198,6 +1399,208 @@ export function processSpriteStripRgba(
     scale,
     groundY,
     bgKeyResult,
+  };
+}
+
+/**
+ * Processes an ordered sequence of isolated RGBA frames (e.g., extracted from a loopable character
+ * video) into a uniformly scaled, anchor-centered, border-padded, RGB-dilated horizontal sprite strip.
+ */
+export function processSpriteFramesRgba(
+  frames: readonly RgbaFrame[],
+  options: SpriteStripImportOptions = {},
+): SpriteStripImportResult {
+  if (frames.length === 0) {
+    throw new Error('No input frames provided to processSpriteFramesRgba');
+  }
+  const cellSize = options.cellSize ?? 256;
+  const padPx = options.padPx ?? 4;
+  const innerMarginPx = options.innerMarginPx ?? 4;
+  const fillRatio = options.fillRatio ?? 0.9;
+  const dilatePasses = options.dilatePasses ?? 6;
+  const alphaThreshold = options.alphaThreshold ?? 128;
+  const anchorMode = options.anchorMode ?? 'band-core';
+  if (cellSize <= 0 || padPx < 0 || padPx * 2 >= cellSize) {
+    throw new Error(`Invalid cellSize=${cellSize} / padPx=${padPx}`);
+  }
+  const groundY = cellSize - padPx - 2;
+
+  const keyedFrames: Array<{ width: number; height: number; rgba: Uint8Array }> = [];
+  const poses: PoseSpan[] = [];
+  let firstBgKeyResult: BackgroundKeyResult | undefined;
+
+  for (let i = 0; i < frames.length; i++) {
+    const frame = frames[i]!;
+    const work = new Uint8Array(frame.rgba);
+    const bgKeyResult = keyOutBackground(work, frame.width, frame.height, options);
+    if (!firstBgKeyResult) {
+      firstBgKeyResult = bgKeyResult;
+    }
+
+    const minPoseAreaPx =
+      options.minPoseAreaPx ??
+      Math.max(20, Math.min(500, Math.round(frame.width * frame.height * 0.0015)));
+    const minSpeckAreaPx =
+      options.minSpeckAreaPx ?? Math.max(3, Math.min(12, Math.round(minPoseAreaPx * 0.05)));
+    const fgMask = filterIsolatedForegroundSpecks(
+      work,
+      frame.width,
+      frame.height,
+      alphaThreshold,
+      minSpeckAreaPx,
+      true,
+    );
+
+    let x0 = frame.width;
+    let x1 = -1;
+    let y0 = frame.height;
+    let y1 = -1;
+    let areaPx = 0;
+    for (let y = 0; y < frame.height; y++) {
+      const rowOff = y * frame.width;
+      for (let x = 0; x < frame.width; x++) {
+        if (fgMask[rowOff + x] === 1) {
+          areaPx++;
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+        }
+      }
+    }
+    if (areaPx === 0 || x1 < x0 || y1 < y0) {
+      throw new Error(`Frame #${i} has no foreground pixels after background keying`);
+    }
+
+    let anchorX = (x0 + x1) * 0.5;
+    if (anchorMode === 'core' || anchorMode === 'band-core') {
+      const spanH = Math.max(1, y1 - y0 + 1);
+      const by0 = anchorMode === 'band-core' ? Math.floor(y0 + spanH * 0.15) : y0;
+      const by1 = anchorMode === 'band-core' ? Math.ceil(y0 + spanH * 0.85) : y1;
+      let num = 0;
+      let den = 0;
+      for (let x = x0; x <= x1; x++) {
+        let cnt = 0;
+        for (let y = Math.max(y0, by0); y <= Math.min(y1, by1); y++) {
+          if (fgMask[y * frame.width + x] === 1) {
+            cnt++;
+          }
+        }
+        const w = cnt * cnt * cnt;
+        num += x * w;
+        den += w;
+      }
+      if (den > 0) {
+        anchorX = num / den;
+      }
+    }
+
+    keyedFrames.push({ width: frame.width, height: frame.height, rgba: work });
+    poses.push({
+      index: i,
+      x0,
+      x1,
+      y0,
+      y1,
+      wx0: 0,
+      wx1: frame.width - 1,
+      anchorX,
+      areaPx,
+    });
+  }
+
+  let scale = options.scale;
+  if (scale === undefined) {
+    let maxHalfReach = 1;
+    let maxHeight = 1;
+    for (let i = 0; i < poses.length; i++) {
+      const pose = poses[i]!;
+      const halfReach = Math.max(pose.anchorX - pose.x0, pose.x1 - pose.anchorX);
+      const poseH = Math.max(1, pose.y1 - pose.y0 + 1);
+      if (halfReach > maxHalfReach) maxHalfReach = halfReach;
+      if (poseH > maxHeight) maxHeight = poseH;
+    }
+    const maxAllowedHalfW = cellSize * 0.5 - (padPx + innerMarginPx);
+    const maxAllowedH = groundY - (padPx + innerMarginPx);
+    const targetHeightPx = Math.min(maxAllowedH, Math.round(cellSize * fillRatio));
+    scale = Math.min(maxAllowedHalfW / maxHalfReach, targetHeightPx / maxHeight);
+  }
+  if (!Number.isFinite(scale) || scale <= 0) {
+    throw new Error(`Computed invalid sprite scale: ${scale}`);
+  }
+
+  const sharedMaxY1 =
+    options.anchorYMode === 'shared-ground'
+      ? Math.max(...poses.map((p) => p.y1))
+      : undefined;
+
+  const outWidth = poses.length * cellSize;
+  const outHeight = cellSize;
+  const outRgba = new Uint8Array(outWidth * outHeight * 4);
+
+  for (let col = 0; col < poses.length; col++) {
+    const pose = poses[col]!;
+    const frame = keyedFrames[col]!;
+    const dstCx = col * cellSize + cellSize * 0.5;
+    const srcCx = pose.anchorX;
+    const srcYBot = sharedMaxY1 ?? pose.y1;
+
+    for (let dy = padPx; dy < cellSize - padPx; dy++) {
+      for (let dx = padPx; dx < cellSize - padPx; dx++) {
+        const ox = col * cellSize + dx;
+        const oy = dy;
+        let prSum = 0;
+        let pgSum = 0;
+        let pbSum = 0;
+        let paSum = 0;
+
+        for (let subY = -0.25; subY <= 0.25; subY += 0.5) {
+          for (let subX = -0.25; subX <= 0.25; subX += 0.5) {
+            const sx = srcCx + (ox + 0.5 + subX - dstCx) / scale;
+            const sy = srcYBot + (oy + 0.5 + subY - groundY) / scale;
+            const [pr, pg, pb, pa] = samplePremulBilinear(
+              frame.rgba,
+              frame.width,
+              frame.height,
+              sx,
+              sy,
+              0,
+              frame.width - 1,
+            );
+            prSum += pr;
+            pgSum += pg;
+            pbSum += pb;
+            paSum += pa;
+          }
+        }
+
+        const pr = prSum * 0.25;
+        const pg = pgSum * 0.25;
+        const pb = pbSum * 0.25;
+        const pa = paSum * 0.25;
+        if (pa > 0.01) {
+          const i4 = (oy * outWidth + ox) * 4;
+          outRgba[i4] = clampByte(pr / pa);
+          outRgba[i4 + 1] = clampByte(pg / pa);
+          outRgba[i4 + 2] = clampByte(pb / pa);
+          outRgba[i4 + 3] = clampByte(pa * 255);
+        }
+      }
+    }
+  }
+
+  if (dilatePasses > 0) {
+    dilateRgbaEdges(outRgba, outWidth, outHeight, dilatePasses);
+  }
+
+  return {
+    width: outWidth,
+    height: outHeight,
+    rgba: outRgba,
+    poses,
+    scale,
+    groundY,
+    bgKeyResult: firstBgKeyResult!,
   };
 }
 
@@ -1265,18 +1668,22 @@ export function parseCliArgs(argv: readonly string[]): CliImportArgs {
   let outputPath = '';
   let previewPath: string | undefined;
 
-  let expectedFrames = 4;
+  let expectedFrames: number | undefined;
   let cellSize = 256;
   let padPx = 4;
   let fillRatio = 0.9;
   let scale: number | undefined;
   let anchorMode: PoseAnchorMode = 'band-core';
+  let anchorYMode: VerticalAnchorMode = 'per-frame';
   let bgMode: BackgroundKeyMode = 'auto';
   let outlineMatteMode: OutlineMatteMode = 'auto';
   let fringeStripPasses: number | undefined;
   let bgTolerance = 30;
   let clearEnclosedMinArea = 0;
   let dilatePasses = 6;
+  let startSec: number | undefined;
+  let endSec: number | undefined;
+  let keepIndices: number[] | undefined;
   const seedPoints: PixelPoint[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -1325,6 +1732,34 @@ export function parseCliArgs(argv: readonly string[]): CliImportArgs {
         }
         anchorMode = next;
         break;
+      case '--anchor-y':
+        if (next !== 'per-frame' && next !== 'shared-ground') {
+          throw new Error(
+            `Invalid --anchor-y '${next ?? ''}', expected per-frame|shared-ground`,
+          );
+        }
+        anchorYMode = next;
+        break;
+      case '--start-sec':
+        startSec = parseFiniteNum(next, '--start-sec');
+        if (startSec < 0) throw new Error('--start-sec must be >= 0');
+        break;
+      case '--end-sec':
+        endSec = parseFiniteNum(next, '--end-sec');
+        if (endSec <= 0) throw new Error('--end-sec must be > 0');
+        break;
+      case '--keep': {
+        const parts = (next ?? '').split(',').filter((s) => s.length > 0);
+        if (parts.length === 0) {
+          throw new Error(`Invalid --keep '${next ?? ''}', expected comma-separated indices`);
+        }
+        keepIndices = parts.map((p) => {
+          const idx = Math.trunc(parseFiniteNum(p, '--keep'));
+          if (idx < 0) throw new Error('--keep indices must be >= 0');
+          return idx;
+        });
+        break;
+      }
       case '--bg':
         if (next !== 'auto' && next !== 'border' && next !== 'none') {
           throw new Error(`Invalid --bg '${next ?? ''}', expected auto|border|none`);
@@ -1376,6 +1811,10 @@ export function parseCliArgs(argv: readonly string[]): CliImportArgs {
     }
   }
 
+  if (startSec !== undefined && endSec !== undefined && endSec <= startSec) {
+    throw new Error(`--end-sec (${endSec}) must be greater than --start-sec (${startSec})`);
+  }
+
   if (padPx * 2 >= cellSize) {
     throw new Error(`--pad (${padPx}) must be less than half of --cell-size (${cellSize})`);
   }
@@ -1384,18 +1823,21 @@ export function parseCliArgs(argv: readonly string[]): CliImportArgs {
     throw new Error('Both --in <path> and --out <path> are required (pass --help for usage)');
   }
 
+  const resolvedFrames = expectedFrames ?? (isVideoFilePath(inputPath) ? 8 : 4);
+
   return {
     help,
     inputPath,
     outputPath,
     previewPath,
     options: {
-      expectedFrames,
+      expectedFrames: resolvedFrames,
       cellSize,
       padPx,
       fillRatio,
       scale,
       anchorMode,
+      anchorYMode,
       bgMode,
       outlineMatteMode,
       fringeStripPasses,
@@ -1403,6 +1845,9 @@ export function parseCliArgs(argv: readonly string[]): CliImportArgs {
       clearEnclosedMinArea,
       dilatePasses,
       seedPoints,
+      startSec,
+      endSec,
+      keepIndices,
     },
   };
 }
@@ -1413,8 +1858,23 @@ export function importSpriteStripFile(
   options: SpriteStripImportOptions = {},
   previewPath?: string,
 ): SpriteStripImportResult {
-  const decoded = decodeImageViaFfmpeg(inputPath);
-  const result = processSpriteStripRgba(decoded.rgba, decoded.width, decoded.height, options);
+  let result: SpriteStripImportResult;
+  if (isVideoFilePath(inputPath)) {
+    const sampleCount =
+      options.expectedFrames !== undefined && options.expectedFrames > 0
+        ? options.expectedFrames
+        : 8;
+    const videoFrames = extractVideoFramesViaFfmpeg(
+      inputPath,
+      sampleCount,
+      options.startSec ?? 0,
+      options.endSec,
+    );
+    result = processSpriteFramesRgba(videoFrames, options);
+  } else {
+    const decoded = decodeImageViaFfmpeg(inputPath);
+    result = processSpriteStripRgba(decoded.rgba, decoded.width, decoded.height, options);
+  }
 
   if (previewPath) {
     const previewRgba = renderPreviewSheet(
@@ -1433,24 +1893,28 @@ export function importSpriteStripFile(
   return result;
 }
 
-const USAGE_TEXT = `Usage: npm run import:sprite -- --in <input-image> --out <output.png> [options]
+const USAGE_TEXT = `Usage: npm run import:sprite -- --in <input-image-or-video> --out <output.png> [options]
 
 Options:
-  --frames <n>                   Expected horizontal poses (default: 4, 0 = auto)
-  --cell-size <px>               Output square cell size in px (default: 256)
-  --pad <px>                     Transparent cell border padding in px (default: 4)
-  --fill-ratio <0..1>            Target max sprite height fill within cell (default: 0.90)
-  --scale <num>                  Optional explicit uniform scale factor
-  --anchor <band-core|core|bbox> Horizontal centering anchor (default: band-core)
-  --bg <auto|border|none>        Background removal mode (default: auto)
-  --outline-matte <mode>         auto|dark-ink|bg-decontaminate|none (default: auto)
-  --fringe-passes <n>            Outer halo passes (default: 2 for dark-ink, 0 otherwise)
-  --bg-tolerance <n>             Max channel delta from corner bg color (default: 30)
-  --clear-enclosed-min-area <px> Optional min interior bg pocket area to clear (default: 0)
-  --seed-bg <x,y>                Optional enclosed background pixel seed (repeatable)
-  --dilate-passes <n>            RGB edge dilation passes into alpha=0 texels (default: 6)
-  --preview <path.png>           Write dark/light alignment inspection sheet
-  -h, --help                     Show this help message
+  --frames <n>                      Poses to detect (image, default: 4, 0 = auto) or sample (video, default: 8)
+  --start-sec <sec>                 Video only: trim start time in seconds (default: 0)
+  --end-sec <sec>                   Video only: trim end time in seconds (default: full duration)
+  --keep <i,j,...>                  Image only: keep subset of 0-based pose indices (e.g. 0,1)
+  --cell-size <px>                  Output square cell size in px (default: 256)
+  --pad <px>                        Transparent cell border padding in px (default: 4)
+  --fill-ratio <0..1>               Target max sprite height fill within cell (default: 0.90)
+  --scale <num>                     Optional explicit uniform scale factor
+  --anchor <band-core|core|bbox>    Horizontal centering anchor (default: band-core)
+  --anchor-y <per-frame|shared-ground> Vertical grounding mode (default: per-frame)
+  --bg <auto|border|none>           Background removal mode (default: auto)
+  --outline-matte <mode>            auto|dark-ink|bg-decontaminate|none (default: auto)
+  --fringe-passes <n>               Outer halo passes (default: 2 for dark-ink, 0 otherwise)
+  --bg-tolerance <n>                Max channel delta from corner bg color (default: 30)
+  --clear-enclosed-min-area <px>    Optional min interior bg pocket area to clear (default: 0)
+  --seed-bg <x,y>                   Optional enclosed background pixel seed (repeatable)
+  --dilate-passes <n>               RGB edge dilation passes into alpha=0 texels (default: 6)
+  --preview <path.png>              Write dark/light alignment inspection sheet
+  -h, --help                        Show this help message
 `;
 
 const isCliMain =
