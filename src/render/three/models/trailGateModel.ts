@@ -7,6 +7,7 @@ import { createTexturedToonMaterial, type SharedToonMaterials } from '../toonMat
 import {
   type AtlasTileRect,
   buildMergedTexturedGeometry,
+  buildTaperedPostGeometry,
   createProceduralCanvasTexture,
   makeAtlasTile,
   type TexturedGeometryPart,
@@ -388,77 +389,6 @@ export function drawTrailGateAtlas(ctx: CanvasRenderingContext2D): void {
   }
 
   ctx.restore();
-}
-
-/**
- * Builds a closed non-indexed tapered vertical rectangular timber post with guaranteed
- * outward CCW winding and clean [0, 1] UVs per face (`groups[0]` side faces, `groups[1]` caps).
- */
-function buildTaperedPostGeometry(
-  wBot: number,
-  dBot: number,
-  wTop: number,
-  dTop: number,
-  yBot: number,
-  yTop: number,
-): THREE.BufferGeometry {
-  const hwB = wBot * 0.5;
-  const hdB = dBot * 0.5;
-  const hwT = wTop * 0.5;
-  const hdT = dTop * 0.5;
-
-  const b0: readonly [number, number, number] = [-hwB, yBot, hdB];
-  const b1: readonly [number, number, number] = [hwB, yBot, hdB];
-  const b2: readonly [number, number, number] = [hwB, yBot, -hdB];
-  const b3: readonly [number, number, number] = [-hwB, yBot, -hdB];
-
-  const t0: readonly [number, number, number] = [-hwT, yTop, hdT];
-  const t1: readonly [number, number, number] = [hwT, yTop, hdT];
-  const t2: readonly [number, number, number] = [hwT, yTop, -hdT];
-  const t3: readonly [number, number, number] = [-hwT, yTop, -hdT];
-
-  const positions: number[] = [];
-  const uvs: number[] = [];
-
-  const pushTri = (
-    p0: readonly [number, number, number],
-    uv0: readonly [number, number],
-    p1: readonly [number, number, number],
-    uv1: readonly [number, number],
-    p2: readonly [number, number, number],
-    uv2: readonly [number, number],
-  ): void => {
-    positions.push(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], p2[0], p2[1], p2[2]);
-    uvs.push(uv0[0], uv0[1], uv1[0], uv1[1], uv2[0], uv2[1]);
-  };
-
-  const pushQuad = (
-    p0: readonly [number, number, number],
-    p1: readonly [number, number, number],
-    p2: readonly [number, number, number],
-    p3: readonly [number, number, number],
-  ): void => {
-    pushTri(p0, [0, 0], p1, [1, 0], p2, [1, 1]);
-    pushTri(p0, [0, 0], p2, [1, 1], p3, [0, 1]);
-  };
-
-  // Side faces (vertices 0..23 -> materialIndex 0)
-  pushQuad(b0, b1, t1, t0); // +Z front
-  pushQuad(b1, b2, t2, t1); // +X right
-  pushQuad(b2, b3, t3, t2); // -Z back
-  pushQuad(b3, b0, t0, t3); // -X left
-
-  // Caps (vertices 24..35 -> materialIndex 1)
-  pushQuad(t0, t1, t2, t3); // +Y top
-  pushQuad(b3, b2, b1, b0); // -Y bottom
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-  geo.computeVertexNormals();
-  geo.addGroup(0, 24, 0);
-  geo.addGroup(24, 12, 1);
-  return geo;
 }
 
 /**

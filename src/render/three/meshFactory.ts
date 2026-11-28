@@ -215,10 +215,6 @@ export interface ProceduralMeshAssets {
   readonly presentStdGeo: THREE.BufferGeometry;
   readonly presentGoldGeo: THREE.BufferGeometry;
   readonly rampGeo: THREE.BufferGeometry;
-  readonly lanternPostGeo: THREE.BufferGeometry;
-  readonly lanternGlowGeo: THREE.BufferGeometry;
-  readonly deliveryArchGeo: THREE.BufferGeometry;
-  readonly deliveryArchGlowGeo: THREE.BufferGeometry;
   readonly cabinSmokeGeo: THREE.BufferGeometry;
 }
 
@@ -251,45 +247,6 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     'SkiRampUnitGeo',
   );
 
-  // Delivery Lantern Post
-  const lanternPostGeo = buildMergedColoredGeometry(
-    [
-      { geometry: new THREE.BoxGeometry(0.36, 3.6, 0.36), color: '#78350f', ty: 1.8 },
-      { geometry: new THREE.BoxGeometry(1.3, 0.28, 0.28), color: '#78350f', tx: 0.45, ty: 3.45 },
-      { geometry: new THREE.ConeGeometry(0.45, 0.35, 4), color: '#334155', tx: 0.95, ty: 3.22, ry: Math.PI * 0.25 },
-    ],
-    'DeliveryLanternPostGeo',
-    false,
-  );
-  const lanternGlowGeo = buildMergedColoredGeometry(
-    [
-      { geometry: new THREE.BoxGeometry(0.48, 0.56, 0.48), color: '#fde047', tx: 0.95, ty: 2.82 },
-    ],
-    'DeliveryLanternGlowGeo',
-    false,
-  );
-
-  // Delivery Sibling Arch
-  const deliveryArchGeo = buildMergedColoredGeometry(
-    [
-      { geometry: new THREE.BoxGeometry(0.45, 4.2, 0.45), color: '#7c2d12', tx: -2.6, ty: 2.1 },
-      { geometry: new THREE.BoxGeometry(0.45, 4.2, 0.45), color: '#7c2d12', tx: 2.6, ty: 2.1 },
-      { geometry: new THREE.BoxGeometry(6.2, 0.55, 0.55), color: '#9a3412', ty: 4.15 },
-      { geometry: new THREE.BoxGeometry(6.6, 0.25, 0.75), color: '#f8fafc', ty: 4.5 },
-    ],
-    'DeliveryArchGeo',
-    false,
-  );
-  const deliveryArchGlowGeo = buildMergedColoredGeometry(
-    [
-      { geometry: new THREE.OctahedronGeometry(0.28, 0), color: '#fde047', tx: -1.6, ty: 3.65 },
-      { geometry: new THREE.OctahedronGeometry(0.32, 0), color: '#fef08a', tx: 0, ty: 3.55 },
-      { geometry: new THREE.OctahedronGeometry(0.28, 0), color: '#fde047', tx: 1.6, ty: 3.65 },
-    ],
-    'DeliveryArchGlowGeo',
-    false,
-  );
-
   const cabinSmokeGeo = buildChimneySmokeQuadGeometry('DeliveryCabinSmokeGeo');
 
   const allGeos = [
@@ -298,10 +255,6 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     presentStdGeo,
     presentGoldGeo,
     rampGeo,
-    lanternPostGeo,
-    lanternGlowGeo,
-    deliveryArchGeo,
-    deliveryArchGlowGeo,
     cabinSmokeGeo,
   ];
   for (const g of allGeos) {
@@ -314,10 +267,6 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     presentStdGeo,
     presentGoldGeo,
     rampGeo,
-    lanternPostGeo,
-    lanternGlowGeo,
-    deliveryArchGeo,
-    deliveryArchGlowGeo,
     cabinSmokeGeo,
   };
 }

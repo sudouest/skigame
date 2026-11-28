@@ -90,7 +90,7 @@ function resolveYaw(lm: SegmentLandmarkRequirement, modelDef: LandmarkModelDef |
 }
 
 /**
- * Reconciles pooled 3D landmarks (`forkArch`, `delivery_lantern`, `delivery_arch`,
+ * Reconciles pooled 3D landmarks (`forkArch`, single/double hanging `delivery_lantern`,
  * `folk_log`, `folk_aframe`, and registered `.glb` models) directly against the active
  * 4-slot `TrailWindowView` independent of terrain grid tiles, plus a single-draw-call
  * rising chimney smoke particle pool.
@@ -400,7 +400,8 @@ export class LandmarkStreamer {
     const badgeChanged =
       rec.segmentSeed !== segmentSeed ||
       rec.badgeStageId !== lm.badgeStageId ||
-      rec.gateHalfWidth !== lm.gateHalfWidth;
+      rec.gateHalfWidth !== lm.gateHalfWidth ||
+      rec.x !== lm.x;
 
     if (badgeChanged && rec.handle?.configure) {
       rec.handle.configure(lm, segmentSeed);

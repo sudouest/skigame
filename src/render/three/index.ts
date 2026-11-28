@@ -123,6 +123,7 @@ export {
 } from './landmarkRegistry';
 export {
   buildMergedTexturedGeometry,
+  buildTaperedPostGeometry,
   createProceduralCanvasTexture,
   drawFolkStar,
   drawRoundedRectPath,
@@ -132,6 +133,30 @@ export {
   type TexturedGeometryPart,
   type TileMappingSpec,
 } from './models/proceduralModelUtils';
+export {
+  buildLanternPostGeometries,
+  createLanternPostAssets,
+  createLanternPostLandmarkDefs,
+  createLanternPostObject,
+  DEFAULT_LANTERN_POST_TUNING,
+  drawLanternPostAtlas,
+  LANTERN_ARM_REACH_X,
+  LANTERN_ARM_Y,
+  LANTERN_BODY_CENTER_Y,
+  LANTERN_HANG_X,
+  LANTERN_POST_ATLAS_SIZE,
+  LANTERN_POST_ATLAS_TILES,
+  LANTERN_POST_BASE_Y,
+  LANTERN_POST_TOP_Y,
+  LANTERN_SCALE,
+  resolveLanternPostTuning,
+  type LanternPostAssets,
+  type LanternPostAtlasTile,
+  type LanternPostGeometries,
+  type LanternPostTileName,
+  type LanternPostTuning,
+  type LanternPostVariant,
+} from './models/lanternPostModel';
 export {
   buildFolkAFrameGeometries,
   createFolkAFrameLandmarkDef,

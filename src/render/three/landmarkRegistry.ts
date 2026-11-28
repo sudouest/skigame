@@ -5,6 +5,7 @@ import type { GraphicsUtils } from './graphicsUtils';
 import type { ProceduralMeshAssets } from './meshFactory';
 import { createFolkAFrameLandmarkDef } from './models/folkAFrameModel';
 import { createFolkCabinLandmarkDef } from './models/folkCabinModel';
+import { createLanternPostLandmarkDefs } from './models/lanternPostModel';
 import { createTrailGateLandmarkDef } from './models/trailGateModel';
 import type { SharedToonMaterials } from './toonMaterials';
 
@@ -62,68 +63,25 @@ export class LandmarkModelRegistry {
 }
 
 /**
- * Builds the default landmark model registry populated with fork arches, delivery lanterns,
- * delivery arches, the Folk Log Cabin, and the Folk A-Frame Chalet.
+ * Builds the default landmark model registry populated with fork arches, single & double
+ * hanging wooden lantern posts, the Folk Log Cabin, and the Folk A-Frame Chalet.
  */
 export function createDefaultLandmarkRegistry(
   gfx: GraphicsUtils,
   materials: SharedToonMaterials,
-  meshAssets: ProceduralMeshAssets,
+  _meshAssets: ProceduralMeshAssets,
   outlineMaterial?: THREE.Material,
 ): LandmarkModelRegistry {
   const registry = new LandmarkModelRegistry();
 
   registry.register(createTrailGateLandmarkDef(gfx, materials, outlineMaterial));
 
-  registry.register({
-    id: 'proc:lantern',
-    poolCapacity: 12,
-    yawPolicy: 'none',
-    createInstance: (index) => {
-      const group = new THREE.Group();
-      group.name = `PooledDeliveryLantern_${index}`;
-      const postMesh = gfx.createMesh(
-        meshAssets.lanternPostGeo,
-        materials.propToonMaterial,
-        `LanternPost_${index}`,
-      );
-      postMesh.castShadow = true;
-      const glowMesh = gfx.createMesh(
-        meshAssets.lanternGlowGeo,
-        materials.beaconGlowMaterial,
-        `LanternGlow_${index}`,
-      );
-      glowMesh.castShadow = false;
-      group.add(postMesh, glowMesh);
-      gfx.markAsCache(group, group.name);
-      return { group };
-    },
-  });
-
-  registry.register({
-    id: 'proc:arch',
-    poolCapacity: 8,
-    yawPolicy: 'none',
-    createInstance: (index) => {
-      const group = new THREE.Group();
-      group.name = `PooledDeliveryArch_${index}`;
-      const archMesh = gfx.createMesh(
-        meshAssets.deliveryArchGeo,
-        materials.propToonMaterial,
-        `DeliveryArch_${index}`,
-      );
-      archMesh.castShadow = true;
-      const glowMesh = gfx.createMesh(
-        meshAssets.deliveryArchGlowGeo,
-        materials.beaconGlowMaterial,
-        `DeliveryArchGlow_${index}`,
-      );
-      glowMesh.castShadow = false;
-      group.add(archMesh, glowMesh);
-      gfx.markAsCache(group, group.name);
-      return { group };
-    },
-  });
+  const lanternDefs = createLanternPostLandmarkDefs(gfx, materials, outlineMaterial);
+  registry.register(lanternDefs.single);
+  registry.register(lanternDefs.double);
+  registry.alias('proc:lantern', 'proc:lantern:single');
+  registry.alias('proc:arch:lantern_arch', 'proc:lantern:double');
+  registry.alias('proc:arch', 'proc:lantern:double');
 
   registry.register(createFolkCabinLandmarkDef(gfx, materials, outlineMaterial));
   registry.register(createFolkAFrameLandmarkDef(gfx, materials, outlineMaterial));

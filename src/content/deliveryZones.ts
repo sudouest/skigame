@@ -52,8 +52,9 @@ export const DELIVERY_CHILD_SOLO: DeliveryZoneDef = {
   landmarkVisual: {
     kind: 'procedural',
     preset: 'lantern',
-    palette: ['#78350f', '#fbbf24', '#fef3c7'],
+    palette: ['#c8842a', '#2e3138', '#f8fafc', '#fde68a', '#f59e0b'],
     scale: 1.0,
+    variant: 'single',
     outline: true,
   },
   requiredSceneryId: 'delivery_lantern',
@@ -86,13 +87,13 @@ export const DELIVERY_SLED_DUO: DeliveryZoneDef = {
   ],
   landmarkVisual: {
     kind: 'procedural',
-    preset: 'arch',
-    palette: ['#92400e', '#f59e0b', '#fef08a'],
+    preset: 'lantern',
+    palette: ['#c8842a', '#2e3138', '#f8fafc', '#fde68a', '#f59e0b'],
     scale: 1.0,
-    variant: 'lantern_arch',
+    variant: 'double',
     outline: true,
   },
-  requiredSceneryId: 'delivery_arch',
+  requiredSceneryId: 'delivery_lantern_double',
 };
 
 export const DELIVERY_VILLAGE_PLAZA: DeliveryZoneDef = {
