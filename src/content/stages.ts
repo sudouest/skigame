@@ -151,6 +151,11 @@ export const STAGE_POWDER_BOWL: StageDef = {
         maxPerSegment: 1,
       },
     ],
+    ramps: [
+      { rampId: 'ski_ramp_gentle', weight: 0.65 },
+      { rampId: 'ski_ramp_standard', weight: 0.3 },
+      { rampId: 'ski_ramp_steep', weight: 0.05 },
+    ],
     scenery: {
       offPisteTreeDensity: 0.65,
       rockDensity: 0.15,
@@ -284,6 +289,11 @@ export const STAGE_SUNNY_BLUE: StageDef = {
         maxPerSegment: 1,
       },
     ],
+    ramps: [
+      { rampId: 'ski_ramp_gentle', weight: 0.35 },
+      { rampId: 'ski_ramp_standard', weight: 0.5 },
+      { rampId: 'ski_ramp_steep', weight: 0.15 },
+    ],
     scenery: {
       offPisteTreeDensity: 0.55,
       rockDensity: 0.25,
@@ -416,6 +426,11 @@ export const STAGE_GRANITE_GORGE: StageDef = {
         spacingM: [140, 210],
         maxPerSegment: 2,
       },
+    ],
+    ramps: [
+      { rampId: 'ski_ramp_gentle', weight: 0.15 },
+      { rampId: 'ski_ramp_standard', weight: 0.5 },
+      { rampId: 'ski_ramp_steep', weight: 0.35 },
     ],
     scenery: {
       offPisteTreeDensity: 0.32,
@@ -553,6 +568,11 @@ export const STAGE_ICY_BLACK: StageDef = {
         maxPerSegment: 2,
       },
     ],
+    ramps: [
+      { rampId: 'ski_ramp_gentle', weight: 0.1 },
+      { rampId: 'ski_ramp_standard', weight: 0.35 },
+      { rampId: 'ski_ramp_steep', weight: 0.55 },
+    ],
     scenery: {
       offPisteTreeDensity: 0.35,
       rockDensity: 0.55,
@@ -688,6 +708,11 @@ export const STAGE_BLIZZARD_RIDGE: StageDef = {
         spacingM: [120, 190],
         maxPerSegment: 2,
       },
+    ],
+    ramps: [
+      { rampId: 'ski_ramp_gentle', weight: 0.1 },
+      { rampId: 'ski_ramp_standard', weight: 0.4 },
+      { rampId: 'ski_ramp_steep', weight: 0.5 },
     ],
     scenery: {
       offPisteTreeDensity: 0.28,

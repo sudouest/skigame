@@ -11,6 +11,10 @@ import {
   OUTLINE_VISIBILITY_TUNING,
   PORTRAIT_FOV_TUNING,
   PRESENTS,
+  RAMPS,
+  RAMP_GENTLE,
+  RAMP_STANDARD,
+  RAMP_STEEP,
   SKIERS,
   STAGES,
   WEATHER_PROFILES,
@@ -21,6 +25,7 @@ import {
   getDeliveryZoneDef,
   getHazardDef,
   getPresentDef,
+  getRampDef,
   getSkierDef,
   getStageDef,
   resolveActiveCameraFraming,
@@ -198,6 +203,38 @@ describe('content registries & invariants', () => {
     expect(getSkierDef('skier_alpine')).toBeDefined();
     expect(getSkierDef('skier_carver')).toBeDefined();
     expect(Object.keys(SKIERS)).toHaveLength(2);
+  });
+
+  it('registers 3 ramp presets with increasing incline angles and difficulty-weighted stage distributions', () => {
+    expect(Object.keys(RAMPS)).toHaveLength(3);
+    expect(getRampDef('ski_ramp_gentle')).toBe(RAMP_GENTLE);
+    expect(getRampDef('ski_ramp_standard')).toBe(RAMP_STANDARD);
+    expect(getRampDef('ski_ramp_steep')).toBe(RAMP_STEEP);
+
+    const gentleAngle = Math.atan2(RAMP_GENTLE.height, RAMP_GENTLE.length);
+    const standardAngle = Math.atan2(RAMP_STANDARD.height, RAMP_STANDARD.length);
+    const steepAngle = Math.atan2(RAMP_STEEP.height, RAMP_STEEP.length);
+    expect(gentleAngle).toBeLessThan(standardAngle);
+    expect(standardAngle).toBeLessThan(steepAngle);
+    expect(RAMP_GENTLE.lipPitchBoostDeg).toBeLessThan(RAMP_STANDARD.lipPitchBoostDeg);
+    expect(RAMP_STANDARD.lipPitchBoostDeg).toBeLessThan(RAMP_STEEP.lipPitchBoostDeg);
+    expect(RAMP_GENTLE.landingClearanceM!).toBeLessThan(RAMP_STANDARD.landingClearanceM!);
+    expect(RAMP_STANDARD.landingClearanceM!).toBeLessThan(RAMP_STEEP.landingClearanceM!);
+
+    for (const stage of getAllStages()) {
+      const rules = stage.layout.ramps;
+      expect(rules).toBeDefined();
+      expect(rules!.length).toBeGreaterThanOrEqual(3);
+      for (const rule of rules!) {
+        expect(getRampDef(rule.rampId)).toBeDefined();
+        expect(rule.weight).toBeGreaterThan(0);
+      }
+    }
+
+    const powderWeights = new Map(getStageDef('powder-bowl')!.layout.ramps!.map((r) => [r.rampId, r.weight]));
+    const icyWeights = new Map(getStageDef('icy-black')!.layout.ramps!.map((r) => [r.rampId, r.weight]));
+    expect(powderWeights.get('ski_ramp_gentle')!).toBeGreaterThan(icyWeights.get('ski_ramp_gentle')!);
+    expect(icyWeights.get('ski_ramp_steep')!).toBeGreaterThan(powderWeights.get('ski_ramp_steep')!);
   });
 
   it('exposes parametric visibility tuning defaults, clean enabled=false toggles, and NaN/bounds sanitization', () => {

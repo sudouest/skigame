@@ -115,6 +115,11 @@ export interface StageDeliveryRule {
   readonly band: PlacementBand;
 }
 
+export interface StageRampRule {
+  readonly rampId: string;
+  readonly weight: number;
+}
+
 export type ScenerySpeciesKind =
   | 'pine_green'
   | 'pine_frosted'
@@ -206,6 +211,8 @@ export interface StageLayoutConfig {
   readonly deliveryZones: readonly StageDeliveryRule[];
   readonly creatures: readonly StageCreatureRule[];
   readonly scenery: StageSceneryConfig;
+  /** Optional weighted ramp presets for variable incline/launch angles (falls back to ski_ramp_standard). */
+  readonly ramps?: readonly StageRampRule[];
 }
 
 export interface StageDef {
@@ -253,6 +260,8 @@ export interface RampDef {
   readonly length: number;
   readonly height: number;
   readonly lipPitchBoostDeg: number;
+  /** Downstream safe clearance window (m) kept free of lethal hazards beyond ramp s. */
+  readonly landingClearanceM?: number;
 }
 
 export type CreatureBehaviorConfig =

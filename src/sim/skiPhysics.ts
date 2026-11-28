@@ -1331,8 +1331,11 @@ export class SkiPhysics {
     const dx = skier.posX + skier.velX * dt - ramps.posX[rampIdx]!;
     const dz = skier.posZ + skier.velZ * dt - ramps.posZ[rampIdx]!;
     const longDist = dx * fwdX + dz * fwdZ;
+    const rampPitch = ramps.pitchRad[rampIdx]!;
+    const rampHeight = ramps.height[rampIdx]!;
     const halfLen = ramps.length[rampIdx]! * 0.5;
-    return longDist >= halfLen - 0.15;
+    const pitchedHalfLen = halfLen * Math.cos(rampPitch) - rampHeight * Math.sin(rampPitch);
+    return longDist >= pitchedHalfLen - 0.15;
   }
 
   private tryApplyRampLipLaunch(
@@ -1356,30 +1359,38 @@ export class SkiPhysics {
     const dz = skier.posZ - ramps.posZ[rampIdx]!;
     const longDist = dx * fwdX + dz * fwdZ;
     const latDist = Math.abs(dx * rightX + dz * rightZ);
+    const rampPitch = ramps.pitchRad[rampIdx]!;
+    const rampHeight = ramps.height[rampIdx]!;
     const halfLen = ramps.length[rampIdx]! * 0.5;
     const halfWid = ramps.width[rampIdx]! * 0.5;
-    if (longDist < halfLen * 0.45 || latDist > halfWid + 0.8) {
+    const pitchedHalfLen = halfLen * Math.cos(rampPitch) - rampHeight * Math.sin(rampPitch);
+    if (longDist < pitchedHalfLen * 0.65 || latDist > halfWid + 0.45) {
       return false;
     }
 
-    const rampPitch = ramps.pitchRad[rampIdx]!;
     const rawBoostDeg = ramps.lipPitchBoostDeg[rampIdx]!;
     const speed3d = Math.hypot(skier.velX, skier.velY, skier.velZ);
 
-    // Smoothly saturate ramp-lip boost above 24 m/s so high-speed icy-black kickers land safely,
-    // while preserving crisp pop feel on moderate speeds (>= 14 m/s effective pop floor).
-    const satBoostDeg = lerp(rawBoostDeg, Math.min(rawBoostDeg, 12.0), smoothstep(24, 34, speed3d));
+    // Smoothly saturate ramp-lip boost proportionally above 24 m/s while staying above each
+    // ramp's own geometric wedge slope so gentle/standard/steep kickers preserve distinct airtime.
+    const geometricDeckDeg =
+      (Math.atan2(Math.max(0, rampHeight), Math.max(1e-4, ramps.length[rampIdx]!)) * 180) /
+      Math.PI;
+    const highSpeedFloorDeg = Math.min(rawBoostDeg, geometricDeckDeg + 0.75);
+    const highSpeedBoostDeg = clamp(rawBoostDeg * (2 / 3), highSpeedFloorDeg, rawBoostDeg);
+    const satBoostDeg = lerp(rawBoostDeg, highSpeedBoostDeg, smoothstep(24, 34, speed3d));
     const launchPitch = clamp(rampPitch + degToRad(satBoostDeg), -0.45, 0.55);
 
     const launchSpeed = Math.max(14, speed3d);
     const desiredVelY = launchSpeed * Math.sin(launchPitch);
-    const desiredHoriz = launchSpeed * Math.cos(launchPitch);
+    const finalVelY = Math.max(skier.velY, desiredVelY);
+    const desiredHoriz = Math.sqrt(Math.max(0, launchSpeed * launchSpeed - finalVelY * finalVelY));
     const curHoriz = Math.max(1e-4, Math.hypot(skier.velX, skier.velZ));
     const hScale = desiredHoriz / curHoriz;
 
     skier.velX *= hScale;
     skier.velZ *= hScale;
-    skier.velY = Math.max(skier.velY, desiredVelY);
+    skier.velY = finalVelY;
     skier.posY += Math.max(0, skier.velY) * dt * 0.5;
     contactSolver.teleportCharacter(
       skier.posX,

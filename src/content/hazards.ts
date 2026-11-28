@@ -72,20 +72,62 @@ export const HAZARD_PINE_TREE: HazardDef = {
   lethal: true,
 };
 
+const RAMP_SHARED_PALETTE = ['#f5f8fc', '#7f6f5d', '#ff6a00', '#38f6ff', '#2e452d'] as const;
+
+export const RAMP_GENTLE: RampDef = {
+  id: 'ski_ramp_gentle',
+  name: 'Gentle Roller Kicker',
+  visual: {
+    kind: 'procedural',
+    preset: 'ramp',
+    palette: RAMP_SHARED_PALETTE,
+    scale: 1.0,
+    variant: 'gentle',
+    outline: true,
+  },
+  width: 4.4,
+  length: 6.8,
+  height: 0.95,
+  lipPitchBoostDeg: 12,
+  landingClearanceM: 24,
+};
+
 export const DEFAULT_RAMP: RampDef = {
   id: 'ski_ramp_standard',
   name: 'Powder Kicker Ramp',
   visual: {
     kind: 'procedural',
     preset: 'ramp',
-    palette: ['#e0f2fe', '#7dd3fc', '#f59e0b'],
+    palette: RAMP_SHARED_PALETTE,
     scale: 1.0,
+    variant: 'standard',
     outline: true,
   },
   width: 4.2,
   length: 6.5,
   height: 1.35,
   lipPitchBoostDeg: 18,
+  landingClearanceM: 28,
+};
+
+export const RAMP_STANDARD: RampDef = DEFAULT_RAMP;
+
+export const RAMP_STEEP: RampDef = {
+  id: 'ski_ramp_steep',
+  name: 'Big Air Steep Kicker',
+  visual: {
+    kind: 'procedural',
+    preset: 'ramp',
+    palette: RAMP_SHARED_PALETTE,
+    scale: 1.0,
+    variant: 'steep',
+    outline: true,
+  },
+  width: 4.0,
+  length: 6.0,
+  height: 2.25,
+  lipPitchBoostDeg: 25,
+  landingClearanceM: 48,
 };
 
 export const HAZARDS: Readonly<Record<string, HazardDef>> = {
@@ -95,7 +137,9 @@ export const HAZARDS: Readonly<Record<string, HazardDef>> = {
 };
 
 export const RAMPS: Readonly<Record<string, RampDef>> = {
+  [RAMP_GENTLE.id]: RAMP_GENTLE,
   [DEFAULT_RAMP.id]: DEFAULT_RAMP,
+  [RAMP_STEEP.id]: RAMP_STEEP,
 };
 
 export function getHazardDef(id: string): HazardDef | undefined {

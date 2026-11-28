@@ -134,87 +134,11 @@ export function buildPresentGeometry(
   return buildMergedColoredGeometry(parts, label, true);
 }
 
-/**
- * Builds a unit ski kicker ramp normalized to `x in [-0.5, 0.5]`, `y in [0, 1]`, `z in [-0.5, 0.5]`.
- * Entry sits at `+Z` (`+0.5`, height 0) and launch kicker lip rises along `-Z` forward (`-0.5`, height 1).
- */
-export function buildUnitRampGeometry(
-  palette: readonly string[],
-  label: string,
-): THREE.BufferGeometry {
-  const snowBody = new THREE.Color(palette[0] ?? '#e0f2fe');
-  const iceDeck = new THREE.Color(palette[1] ?? '#7dd3fc');
-  const chevron = new THREE.Color(palette[2] ?? '#f59e0b');
-
-  // Wedge vertices: entry at z = +0.5 (y = 0), lip at z = -0.5 (y = 1)
-  const hw = 0.5;
-  const hl = 0.5;
-
-  const p0: [number, number, number] = [-hw, 0, hl];  // back-left ground
-  const p1: [number, number, number] = [hw, 0, hl];   // back-right ground
-  const p2: [number, number, number] = [-hw, 0, -hl]; // front-left ground
-  const p3: [number, number, number] = [hw, 0, -hl];  // front-right ground
-  const p4: [number, number, number] = [-hw, 1, -hl]; // front-left lip
-  const p5: [number, number, number] = [hw, 1, -hl];  // front-right lip
-
-  const pos: number[] = [];
-  const col: number[] = [];
-
-  const pushTri = (
-    a: [number, number, number],
-    b: [number, number, number],
-    c: [number, number, number],
-    color: THREE.Color,
-  ): void => {
-    pos.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
-    col.push(color.r, color.g, color.b, color.r, color.g, color.b, color.r, color.g, color.b);
-  };
-
-  // Sloped top deck (CCW looking from above)
-  pushTri(p0, p1, p5, iceDeck);
-  pushTri(p0, p5, p4, iceDeck);
-
-  // Vertical front kicker wall at z = -0.5 facing -Z
-  pushTri(p2, p4, p5, snowBody);
-  pushTri(p2, p5, p3, snowBody);
-
-  // Left side wall (x = -0.5)
-  pushTri(p0, p4, p2, snowBody);
-
-  // Right side wall (x = +0.5)
-  pushTri(p1, p3, p5, snowBody);
-
-  // Bottom face
-  pushTri(p0, p2, p3, snowBody);
-  pushTri(p0, p3, p1, snowBody);
-
-  // Bright launch lip stripe bar right along the kicker edge
-  const lipStripe: [number, number, number][] = [
-    [-hw * 0.92, 0.88, -hl + 0.14],
-    [hw * 0.92, 0.88, -hl + 0.14],
-    [-hw * 0.92, 1.02, -hl],
-    [hw * 0.92, 1.02, -hl],
-  ];
-  pushTri(lipStripe[0]!, lipStripe[1]!, lipStripe[3]!, chevron);
-  pushTri(lipStripe[0]!, lipStripe[3]!, lipStripe[2]!, chevron);
-
-  const geo = new THREE.BufferGeometry();
-  geo.name = label;
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  geo.computeVertexNormals();
-  geo.computeBoundingBox();
-  geo.computeBoundingSphere();
-  computeSmoothNormals(geo);
-  return geo;
-}
-
 export interface ProceduralMeshAssets {
   readonly boulderSmallGeo: THREE.BufferGeometry;
   readonly boulderLargeGeo: THREE.BufferGeometry;
   readonly presentStdGeo: THREE.BufferGeometry;
   readonly presentGoldGeo: THREE.BufferGeometry;
-  readonly rampGeo: THREE.BufferGeometry;
   readonly cabinSmokeGeo: THREE.BufferGeometry;
 }
 
@@ -242,10 +166,6 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     true,
     'PresentGoldenGeo',
   );
-  const rampGeo = buildUnitRampGeometry(
-    ['#e0f2fe', '#7dd3fc', '#f59e0b'],
-    'SkiRampUnitGeo',
-  );
 
   const cabinSmokeGeo = buildChimneySmokeQuadGeometry('DeliveryCabinSmokeGeo');
 
@@ -254,7 +174,6 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     boulderLargeGeo,
     presentStdGeo,
     presentGoldGeo,
-    rampGeo,
     cabinSmokeGeo,
   ];
   for (const g of allGeos) {
@@ -266,7 +185,6 @@ export function createProceduralMeshAssets(gfx: GraphicsUtils): ProceduralMeshAs
     boulderLargeGeo,
     presentStdGeo,
     presentGoldGeo,
-    rampGeo,
     cabinSmokeGeo,
   };
 }

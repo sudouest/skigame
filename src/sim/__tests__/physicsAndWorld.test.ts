@@ -7,10 +7,16 @@ import {
   resolveChildSlotSpreadMultiplier,
 } from '../../content/visibilityTuning';
 import { getDeliveryZoneDef } from '../../content/deliveryZones';
+import { getHazardDef, getRampDef } from '../../content/hazards';
+import { getStageDef } from '../../content/stages';
+import type { StageDef } from '../../content/types';
 import { FIXED_DT } from '../../core/fixedLoop';
 import { CameraRig } from '../cameraRig';
 import { createMutablePlayerIntent, createSpineFrameOut, createSurfaceSample } from '../contracts';
+import { EntityPools } from '../entityPools';
+import { LayoutEngine } from '../layoutEngine';
 import { SkiSimulation } from '../skiSimulation';
+import { TrailSegment } from '../trailSegment';
 import { TrailWindow } from '../trailWindow';
 
 describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
@@ -217,7 +223,7 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     expect(sim).not.toBeNull();
     const state = sim!.getState();
     const ramps = state.entities.ramps;
-    expect(ramps.defIds[rampIdx]).toBe('ski_ramp_standard');
+    expect(getRampDef(ramps.defIds[rampIdx]!)).toBeDefined();
     expect(ramps.pitchRad[rampIdx]!).toBeLessThan(0);
 
     // Position skier just upstream of ramp entry aligned with ramp yaw
@@ -1316,5 +1322,129 @@ describe('SkiPhysics, Entities, Bear, Rebase & CameraRig', () => {
     expect(st.currSkier.posZ).toBeGreaterThan(sz - hd * 0.5);
 
     activeSim.dispose();
+  });
+
+  it('bakes variable ramp presets across all 5 stages, respects clearances/fallback, and protects delivery zones', () => {
+    const buildStraightSeg = (stage: StageDef, segId: number): TrailSegment =>
+      new TrailSegment({
+        id: segId,
+        slot: 'curr',
+        stage,
+        seed: segId * 131,
+        length: 300,
+        startPosX: 0,
+        startPosY: 0,
+        startPosZ: 0,
+        startYawRad: 0,
+        startPitchRad: -0.25,
+        startHalfWidth: stage.terrain.halfWidth[0],
+        endHalfWidth: stage.terrain.halfWidth[0],
+        prevSegmentId: null,
+        hasFork: false,
+        leftStageId: null,
+        rightStageId: null,
+        isForkChild: false,
+        forkSide: 'none',
+        seamWorldX: 0,
+        seamWorldY: -75,
+        seamWorldZ: -300,
+        seamYawRad: 0,
+      });
+
+    const bakeAndAuditStage = (stage: StageDef): Record<string, number> => {
+      const engine = new LayoutEngine(42);
+      const pools = new EntityPools();
+      const counts: Record<string, number> = {
+        ski_ramp_gentle: 0,
+        ski_ramp_standard: 0,
+        ski_ramp_steep: 0,
+      };
+      const frameStart = createSpineFrameOut();
+      const frameEnd = createSpineFrameOut();
+
+      for (let segId = 1; segId <= 120; segId++) {
+        pools.clear();
+        const seg = buildStraightSeg(stage, segId);
+        engine.bakeSegment(seg, pools, 0.2);
+
+        // Nearest-spine-sample projection (1 m steps) so curved spines map world XZ back to s
+        const sampleCount = Math.floor(seg.length) + 1;
+        const spineX = new Float64Array(sampleCount);
+        const spineZ = new Float64Array(sampleCount);
+        for (let k = 0; k < sampleCount; k++) {
+          seg.sampleSpineFrame(k, frameStart);
+          spineX[k] = frameStart.posX;
+          spineZ[k] = frameStart.posZ;
+        }
+        const projectS = (wx: number, wz: number): number => {
+          let best = 0;
+          let bestD = Infinity;
+          for (let k = 0; k < sampleCount; k++) {
+            const d = (wx - spineX[k]!) ** 2 + (wz - spineZ[k]!) ** 2;
+            if (d < bestD) {
+              bestD = d;
+              best = k;
+            }
+          }
+          return best;
+        };
+        const tol = 2.0; // projection resolution tolerance (m)
+
+        for (let r = 0; r < pools.ramps.count; r++) {
+          const id = pools.ramps.defIds[r]!;
+          counts[id] = (counts[id] ?? 0) + 1;
+
+          const rampS = projectS(pools.ramps.posX[r]!, pools.ramps.posZ[r]!);
+          // A ramp truly inside a crest window would have both tolerance probes inside it
+          expect(seg.isNearCrestPocket(rampS - 1.5) && seg.isNearCrestPocket(rampS + 1.5)).toBe(false);
+
+          const clearAfter = getRampDef(id)?.landingClearanceM ?? 28;
+          for (let d = 0; d < pools.deliveryZones.count; d++) {
+            const ds = projectS(pools.deliveryZones.posX[d]!, pools.deliveryZones.posZ[d]!);
+            const clearsDelivery = ds < rampS - 10 + tol || ds > rampS + clearAfter + 10 - tol;
+            expect(clearsDelivery).toBe(true);
+          }
+          for (let h = 0; h < pools.hazards.count; h++) {
+            const hDef = getHazardDef(pools.hazards.defIds[h]!);
+            if (!hDef?.lethal) continue;
+            const hs = projectS(pools.hazards.posX[h]!, pools.hazards.posZ[h]!);
+            const clearsHazard = hs < rampS - 4 + tol || hs > rampS + clearAfter - tol;
+            expect(clearsHazard).toBe(true);
+          }
+        }
+      }
+      return counts;
+    };
+
+    const stageIds = ['powder-bowl', 'sunny-blue', 'granite-gorge', 'icy-black', 'blizzard-ridge'] as const;
+    const byStage = new Map<string, Record<string, number>>();
+    for (const stageId of stageIds) {
+      const counts = bakeAndAuditStage(getStageDef(stageId)!);
+      const total =
+        counts.ski_ramp_gentle! + counts.ski_ramp_standard! + counts.ski_ramp_steep!;
+      expect(total).toBeGreaterThan(0);
+      byStage.set(stageId, counts);
+    }
+
+    const powderCounts = byStage.get('powder-bowl')!;
+    const icyCounts = byStage.get('icy-black')!;
+    const blizzardCounts = byStage.get('blizzard-ridge')!;
+
+    expect(powderCounts.ski_ramp_gentle!).toBeGreaterThan(powderCounts.ski_ramp_steep!);
+    expect(powderCounts.ski_ramp_gentle!).toBeGreaterThan(0);
+    expect(icyCounts.ski_ramp_steep!).toBeGreaterThan(icyCounts.ski_ramp_gentle!);
+    expect(blizzardCounts.ski_ramp_steep!).toBeGreaterThan(blizzardCounts.ski_ramp_gentle!);
+
+    // Stage without layout.ramps falls back cleanly to ski_ramp_standard
+    const sunnyBase = getStageDef('sunny-blue')!;
+    const fallbackStage: StageDef = {
+      ...sunnyBase,
+      terrain: { ...sunnyBase.terrain, rampChance: 1.0 },
+      layout: { ...sunnyBase.layout, ramps: undefined },
+    };
+    const fallbackCounts = bakeAndAuditStage(fallbackStage);
+    expect(fallbackCounts.ski_ramp_standard!).toBeGreaterThan(0);
+    expect(fallbackCounts.ski_ramp_gentle!).toBe(0);
+    expect(fallbackCounts.ski_ramp_steep!).toBe(0);
   });
 });

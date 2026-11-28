@@ -19,6 +19,7 @@ import {
   type PlacementBand,
   type StageCreatureRule,
   type StageDeliveryRule,
+  type StageRampRule,
   type StageSpawnRule,
 } from '../content/types';
 import {
@@ -211,12 +212,22 @@ export class LayoutEngine {
       }
     }
 
-    // 2. Explicit Playable Ski Ramps
-    const rampDef = getRampDef('ski_ramp_standard');
-    if (rampDef && maxHazardS > minContentS + 40) {
+    // 2. Explicit Playable Ski Ramps (weighted by stage difficulty)
+    const rampRules = segment.stage.layout.ramps;
+    const fallbackRampDef = getRampDef('ski_ramp_standard');
+    if (((rampRules && rampRules.length > 0) || fallbackRampDef) && maxHazardS > minContentS + 40) {
       const rampSlotSpan = 75;
       for (let slotS = minContentS + 24; slotS < maxHazardS - 32; slotS += rampSlotSpan) {
         if (!segRng.nextBool(segment.stage.terrain.rampChance)) continue;
+        const rampVariantRng = segRng.fork(`ramp_var_${segment.id}_${Math.round(slotS)}`);
+        const rampRule =
+          rampRules && rampRules.length > 0
+            ? this.pickWeightedRampRule(rampRules, rampVariantRng)
+            : undefined;
+        const rampDef =
+          (rampRule ? getRampDef(rampRule.rampId) : undefined) ?? fallbackRampDef;
+        if (!rampDef) continue;
+
         const s = clamp(slotS + segRng.nextRange(-10, 10), minContentS + 10, maxHazardS - 30);
         segment.sampleSpineFrame(s, this.scratchFrame);
         const safeX = segment.sampleSafeX(s);
@@ -226,6 +237,9 @@ export class LayoutEngine {
           this.scratchFrame.halfWidth - 3.5,
         );
         if (Math.abs(x) < this.scratchFrame.dividerHalfWidth + 2.5) continue;
+        if (segment.isNearCrestPocket(s)) continue;
+        const clearAfterM = rampDef.landingClearanceM ?? 28;
+        if (this.overlapsDeliveryWindow(s - 10, s + clearAfterM + 10)) continue;
 
         this.samplePlacementSurface(segment, s, x, mountainField);
         if (
@@ -257,7 +271,7 @@ export class LayoutEngine {
             this.scratchPlacement.posZ,
             8,
           );
-          this.rampWindows.push({ startS: s - 4, endS: s + 28 });
+          this.rampWindows.push({ startS: s - 4, endS: s + clearAfterM });
           rampCount++;
         }
       }
@@ -768,6 +782,14 @@ export class LayoutEngine {
     }
   }
 
+  private overlapsDeliveryWindow(startS: number, endS: number): boolean {
+    for (let i = 0; i < this.deliverySBuffer.length; i++) {
+      const ds = this.deliverySBuffer[i]!;
+      if (ds >= startS && ds <= endS) return true;
+    }
+    return false;
+  }
+
   private isInsideRampWindow(s: number): boolean {
     for (let i = 0; i < this.rampWindows.length; i++) {
       const rw = this.rampWindows[i]!;
@@ -794,6 +816,13 @@ export class LayoutEngine {
     rules: readonly StageCreatureRule[],
     rng: SeededRng,
   ): StageCreatureRule | undefined {
+    return rng.pickWeighted(rules, (r) => r.weight);
+  }
+
+  private pickWeightedRampRule(
+    rules: readonly StageRampRule[],
+    rng: SeededRng,
+  ): StageRampRule | undefined {
     return rng.pickWeighted(rules, (r) => r.weight);
   }
 }

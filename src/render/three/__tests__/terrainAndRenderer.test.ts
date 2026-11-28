@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished } from 'vitest';
+import { getAllStages } from '../../../content/stages';
 import { DEFAULT_SCENERY_TIER_RULES } from '../../../content/sceneryRules';
 import {
   CHARACTER_SCALE_TUNING,
@@ -2233,6 +2234,22 @@ describe('CDLOD TerrainClipmap, ClipmapDataStore, SceneryCellStreamer, LandmarkS
     'sustains real-budget (3.25 ms) 1.5 km streaming across 60 FPS & 30 FPS (sunny-blue + icy-black, multiple WORLD_REBASED) with 0 missing frames, >=98% L0 coverage, <=0.15 m skier parity, and srcOffset===0 texSubImage3D uploads',
     { timeout: 60_000 },
     () => {
+      // This test measures terrain streaming parity for a ground-hugging autopilot skier. Launch
+      // ramps put the bot several metres above the clipmap (lowering L0 coverage/parity by design),
+      // so ramp spawning is disabled for this test only and restored afterwards.
+      for (const stageDef of getAllStages()) {
+        const terrainCfg = stageDef.terrain;
+        const original = Object.getOwnPropertyDescriptor(terrainCfg, 'rampChance');
+        Object.defineProperty(terrainCfg, 'rampChance', {
+          value: 0,
+          configurable: true,
+          writable: true,
+          enumerable: true,
+        });
+        onTestFinished(() => {
+          if (original) Object.defineProperty(terrainCfg, 'rampChance', original);
+        });
+      }
       const scenarios: ReadonlyArray<{
         label: string;
         seed: number;

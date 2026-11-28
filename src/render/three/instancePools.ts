@@ -14,6 +14,7 @@ import { FIXED_DT } from '../../core/fixedLoop';
 import { clamp, lerp, lerpAngle } from '../../core/math';
 import { hashCoords2DU32 } from '../../core/rng';
 import type { ReadonlySimState } from '../../sim/contracts';
+import { MAX_RAMPS } from '../../sim/entityPools';
 import {
   CHARACTER_ATLAS_FRAMES,
   CHILD_SPRITE_BASE_HEIGHT_M,
@@ -21,6 +22,13 @@ import {
 } from './characterSpriteAtlas';
 import type { GraphicsUtils } from './graphicsUtils';
 import type { ProceduralMeshAssets } from './meshFactory';
+import {
+  createSkiRampAssets,
+  resolveSkiRampVariant,
+  SKI_RAMP_VARIANT_DIMS,
+  type SkiRampAssets,
+  type SkiRampVariant,
+} from './models/skiRampModel';
 import {
   CHILD_SLOT_SPREAD_M,
   computeDeliveryChildPosition,
@@ -47,7 +55,6 @@ const MAX_BOULDERS_SMALL = 128;
 const MAX_BOULDERS_LARGE = 96;
 const MAX_PRESENTS_STD = 192;
 const MAX_PRESENTS_GOLD = 96;
-const MAX_RAMPS = 48;
 const MAX_DYNAMIC_BILLBOARDS = 256;
 export const MAX_CHARACTER_BILLBOARDS = 128;
 export const MAX_STATIC_BILLBOARDS = 4096;
@@ -128,6 +135,16 @@ function writeUvRect(
   }
 }
 
+interface RampPoolTriplet {
+  readonly body: THREE.InstancedMesh;
+  readonly outline: THREE.InstancedMesh;
+  readonly glow: THREE.InstancedMesh;
+  readonly baseW: number;
+  readonly baseH: number;
+  readonly baseL: number;
+  count: number;
+}
+
 /**
  * Contiguously packed GPU InstancedMesh pools (`frustumCulled = false`) for 3D props,
  * selective smooth-normal inverted-hull outlines, and 2.5D cylindrical billboards.
@@ -144,8 +161,8 @@ export class InstancePools {
   private readonly presentStdOutline: THREE.InstancedMesh;
   private readonly presentGold: THREE.InstancedMesh;
   private readonly presentGoldOutline: THREE.InstancedMesh;
-  private readonly rampMesh: THREE.InstancedMesh;
-  private readonly rampOutlineMesh: THREE.InstancedMesh;
+  private readonly rampPools: Readonly<Record<SkiRampVariant, RampPoolTriplet>>;
+  private readonly rampPoolList: readonly RampPoolTriplet[];
 
   private readonly dynamicBillboards: BillboardMeshWrapper;
   private readonly characterBillboards: BillboardMeshWrapper;
@@ -187,6 +204,7 @@ export class InstancePools {
     assets: ProceduralMeshAssets,
     characterBillboardMat?: THREE.Material,
     scaleTuning: CharacterScaleTuning = CHARACTER_SCALE_TUNING,
+    rampAssets?: SkiRampAssets,
   ) {
     this.scaleTuning = scaleTuning;
     this.rootGroup = new THREE.Group();
@@ -229,11 +247,62 @@ export class InstancePools {
       MAX_PRESENTS_GOLD,
       'PresentGoldPool',
     );
-    [this.rampMesh, this.rampOutlineMesh] = makeOutlinedPair(
-      assets.rampGeo,
-      MAX_RAMPS,
-      'RampPool',
-    );
+
+    const resolvedRampAssets = rampAssets ?? createSkiRampAssets(gfx, materials);
+    const makeRampTriplet = (variant: SkiRampVariant, baseName: string): RampPoolTriplet => {
+      const geos = resolvedRampAssets.variants[variant];
+      const dims = SKI_RAMP_VARIANT_DIMS[variant];
+      const body = gfx.createInstancedMesh(
+        geos.bodyGeo,
+        resolvedRampAssets.toonMaterial,
+        MAX_RAMPS,
+        baseName,
+      );
+      body.frustumCulled = false;
+      body.castShadow = true;
+      body.receiveShadow = false;
+      body.count = 0;
+
+      const outline = gfx.createInstancedMesh(
+        geos.bodyGeo,
+        outlineMat,
+        MAX_RAMPS,
+        `${baseName}_Outline`,
+      );
+      outline.frustumCulled = false;
+      outline.castShadow = false;
+      outline.receiveShadow = false;
+      outline.count = 0;
+
+      const glow = gfx.createInstancedMesh(
+        geos.glowGeo,
+        resolvedRampAssets.glowMaterial,
+        MAX_RAMPS,
+        `${baseName}_Glow`,
+      );
+      glow.frustumCulled = false;
+      glow.castShadow = false;
+      glow.receiveShadow = false;
+      glow.count = 0;
+
+      this.rootGroup.add(body, outline, glow);
+      return {
+        body,
+        outline,
+        glow,
+        baseW: dims.width,
+        baseH: dims.height,
+        baseL: dims.length,
+        count: 0,
+      };
+    };
+
+    this.rampPools = {
+      gentle: makeRampTriplet('gentle', 'RampGentlePool'),
+      standard: makeRampTriplet('standard', 'RampPool'),
+      steep: makeRampTriplet('steep', 'RampSteepPool'),
+    };
+    this.rampPoolList = [this.rampPools.gentle, this.rampPools.standard, this.rampPools.steep];
 
     this.dynamicBillboards = createBillboardPoolMesh(
       gfx,
@@ -408,30 +477,53 @@ export class InstancePools {
       this.presentGoldOutline.instanceMatrix.needsUpdate = true;
     }
 
-    // 3. Ski Ramps (pitched by RampPoolView.pitchRad in Euler 'YXZ')
+    // 3. Ski Ramps (routed by preset variant with 1:1 canonical geometry & pitched in Euler 'YXZ')
+    const gentlePool = this.rampPools.gentle;
+    const standardPool = this.rampPools.standard;
+    const steepPool = this.rampPools.steep;
+    gentlePool.count = 0;
+    standardPool.count = 0;
+    steepPool.count = 0;
+
     const ramps = simState.entities.ramps;
-    let rampCount = 0;
-    for (let i = 0; i < ramps.count && rampCount < MAX_RAMPS; i++) {
-      const def = getRampDef(ramps.defIds[i]!);
-      const w = ramps.width[i]! > 0 ? ramps.width[i]! : (def?.width ?? 4.2);
-      const h = ramps.height[i]! > 0 ? ramps.height[i]! : (def?.height ?? 1.35);
-      const l = ramps.length[i]! > 0 ? ramps.length[i]! : (def?.length ?? 6.5);
+    const rampLimit = Math.min(ramps.count, MAX_RAMPS);
+    for (let i = 0; i < rampLimit; i++) {
+      const defId = ramps.defIds[i]!;
+      const def = getRampDef(defId);
+      const variant = resolveSkiRampVariant(defId);
+      const pool =
+        variant === 'gentle'
+          ? gentlePool
+          : variant === 'steep'
+            ? steepPool
+            : standardPool;
+
+      const w = ramps.width[i]! > 0 ? ramps.width[i]! : (def?.width ?? pool.baseW);
+      const h = ramps.height[i]! > 0 ? ramps.height[i]! : (def?.height ?? pool.baseH);
+      const l = ramps.length[i]! > 0 ? ramps.length[i]! : (def?.length ?? pool.baseL);
 
       _pos.set(ramps.posX[i]!, ramps.posY[i]!, ramps.posZ[i]!);
       _euler.set(ramps.pitchRad[i]!, ramps.yawRad[i]!, 0, 'YXZ');
       _quat.setFromEuler(_euler);
-      _scale.set(w, h, l);
+      _scale.set(w / pool.baseW, h / pool.baseH, l / pool.baseL);
       _mat4.compose(_pos, _quat, _scale);
 
-      this.rampMesh.setMatrixAt(rampCount, _mat4);
-      this.rampOutlineMesh.setMatrixAt(rampCount, _mat4);
-      rampCount++;
+      const dst = pool.count++;
+      pool.body.setMatrixAt(dst, _mat4);
+      pool.outline.setMatrixAt(dst, _mat4);
+      pool.glow.setMatrixAt(dst, _mat4);
     }
-    this.rampMesh.count = rampCount;
-    this.rampOutlineMesh.count = rampCount;
-    if (rampCount > 0) {
-      this.rampMesh.instanceMatrix.needsUpdate = true;
-      this.rampOutlineMesh.instanceMatrix.needsUpdate = true;
+
+    for (let p = 0; p < this.rampPoolList.length; p++) {
+      const pool = this.rampPoolList[p]!;
+      pool.body.count = pool.count;
+      pool.outline.count = pool.count;
+      pool.glow.count = pool.count;
+      if (pool.count > 0) {
+        pool.body.instanceMatrix.needsUpdate = true;
+        pool.outline.instanceMatrix.needsUpdate = true;
+        pool.glow.instanceMatrix.needsUpdate = true;
+      }
     }
 
     this.dynamicBillboards.mesh.count = dynBbCount;

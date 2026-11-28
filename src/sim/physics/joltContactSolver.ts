@@ -1823,8 +1823,9 @@ export class JoltContactSolver implements WorldContactSolver {
       tv.Set(x, y, z);
       hullSettings.mPoints.push_back(tv);
     };
-    const leadZ = hl + 0.55;
-    const leadY = -0.18;
+    const deckSlope = height / Math.max(1e-4, length);
+    const leadZ = hl + 0.65;
+    const leadY = -Math.min(0.18, 0.65 * deckSlope);
     push(-hw, leadY, leadZ);
     push(hw, leadY, leadZ);
     push(-hw, 0, hl);

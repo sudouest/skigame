@@ -794,6 +794,166 @@ describe('Jolt Physics WASM (M3) — Zero-Leak, 3D Dynamics, Ramps, Crests & Sol
     } finally {
       icySolver.dispose();
     }
+
+    // 6. Variable ramp angles: Gentle < Standard < Steep peak airtime at 22 m/s,
+    //    plus high-speed (33 m/s) icy-black Steep ramp + player jump lands without self-wipeout!
+    const runRampPreset = (
+      rampDef: { id: string; width: number; length: number; height: number; lipPitchBoostDeg: number },
+      speedMps: number,
+      slopeDeg: number,
+      jumpOnLip: boolean,
+      startX = 0,
+      headingOffsetRad = 0,
+    ): { maxAir: number; launched: boolean; wipeout: boolean; landed: boolean } => {
+      const pRad = -degToRad(slopeDeg);
+      const pTan = Math.tan(degToRad(slopeDeg));
+      const harness = createAnalyticHarness({
+        heightAt: (_x, z) => z * pTan,
+        surfaceTypeAt: () => 'packed',
+        onPisteAt: () => true,
+      });
+      const rPools = new EntityPools();
+      rPools.ramps.add(
+        rampDef.id,
+        1,
+        0,
+        -10 * pTan,
+        -10,
+        0,
+        pRad,
+        rampDef.width,
+        rampDef.length,
+        rampDef.height,
+        rampDef.lipPitchBoostDeg,
+      );
+      const rSolver = new JoltContactSolver(runtime);
+      const rPhysics = new SkiPhysics();
+      const rPose = createMutableSkierPose();
+      const rSurf = createSurfaceSample();
+      const rOutcome = createPhysicsStepOutcome();
+      const rIntent = createMutablePlayerIntent();
+      const rCtx: PhysicsStepContext = {
+        skierDef,
+        surfaceQuery: harness.surfaceQuery,
+        terrain: harness.terrain,
+        pools: rPools,
+        contactSolver: rSolver,
+        forkBumper: null,
+        surface: rSurf,
+        ramps: rPools.ramps,
+        skiTracks: rPools.skiTracks,
+        invulnerable: false,
+      };
+      try {
+        rPose.posX = startX;
+        rPose.posZ = startX !== 0 ? -6.2 : -3.0;
+        rPose.posY = rPose.posZ * pTan;
+        rPose.headingRad = headingOffsetRad;
+        const sinH = Math.sin(headingOffsetRad);
+        const cosH = Math.cos(headingOffsetRad);
+        rPose.velX = -speedMps * sinH * Math.cos(pRad);
+        rPose.velY = speedMps * Math.sin(pRad);
+        rPose.velZ = -speedMps * cosH * Math.cos(pRad);
+        rPose.grounded = true;
+
+        let maxAir = 0;
+        let launched = false;
+        let wipeout = false;
+        let landed = false;
+        let didJump = false;
+        let postLaunchAirTicks = 0;
+        for (let t = 0; t < 240; t++) {
+          rIntent.jumpPressed = jumpOnLip && !didJump && rPose.posZ < -10.5 && rPose.posZ > -12.8;
+          if (rIntent.jumpPressed) didJump = true;
+          rPhysics.stepSkiing(FIXED_DT, rIntent, rPose, rCtx, rOutcome);
+          if (rOutcome.rampLaunched) launched = true;
+          if (rOutcome.landingImpactKind === 'hard_landing_wipeout') wipeout = true;
+          const clr = rPose.posY - rPose.groundY;
+          if (clr > maxAir) maxAir = clr;
+          if ((launched || didJump) && !rPose.grounded) {
+            postLaunchAirTicks++;
+          } else if (postLaunchAirTicks >= 3 && rPose.grounded) {
+            landed = true;
+            break;
+          }
+        }
+        return { maxAir, launched, wipeout, landed };
+      } finally {
+        rSolver.dispose();
+      }
+    };
+
+    const gentleRun = runRampPreset(
+      { id: 'ski_ramp_gentle', width: 4.4, length: 6.8, height: 0.95, lipPitchBoostDeg: 12 },
+      22,
+      14,
+      false,
+    );
+    const standardRun = runRampPreset(
+      { id: 'ski_ramp_standard', width: 4.2, length: 6.5, height: 1.35, lipPitchBoostDeg: 18 },
+      22,
+      14,
+      false,
+    );
+    const steepRun = runRampPreset(
+      { id: 'ski_ramp_steep', width: 4.0, length: 6.0, height: 2.25, lipPitchBoostDeg: 25 },
+      22,
+      14,
+      false,
+    );
+    expect(gentleRun.launched).toBe(true);
+    expect(standardRun.launched).toBe(true);
+    expect(steepRun.launched).toBe(true);
+    expect(gentleRun.maxAir).toBeLessThan(standardRun.maxAir);
+    expect(standardRun.maxAir).toBeLessThan(steepRun.maxAir);
+
+    // Natural high-speed (33 m/s, 28 deg, no jump) lip launches preserve hierarchy without self-wipeout
+    const gentleHigh = runRampPreset(
+      { id: 'ski_ramp_gentle', width: 4.4, length: 6.8, height: 0.95, lipPitchBoostDeg: 12 },
+      33,
+      28,
+      false,
+    );
+    const standardHigh = runRampPreset(
+      { id: 'ski_ramp_standard', width: 4.2, length: 6.5, height: 1.35, lipPitchBoostDeg: 18 },
+      33,
+      28,
+      false,
+    );
+    const steepHigh = runRampPreset(
+      { id: 'ski_ramp_steep', width: 4.0, length: 6.0, height: 2.25, lipPitchBoostDeg: 25 },
+      33,
+      28,
+      false,
+    );
+    expect(gentleHigh.launched).toBe(true);
+    expect(standardHigh.launched).toBe(true);
+    expect(steepHigh.launched).toBe(true);
+    expect(gentleHigh.maxAir).toBeLessThan(standardHigh.maxAir);
+    expect(standardHigh.maxAir).toBeLessThan(steepHigh.maxAir);
+    expect(steepHigh.landed).toBe(true);
+    expect(steepHigh.wipeout).toBe(false);
+
+    // Side-rail exit on front deck of steep ramp must not fire full kicker launch
+    const sideExit = runRampPreset(
+      { id: 'ski_ramp_steep', width: 4.0, length: 6.0, height: 2.25, lipPitchBoostDeg: 25 },
+      18,
+      14,
+      false,
+      1.0,
+      -0.35,
+    );
+    expect(sideExit.launched).toBe(false);
+
+    const icySteepJump = runRampPreset(
+      { id: 'ski_ramp_steep', width: 4.0, length: 6.0, height: 2.25, lipPitchBoostDeg: 25 },
+      33,
+      28,
+      true,
+    );
+    expect(icySteepJump.maxAir).toBeGreaterThan(3.0);
+    expect(icySteepJump.landed).toBe(true);
+    expect(icySteepJump.wipeout).toBe(false);
   });
 
   it('detaches unconditionally over steep convex crests at slow speed (< 13 m/s) and deflects solid 3D wipeout tumbles off boulders', () => {
